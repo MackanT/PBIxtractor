@@ -1935,8 +1935,8 @@ if __name__ == "__main__":
             yes_man = False
             SAVE_NAME = _file_
             
-        _PBIX_ = [_file_, 'C:\\Users\\MarcusToftås\\OneDrive - Random Forest AB\\Dokument\\_Arbete\\Rowico\\Rowico Home Data Cloud\\Reports']
-        _BIM_ = [_file_, 'C:\\Users\\MarcusToftås\\OneDrive - Random Forest AB\\Dokument\\Other\\PowerBIConverter']
+        _PBIX_ = [_file_, 'C:\\Users']
+        _BIM_ = [_file_, 'C:\\Users']
 
         run_cmd()
 
