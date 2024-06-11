@@ -1823,37 +1823,34 @@ def is_excel_open_with_file(file_path: str) -> bool:
     worksheet = workbook.add_worksheet(f"{_PBIX_[0]} Common")
 
     # Add column formatting.
-    def_format = workbook.add_format({'align': 'top', 'text_wrap': True})
-    # def_format.set_align("top")
-    # def_format.set_text_wrap()
-    wrap_format = workbook.add_format({'text_wrap': True})
-    # wrap_format.set_text_wrap()
+    def_format = workbook.add_format({"align": "top", "text_wrap": True})
+    wrap_format = workbook.add_format({"text_wrap": True})
     worksheet.set_column(0, len(new_data), 30, wrap_format)
     worksheet.set_column(definition_index, definition_index, 100, def_format)
     worksheet.set_column(definition_index + 1, definition_index + 1, 30, wrap_format)
     worksheet.set_column(parent_index, parent_index, 50, wrap_format)
-    
-    def get_workbook_format(index:int):
-        return workbook.add_format({"color": rgba_tuple_to_hex(default_colors[index][1])})
 
+    def get_workbook_format(index: int):
+        return workbook.add_format(
+            {"color": rgba_tuple_to_hex(default_colors[index][1])}
+        )
+
+    paranthesis_color = ["#0433fa", "#319331", "#7b3831"]
     formats = {
         "function": get_workbook_format(0),
         "measure": get_workbook_format(1),
         "return": get_workbook_format(2),
-        "varname": get_workbook_format(3),   
+        "varname": get_workbook_format(3),
         "comment": get_workbook_format(4),
-        "bracket": get_workbook_format(5),
-        "quote": get_workbook_format(6),
-        "var": get_workbook_format(7),
+        "quote": get_workbook_format(5),
+        "var": get_workbook_format(6),
         "bold": workbook.add_format({"bold": True}),
         "italic": workbook.add_format({"italic": True}),
-        "bi": workbook.add_format({"bold": True, "italic": True})
+        "bi": workbook.add_format({"bold": True, "italic": True}),
+        "para": [
+            workbook.add_format({"color": color}) for color in paranthesis_color * 3
+        ],
     }
-
-    paranthesis_color = ["#0433fa", "#319331", "#7b3831"]
-
-    # Create fColor list using a loop
-    fColor = [workbook.add_format({"color": color}) for color in paranthesis_color * 3]
 
     ## Print Relation Section
     num_relations = len(df_relations)
