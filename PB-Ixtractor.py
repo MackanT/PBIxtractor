@@ -1117,8 +1117,9 @@ def run_ui():
         
     with dpg.texture_registry(show=False):
         width, height, channels, data = dpg.load_image("logo_large.png")
-        dpg.add_static_texture(width=width, height=height, default_value=data, tag="logo_texture")
-
+        dpg.add_static_texture(
+            width=width, height=height, default_value=data, tag="logo_texture"
+        )
 
     with dpg.window(label="PB-Ixtractor", width=1000, height=800):
         with dpg.collapsing_header(label="PB-Ixtractor"):
@@ -1292,7 +1293,9 @@ def run_ui():
         disable_buttons()
 
     # Window
-    dpg.create_viewport(title="PB-Ixtractor", width=1000, height=800, large_icon='logo.ico')
+    dpg.create_viewport(
+        title="PB-Ixtractor", width=1000, height=800, large_icon="logo.ico"
+    )
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.start_dearpygui()
