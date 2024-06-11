@@ -15,6 +15,7 @@ from pathlib import Path
 import networkx as nx
 from matplotlib import pyplot as plt
 import matplotlib
+import threading
 import inspect
 
 matplotlib.use("agg")
@@ -812,7 +813,7 @@ def rgba_tuple_to_hex(color):
 
 def run_ui():
     import dearpygui.dearpygui as dpg
-    from tkinter import filedialog, messagebox
+    from tkinter import filedialog
 
     dpg.create_context()
     
@@ -823,14 +824,45 @@ def run_ui():
         'W': (255, 255, 255),
         "O": (255, 1543, 51),
     }
+    
+    def show_and_hide(tag:str, msg:str, type:str = None):
+        
+        dpg.configure_item(tag, color = colors[type], show=True)
+        dpg.set_value(tag, msg)
+        threading.Thread(target=lambda: wait_and_show(tag)).start()
+
+    def wait_and_show(tag:str):
+        time.sleep(8)
+        dpg.hide_item(tag)
+        
+    def progress_bar(tag:str):
+        threading.Thread(target=lambda: increment_loader(tag)).start()
+        
+    def increment_loader(tag:str):
+        
+        dpg.configure_item(tag, color=colors['W'])
+        i = 0
+        while not stop_event.is_set():
+            time.sleep(0.2)
+            dpg.show_item(tag)
+            dpg.set_value(tag, '.'*i)
+            i = (i + 1) % 16
+        
     def run_extractor():
+        global stop_event
         if _PBIX_ != [None, None] and _BIM_ != [None, None]:
+            stop_event = threading.Event()
+            progress_bar('runText')
+            run_code = run_cmd()
+            stop_event.set()
+            time.sleep(0.5)
+            if run_code == "Log":
+                show_and_hide('runText', f"Documention generated with warnings. See /{SAVE_NAME}/logs", 'Y')
                 update_log()
+            elif run_code != "Success":
+                show_and_hide('runText', run_code, 'R')
             else:
-                messagebox.showinfo(
-                        "Success",
-                        f"Documentation generated without any issues: {cwd}/{SAVE_NAME}/{SAVE_NAME}.xlsx",
-                    )
+                show_and_hide('runText', f"Documentation generated without any issues. See: /{SAVE_NAME}/{SAVE_NAME}.xlsx", 'G')
 
     def update_log():
         global REPORT_LOG
@@ -858,24 +890,30 @@ def run_ui():
         
 
     def disable_buttons():
-        for tag in ['runPBIX', 'genTSV']:
+        for tag in ["runPBIX", "genTSV"]:
             dpg.configure_item(tag, enabled=False, show=False)
-        dpg.configure_item('tsvText', show=False)
+        for tag in ["tsvText"]:
+            dpg.configure_item(tag, show=False)
 
     def enable_buttons():
-        for tag in ['runPBIX', 'genTSV']:
+        for tag in ["runPBIX", "genTSV"]:
             dpg.configure_item(tag, enabled=True, show=True)
-        dpg.configure_item('tsvText', show=True)
-
-                
+        for tag in ["tsvText"]:
+            dpg.configure_item(tag, show=True)
 
     def generate_tsv():
+        global stop_event
         if _PBIX_ != [None, None] and _BIM_ != [None, None]:
-            gen_tsv(force=True)
-        messagebox.showinfo(
-            "Success",
-            f"TSV file and C# script have been generated in: {cwd}/{SAVE_NAME}/",
-        )
+            stop_event = threading.Event()
+            progress_bar('tsvTextExtra')
+            tsv_result = gen_tsv(force=True)
+            stop_event.set()
+            time.sleep(0.5)
+            if tsv_result == 'NoTabEd':
+                show_and_hide('tsvTextExtra', 'Could Not Find Tabular Editor 2 on PC. Please add location in Input/TabularEditorLocations.txt', 'R')
+            else:
+                show_and_hide('tsvTextExtra', 'TSV File generated successfully!', 'G')
+
 
     ### UI Functions ###
     def load_file(input):
@@ -907,10 +945,6 @@ def run_ui():
                 bim_file_path = pbix_file_path[:-4] + "bim"
                 dpg.configure_item("bim_file_path_label", show=True)
                 if not os.path.exists(bim_file_path):
-                    messagebox.showwarning(
-                        "Warning!",
-                        "No .bim file found in the same folder as the pbix file. Please select .bim file manually!",
-                    )
                     dpg.configure_item("BimSelector", show=True, enabled=True)
                     dpg.set_value("bim_file_path_label", 'Selected File: None')
                     _BIM_ = [None, None]
@@ -958,7 +992,7 @@ def run_ui():
                     bim_file_path[bim_file_path.rfind("/") + 1 : -4],
                     bim_file_path[: bim_file_path.rfind("/")],
                 ]
-            
+
             if bim_file_path and pbix_file_path:
                 enable_buttons()
 
@@ -1054,7 +1088,7 @@ def run_ui():
                 callback=set_measure_table_name,
                 tag="defMeasTable",
                 show=False,
-                enabled=False
+                enabled=False,
             )
 
             dpg.add_spacer(height=2)
