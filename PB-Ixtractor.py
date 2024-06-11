@@ -5,6 +5,7 @@ import sys
 import re
 import xlsxwriter
 import time
+import psutil
 
 import json
 from zipfile import ZipFile
@@ -1273,10 +1274,21 @@ def run_ui():
         dpg.add_spacer(height=10)
         dpg.add_button(label="Regenerate tsv file", tag="genTSV", callback=generate_tsv)
         dpg.add_text(
-            "To properly extract data types for measures, ensure the .pbix file is open in PBI desktop!", tag='tsvText'
+            "To properly extract data types for measures, ensure the .pbix file is open in PBI desktop!",
+            tag="tsvText",
+        )
+        dpg.add_text(
+            "",
+            show=False,
+            tag="tsvTextExtra",
         )
         dpg.add_spacer(height=10)
-        dpg.add_button(label="Run PB-Ixtractor", tag='runPBIX', callback=run_extractor)
+        dpg.add_button(label="Run PB-Ixtractor", tag="runPBIX", callback=run_extractor)
+        dpg.add_text(
+            "",
+            show=False,
+            tag="runText",
+        )
         disable_buttons()
 
     # Window
@@ -1286,28 +1298,34 @@ def run_ui():
     dpg.start_dearpygui()
     dpg.destroy_context()
 
-    ##### TODO:
-    # Option for setting tab depth in final output
-    # Additional indicators on what colors effect what words
-    #
-    #####
 
-
-def gen_tsv(force:bool=False):
-    
-    cwd = os.getcwd() + f'\\{_PBIX_[0]}'
+def gen_tsv(force: bool = False):
+    cwd = os.getcwd() + f"\\{SAVE_NAME}"
     
     if not os.path.exists(cwd):
         os.makedirs(cwd)
 
     def find_tabular_editor_path() -> str:
         target_exe = Path("TabularEditor.exe")
+        
+        input_dir = os.getcwd() + '\\Input\\TabularEditorLocations.txt'
 
         # Default directories to search
-        common_directories = [
-            Path("C:\\Program Files"),
-            Path("C:\\Program Files (x86)"),
-        ]
+        if not os.path.exists(input_dir):
+            common_directories = [
+                "C:\\Program Files",
+                "C:\\Program Files (x86)",
+            ]
+            with open(input_dir, 'w') as file:
+                for string in common_directories:
+                    file.write(string + '\n')
+        else:
+            
+            with open(input_dir, 'r') as file:
+                common_directories = file.readlines()
+
+            for i, row in enumerate(common_directories):
+                common_directories[i] = Path(row.replace('\n', ''))
 
         for directory in common_directories:
             target_path = directory / "Tabular Editor" / target_exe
@@ -1321,12 +1339,9 @@ def gen_tsv(force:bool=False):
 
     tab_edit_path = find_tabular_editor_path()
     if tab_edit_path is None:
-        print(
-            "Cannot find Tabular Editor on computer! Please edit common directories to include folder with file"
-        )
-        exit(0)
+        return 'NoTabEd'
 
-    if force:
+    if force and os.path.exists(f"{cwd}\\TabularScript.cs"):
         os.remove(f"{cwd}\\TabularScript.cs")
 
     ## If file not present, create it!
