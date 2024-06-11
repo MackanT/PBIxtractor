@@ -30,10 +30,9 @@ DESCRIPT_TAG = "////"
 default_colors = [
     ["Functions", (49, 101, 187, 255)],
     ["Measures", (0, 16, 128, 255)],
-    ["Basics", (24, 0, 255, 255)],
+    ["Return", (24, 0, 255, 255)],
     ["Variables", (9, 134, 88, 255)],
     ["Comments", (8, 128, 15, 255)],
-    ["Brackets", (111, 52, 156, 255)],
     ["Quotes", (163, 21, 21, 255)],
     ["VarNames", (0, 15, 255, 255)],
 ]
@@ -816,9 +815,14 @@ def run_ui():
     from tkinter import filedialog, messagebox
 
     dpg.create_context()
-
-    measure_description_indicator = "////"
-
+    
+    colors = {
+        'G': (102, 204, 102),
+        'R': (255, 77, 77),
+        'Y': (255, 255, 102),
+        'W': (255, 255, 255),
+        "O": (255, 1543, 51),
+    }
     def run_extractor():
         if _PBIX_ != [None, None] and _BIM_ != [None, None]:
                 update_log()
@@ -971,7 +975,9 @@ def run_ui():
         DESCRIPT_TAG = dpg.get_value("descriptionTag")
 
     def find_color(name):
+        global default_colors
         old_color = None
+        name = name.split(' ')[0]
         for i, color in enumerate(default_colors):
             if color[0] == name:
                 old_color = color[1]
@@ -1077,6 +1083,31 @@ def run_ui():
             dpg.add_checkbox(label='Enable Error Logging', callback=toggle_log_toggle, tag='log_toggle', default_value=True)
             dpg.add_spacer(height=5)
             
+            with dpg.group(horizontal=True):
+                dpg.add_color_picker(
+                    default_value=(49, 101, 187, 255),
+                    label="Selected Color",
+                    tag="colorWheel",
+                    width=200,
+                    height=200,
+                    callback=update_colors,
+                )
+                dpg.add_spacer(width=20)
+                dpg.add_radio_button(
+                    label="Color Types",
+                    items=[
+                        "Functions - Misc PBI Functions. See Input/FunctionNames.csv.",
+                        "Measures - User Created Measures and Default Columns.",
+                        "Return - The return statement.",
+                        "Variables - User-Defined Variables Within a Measure.",
+                        "Comments - Comments in Measures.",
+                        "Quotes - Quoted Text in Measures.",
+                        "VarNames - The Word VAR in Measures.",
+                    ],
+                    callback=set_colors,
+                    tag="radioColors"
+                )
+                
         with dpg.collapsing_header(
             label="Logs", default_open=False, tag="Logs"
         ):
