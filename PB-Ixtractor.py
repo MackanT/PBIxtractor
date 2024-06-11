@@ -344,9 +344,7 @@ class ReportExtractor:
 
                         # Add Correct Display Names if applicable
                         vis_names = self.find_all_values(t, "Name")
-                        vis_disp_names = self.find_all_values(
-                            t, "NativeReferenceName"
-                        )
+                        vis_disp_names = self.find_all_values(t, "NativeReferenceName")
                         vis_name_disp_name = []
                         for vn in vis_names:
                             for vdn in vis_disp_names:
@@ -374,7 +372,7 @@ class ReportExtractor:
                             ):
                                 temp = row["Name"]
                                 temp2 = temp.split(".", 1)
-                                if temp2[0][0:4] == 'Sum(':
+                                if temp2[0][0:4] == "Sum(":
                                     temp2[0] = temp2[0][4:]
                                 table_name = temp2[0]
                                 val_name = temp2[1]
@@ -412,13 +410,11 @@ class ReportExtractor:
                             if not disp_name or disp_name == val_name:
                                 disp_name = None
 
-                            if (
-                                data[rowi].get("HierarchyLevel", "") != ""
-                            ):
+                            if data[rowi].get("HierarchyLevel", "") != "":
                                 data_type = "Hierarchy"
-                                temp = self.find_value_by_key(
-                                    data[rowi], "Name"
-                                ).split(".")
+                                temp = self.find_value_by_key(data[rowi], "Name").split(
+                                    "."
+                                )
                                 disp_name = temp[1] + ": " + temp[2]
 
                             self.add_item(
@@ -626,9 +622,7 @@ class ReportExtractor:
                                 f_add = ""
 
                             for ival, c_val in enumerate(comp_values):
-                                val_local, _ = self.gen_val_string(
-                                    [all_values[ival]]
-                                )
+                                val_local, _ = self.gen_val_string([all_values[ival]])
 
                                 if c_val == 0:
                                     if "Not" in all_values[ival][0]:
@@ -748,9 +742,9 @@ class ReportExtractor:
                         if temp:
                             filter_ver = "is not"
 
-                        filter_value = self.find_value_by_key(r, "Right")[
-                            "Literal"
-                        ]["Value"]
+                        filter_value = self.find_value_by_key(r, "Right")["Literal"][
+                            "Value"
+                        ]
                         filter_value = filter_value.replace("'", "")
 
                         self.add_filter(
@@ -946,7 +940,7 @@ def run_ui():
                 dpg.configure_item("bim_file_path_label", show=True)
                 if not os.path.exists(bim_file_path):
                     dpg.configure_item("BimSelector", show=True, enabled=True)
-                    dpg.set_value("bim_file_path_label", 'Selected File: None')
+                    dpg.set_value("bim_file_path_label", "Selected File: None")
                     _BIM_ = [None, None]
                     disable_buttons()
                 else:
@@ -958,23 +952,23 @@ def run_ui():
                         bim_file_path[: bim_file_path.rfind("/")],
                     ]
                     enable_buttons()
-                    
-                rep_ex = ReportExtractor(
-                    _PBIX_[1], _PBIX_[0] + '.pbix'
-                )
+
+                rep_ex = ReportExtractor(_PBIX_[1], _PBIX_[0] + ".pbix")
                 rep_ex.extract()
                 report_info = pd.DataFrame(
                     rep_ex.result,
-                    columns=["Page",
-                    "Visual Type",
-                    "Visual ID",
-                    "Table",
-                    "Name",
-                    "Display Name",
-                    "Type",],
+                    columns=[
+                        "Page",
+                        "Visual Type",
+                        "Visual ID",
+                        "Table",
+                        "Name",
+                        "Display Name",
+                        "Type",
+                    ],
                 )
                 unique_data_tables = list(report_info["Table"].unique())
-                del report_info, rep_ex                
+                del report_info, rep_ex
 
                 # Add all found tables to measure table dropdown
                 for table_name in unique_data_tables:
@@ -1055,7 +1049,7 @@ def run_ui():
 
 
     with dpg.window(label="PB-Ixtractor", width=1000, height=800):
-        with dpg.collapsing_header(label="PB-IxTractor"):
+        with dpg.collapsing_header(label="PB-Ixtractor"):
             dpg.add_image("logo_texture")
         with dpg.collapsing_header(
             label="File Settings", default_open=True, tag="File Settings"
@@ -1149,9 +1143,9 @@ def run_ui():
             with dpg.child_window(width=980, height=300):
                 container = dpg.add_child_window(width=960, height=280)
             )
-
+            
         dpg.add_spacer(height=10)
-        dpg.add_button(label="Generate tsv file", tag='genTSV', callback=generate_tsv)
+        dpg.add_button(label="Regenerate tsv file", tag="genTSV", callback=generate_tsv)
         dpg.add_text(
             "To properly extract data types for measures, ensure the .pbix file is open in PBI desktop!", tag='tsvText'
         )
@@ -1179,7 +1173,7 @@ def gen_tsv(force:bool=False):
     
     if not os.path.exists(cwd):
         os.makedirs(cwd)
-    
+
     def find_tabular_editor_path() -> str:
         target_exe = Path("TabularEditor.exe")
 
