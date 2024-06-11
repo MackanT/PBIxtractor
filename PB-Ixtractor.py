@@ -1431,15 +1431,23 @@ def is_excel_open_with_file(file_path: str) -> bool:
     return False
 
 
+def run_cmd():
     global SAVE_NAME, _BIM_, _PBIX_, LOG_DATA, REPORT_LOG
 
     cwd = os.getcwd()
+    cwd_save = cwd + f"\\{SAVE_NAME}"
+
+    file_path = f"{cwd_save}\\{SAVE_NAME}.xlsx"
     if is_excel_open_with_file(file_path):
         return f"Please Close File: {SAVE_NAME}.xlsx before proceeding!"
 
+    button_type_list = ["Bookmark", "PageNavigation"]
+
     tsv_path = Path(f"{cwd_save}\\documentation.tsv")
     if not os.path.isfile(tsv_path):
-        gen_tsv()
+        
+        if gen_tsv() == 'NoTabEd':
+            return 'NoTabEd'
 
     rep_ex = ReportExtractor(
         _PBIX_[1],
@@ -1622,9 +1630,9 @@ def is_excel_open_with_file(file_path: str) -> bool:
         if data_type[0] == "Table":
             rel_pattern = re.match(tab_rel_pattern, data_type[1])
             if rel_pattern is not None and rel_pattern not in all_relationships:
-                all_relationships.append(dataset.iloc[i]['Name'])
+                all_relationships.append(dataset.iloc[i]["Name"])
 
-            elif data_type[1] not in all_tables and 'Relationship.' not in data_type[1]:
+            elif data_type[1] not in all_tables and "Relationship." not in data_type[1]:
                 all_tables.append(data_type[1])
 
     # Remove excess " ' " surrounding table names
@@ -1897,6 +1905,7 @@ def is_excel_open_with_file(file_path: str) -> bool:
         function_names = find_functions(vDefinition)
         columns = find_columns(vDefinition)
         tables = [i for i, _ in columns]
+        columns_clean = ['[' + i + ']' for _, i in columns]
         measures = find_measures(vDefinition)
         
         for column in columns:
@@ -1927,6 +1936,9 @@ def is_excel_open_with_file(file_path: str) -> bool:
 
         format_array = []
         parents_array = []
+        parenthesis_count = -1
+        is_whole_line_comment = False
+        quote_counter = 0
 
         # Store away all parents used in func. Columns get table name as prefix, measures get default measure table
         if len(columns) > 0:
@@ -1935,10 +1947,7 @@ def is_excel_open_with_file(file_path: str) -> bool:
                 parents_array.append("\r\n")
             parents_array.pop(-1)
 
-        parenthesis_count = -1
-        is_whole_line_comment = False
-        quote_counter = 0
-
+        # Iternate through the segments and add a format before the corresponding tokens.
         for token in tokens:
             if token == "//":
                 is_whole_line_comment = True
@@ -2246,11 +2255,18 @@ if __name__ == "__main__":
             _file_ = "Order Entry"
             yes_man = False
             SAVE_NAME = _file_
-            
-        _PBIX_ = [_file_, 'C:\\Users']
-        _BIM_ = [_file_, 'C:\\Users']
 
-        run_cmd()
+        _PBIX_ = [
+            _file_,
+            "C:\\Users\\Reports",
+        ]
+        _BIM_ = [
+            _file_,
+            "C:\\Users\\PB-Ixtractor",
+        ]
+
+        result = run_cmd()
+        print(result)
 
 # Maybe includes additional info to extract? https://www.linkedin.com/pulse/streamlining-model-documentation-tabular-editor-power-jarom-gleed
 
@@ -2262,9 +2278,6 @@ if __name__ == "__main__":
 # selection naming - title
 #
 # hierarchies
-#
-#
-#
 #
 ## Less valuable
 # Font size, show blanks as, padding, label position
