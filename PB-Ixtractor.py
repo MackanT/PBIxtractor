@@ -1523,7 +1523,7 @@ def is_excel_open_with_file(file_path: str) -> bool:
         return used_functions
 
     def find_measures(string: str) -> tuple[str]:
-        pattern = r"\s\[.*?\]\s"
+        pattern = r"\[.*?\]"
         all_measures = re.findall(pattern, string)
         unique_measures = list(set(all_measures))
         return unique_measures
@@ -1552,9 +1552,9 @@ def is_excel_open_with_file(file_path: str) -> bool:
             else:
                 column = string[start_pos:end_pos]
 
-            if column[0] == '[':
+            if column[0] == "[":
                 column = column[1:]
-            if column[-1] == ']':
+            if column[-1] == "]":
                 column = column[:-1]
 
             if ".C." in string:
@@ -1650,11 +1650,11 @@ def is_excel_open_with_file(file_path: str) -> bool:
         if data_type[0] == "Table":
             continue
 
-        if data_type[0] == "Hierarchy":
+        elif data_type[0] == "Hierarchy":
             all_hierarchies.append((data_type[1], data_type[2]))
             continue
 
-        if data_type[0] == "Column" or data_type[0] == "Measure":
+        elif data_type[0] == "Column" or data_type[0] == "Measure":
             unused_columns.append((data_type[1], data_type[2]))
 
         if not isinstance(line_data["Expression"], float):
@@ -1662,7 +1662,6 @@ def is_excel_open_with_file(file_path: str) -> bool:
             definition = definition.replace("    ", "\t")
             definition = definition.replace("\\n", "\n")
         else:
-            report_logs += f'Unknown data_type while reading tsv file! {line_data}\n'
             definition = ""
 
         # Extract description if embedded in definition
