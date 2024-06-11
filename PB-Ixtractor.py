@@ -1402,6 +1402,13 @@ def gen_tsv(force: bool = False):
 
     wait_for_file(file_path=f"{cwd}\\documentation.tsv", timeout=5)
 
+def write_to_excel(worksheet, row:int, col:int, text:list[str]):
+    
+    if len(text) <= 2:
+        worksheet.write(row, col, *text)
+    else:
+        worksheet.write_rich_string(row, col, *text)
+    
 
 def is_excel_open_with_file(file_path: str) -> bool:
     """
@@ -1994,18 +2001,16 @@ def is_excel_open_with_file(file_path: str) -> bool:
 
         for col, value in enumerate(row):
             if col == definition_index and len(format_array) != 0:
-                worksheet.write_rich_string(
-                    row_num, definition_index, *format_array
-                )
+                write_to_excel(worksheet, row_num, col, format_array)
             elif col == parent_index and len(parents_array) != 0:
-                worksheet.write_rich_string(row_num, parent_index, *parents_array)
+                write_to_excel(worksheet, row_num, col, parents_array)
             else:
                 worksheet.write(row_num, col, value)
         row_num += 1
 
-    row_num += 5
+    row_num += 6
     for col_pair in unused_columns:
-        worksheet.write(row_num + 1, 0, col_pair[0] + "[" + col_pair[1] + "]")
+        worksheet.write(row_num, 0, col_pair[0] + "[" + col_pair[1] + "]")
         row_num += 1
 
     # Create a tab per report page with visual info.
@@ -2105,7 +2110,7 @@ def is_excel_open_with_file(file_path: str) -> bool:
         for name, value in new_data.items():
             if name == "ID":
                 continue
-            worksheetX.write(0, col, name, formats['bi'])
+            worksheetX.write(0, col, name, formats["bi"])
             col += 1
 
         sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
@@ -2185,15 +2190,9 @@ def is_excel_open_with_file(file_path: str) -> bool:
             for col, value in enumerate(row):
                 
                 if col == 2 and len(format_array) != 0:
-                    if len(format_array) < 2:
-                        worksheetX.write(row_num + 1, col, *format_array)
-                    else:
-                        worksheetX.write_rich_string(row_num + 1, col, *format_array)
-                if col == 3 and len(filter_array) != 0:
-                    if len(format_array) < 2:
-                        worksheetX.write(row_num + 1, col, *filter_array)
-                    else:
-                        worksheetX.write_rich_string(row_num + 1, col, *filter_array)
+                    write_to_excel(worksheetX, row_num, col, format_array)
+                elif col == 3 and len(filter_array) != 0:
+                    write_to_excel(worksheetX, row_num, col, filter_array)
                 elif col == 6:
                     continue
                 else:
