@@ -14,6 +14,10 @@ import subprocess
 from pathlib import Path
 import networkx as nx
 from matplotlib import pyplot as plt
+import matplotlib
+
+matplotlib.use("agg")
+
 
 SAVE_NAME = ""
 _PBIX_ = [None, None]
@@ -1425,67 +1429,93 @@ def run_cmd():
 
     df_relations = pd.DataFrame(data)
     for row in sorted(all_relationships):
-        
-        i1 = row.find(']')+1
-        i2 = row.find('>')+2
+        i1 = row.find("]") + 1
+        i2 = row.find(">") + 2
         t1 = row[:i1].replace("'", "")
         t2 = row[i2:].replace("'", "")
-        rel = row[i1+1:i2-1]
-        
-        relation = 'Unknown Type'
-        if rel == '-->':
-            relation = 'One Way'
-        if rel == '<-->':
-            relation = 'Two Way'
-        
+        rel = row[i1 + 1 : i2 - 1]
+
+        relation = "Unknown Type"
+        if rel == "-->":
+            relation = "One Way"
+        if rel == "<-->":
+            relation = "Two Way"
+
         new_data_rel = {
-            "Type": 'Relationship',
-            "Child": t1.split('[')[0],
+            "Type": "Relationship",
+            "Child": t1.split("[")[0],
             "Direction": relation,
-            "Parent": t2.split('[')[0],
+            "Parent": t2.split("[")[0],
         }
         df_relations.loc[-1] = new_data_rel
         df_relations.index = df_relations.index + 1
     df_relations = df_relations.sort_index()
 
-    def generate_graph(df_relations:pd.DataFrame, w:int, h:int):
+    def generate_graph(df_relations: pd.DataFrame, w: int, h: int):
         G = nx.DiGraph()
-        
+
         for _, row in df_relations.iterrows():
-            task_id = row['Child']
-            parent_task = row['Parent']
+            task_id = row["Child"]
+            parent_task = row["Parent"]
 
             G.add_node(task_id)
             if not pd.isnull(parent_task):
-                G.add_edge(str(parent_task), task_id) 
-        
-        def split_label(label):
-            return re.sub(r'([a-z])([A-Z])', r'\1\n\2', label)
+                G.add_edge(str(parent_task), task_id)
 
-        child_nodes = set(df_relations['Parent'].dropna().unique())
+        def split_label(label):
+            return re.sub(r"([a-z])([A-Z])", r"\1\n\2", label)
+
+        child_nodes = set(df_relations["Parent"].dropna().unique())
         parent_nodes = set(G.nodes) - child_nodes
-        
+
         colors = plt.cm.tab20.colors
         color_map = {}
         for i, node in enumerate(child_nodes):
             color_map[node] = colors[i % len(colors)]
-        
-        node_colors = [color_map[node] if node in child_nodes else 'lightgreen' for node in G.nodes]
+
+        node_colors = [
+            color_map[node] if node in child_nodes else "lightgreen" for node in G.nodes
+        ]
 
         labels = {node: split_label(node) for node in parent_nodes}
 
-        plt.figure(figsize=(w,h))
-        
+        plt.figure(figsize=(w, h))
+
         pos = nx.spring_layout(G, k=2.5, iterations=500, scale=10)
-        nx.draw(G, pos, with_labels=True, labels=labels, node_color=node_colors, font_weight='bold', node_size=300, arrowsize=10)
+        nx.draw(
+            G,
+            pos,
+            with_labels=True,
+            labels=labels,
+            node_color=node_colors,
+            font_weight="bold",
+            node_size=300,
+            arrowsize=10,
+        )
 
-        legend_handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color_map[node], markersize=10, label=node) for node in child_nodes]
-        plt.legend(handles=legend_handles, title='Dimensions', bbox_to_anchor=(1.05, 1), loc='upper left')
+        legend_handles = [
+            plt.Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor=color_map[node],
+                markersize=10,
+                label=node,
+            )
+            for node in child_nodes
+        ]
+        plt.legend(
+            handles=legend_handles,
+            title="Dimensions",
+            bbox_to_anchor=(1.05, 1),
+            loc="upper left",
+        )
 
-        plt.savefig(f'{SAVE_NAME}\\{SAVE_NAME}_Relationships.png', bbox_inches='tight')
+        plt.savefig(f"{SAVE_NAME}\\{SAVE_NAME}_Relationships.png", bbox_inches="tight")
         plt.close()
 
-    generate_graph(df_relations, 12, (len(df_relations)+1)*14.4/72)
+    generate_graph(df_relations, 12, (len(df_relations) + 1) * 14.4 / 72)
 
     # Remove Cols/Measures from 'unused_columns' that are used in visuals
     for row in report_info.iloc():
