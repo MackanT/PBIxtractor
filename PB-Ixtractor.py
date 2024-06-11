@@ -25,6 +25,7 @@ REPORT_LOG = ""
 SAVE_NAME = ""
 _PBIX_ = [None, None]
 _BIM_ = [None, None]
+DESCRIPT_TAG = "////"
 
 default_colors = [
     ["Functions", (49, 101, 187, 255)],
@@ -966,8 +967,8 @@ def run_ui():
         SAVE_NAME = dpg.get_value("outputFileName")
 
     def set_description_tag(sender, app_data):
-        global measure_description_indicator
-        measure_description_indicator = dpg.get_value("descriptionTag")
+        global DESCRIPT_TAG
+        DESCRIPT_TAG = dpg.get_value("descriptionTag")
 
     def find_color(name):
         old_color = None
@@ -1064,7 +1065,7 @@ def run_ui():
                 tag="descriptionTag",
                 callback=set_description_tag,
             )
-            dpg.set_value("descriptionTag", measure_description_indicator)
+            dpg.set_value("descriptionTag", DESCRIPT_TAG)
 
             dpg.add_spacer(height=15)
             dpg.add_button(label="Additional Settings", callback=edit_settings)
@@ -1432,9 +1433,9 @@ def gen_tsv(force:bool=False):
             definition = ""
 
         # Extract description if embedded in definition
-        if definition.find("////") != -1:
-            comment_start = find_nth_occurence("////", definition, 1) + 5
-            comment_end = find_nth_occurence("////", definition, 2) - 1
+        if definition.find(DESCRIPT_TAG) != -1:
+            comment_start = find_nth_occurence(DESCRIPT_TAG, definition, 1) + 5
+            comment_end = find_nth_occurence(DESCRIPT_TAG, definition, 2) - 1
             definition_start = comment_end + 6
         else:
             comment_start = 0
