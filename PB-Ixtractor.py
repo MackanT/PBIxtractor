@@ -15,10 +15,13 @@ from pathlib import Path
 import networkx as nx
 from matplotlib import pyplot as plt
 import matplotlib
+import inspect
 
 matplotlib.use("agg")
 
 
+LOG_DATA = True
+REPORT_LOG = ""
 SAVE_NAME = ""
 _PBIX_ = [None, None]
 _BIM_ = [None, None]
@@ -62,6 +65,37 @@ try:
 except OSError:
     print(f"Could not open/read file: {file_path}")
     sys.exit()
+    
+def log_data(message: str, error: str, severity: int = 0):
+        e = str(severity)
+        
+        if severity == -1:
+            e += " Debug: "
+        elif severity == 0:
+            e += " Info: "
+        elif severity == 1:
+            e += " Warning: "
+        elif severity == 2:
+            e += " Error: "
+        else:
+            e += " Critical: "
+            
+        line_len = 130
+        error = str(error)
+        error_clean = ''
+        error_lines = error.split('\n')
+        for line in error_lines:
+            
+            msg_len = len(line)
+            stansas = int(msg_len / line_len) + 1
+            for i in range(stansas):
+                error_clean += line[(line_len) * i: (line_len) * (i + 1)] + '\n'
+        
+        error_clean = error_clean[:-1]
+
+        e += message + f". Error on line {inspect.currentframe().f_back.f_lineno}.\n" + str(error_clean)
+        return e + "\n\n"
+
 
 class ReportExtractor:
     def __init__(self, path, name):
@@ -69,21 +103,11 @@ class ReportExtractor:
         self.name = name
         self.result = []
         self.filters = []
-        self.log = ''
+        self.log = ""
+
+    def _log_data(self, message: str, error: str, severity: int = 0):
+        self.log += log_data(message, error, severity)
         
-    def log_data(self, message:str, error:str, severity:int = 0):
-        
-        if severity == 0:
-            e = 'Note: '
-        elif severity == 1:
-            e = 'Warning: '
-        elif severity == 2:
-            e = 'Issue: '
-        else:
-            e = 'Alert: '
-        
-        e += message + '. Debug info: ' + str(error)
-        self.log += e + '\n'
 
     def find_value_by_key(self, data: dict, target_key: str) -> dict | None:
         """
@@ -262,7 +286,7 @@ class ReportExtractor:
             elif "isInverted" in val[0]:
                 is_inverted = self.clean_input(val[1])
             else:
-                self.log
+                self._log_data('No Found message value', all_values, 0, 1)
 
         if val_list[-2:] == ", ":
             val_list = val_list[:-2]
@@ -338,7 +362,7 @@ class ReportExtractor:
 
                                 # Find issues
                                 if len(temp2) <= 2 or isinstance(temp2, str):
-                                    self.log_data('Hierarchy is to short', row, 1)
+                                    self._log_data("Hierarchy is to short", row,  1)
                                     continue
 
                                 table_name = temp2[0]
@@ -365,7 +389,7 @@ class ReportExtractor:
                                 table_name = temp2[0]
                                 val_name = temp2[1]
                             else:
-                                self.log_data('Unspecified row type', row, 0)
+                                self._log_data("Unspecified row type", row, 0)
 
                             # Determine Data Type + Display Name
                             data_type = None
@@ -382,7 +406,7 @@ class ReportExtractor:
                                     break
                             if not data_type:
                                 data_type = "UNKNOWN Data Type"
-                                self.log_data('Unknown data type', data_type, 1)
+                                self._log_data("Unknown data type", data_type, 1)
 
                             if not disp_name or disp_name == val_name:
                                 disp_name = None
@@ -443,7 +467,7 @@ class ReportExtractor:
 
                             ## Find issues
                             if not temp2:
-                                self.log_data('Page Navigation error', ex_data, 1)
+                                self._log_data("Page Navigation error", ex_data, 1)
                                 continue
                             item_name = self.find_value_by_key(temp2, "Value")
                             item_name = item_name.replace("'", "")
@@ -459,7 +483,11 @@ class ReportExtractor:
                             disp_name = "Filter Icon"  ## TODO currently not used as visual, is more of a "Button"
                             continue
                         else:
-                            self.log_data(f'Unknown visual type {button_type} on {page_name}', ex_data, 1)
+                            self._log_data(
+                                f"Unknown visual type {button_type} on {page_name}",
+                                ex_data,
+                                1,
+                            )
                             continue
 
                         visual_type = button_type
@@ -475,7 +503,11 @@ class ReportExtractor:
                         )
 
                     else:
-                        self.log_data("New Visual type not yet supported! {visual_type}", ex_data, 1)
+                        self._log_data(
+                            f"New Visual type not yet supported! {visual_type}",
+                            ex_data,
+                            1,
+                        )
 
                 # Add filters
                 if ex_data.get("filters", []) != []:
@@ -501,7 +533,7 @@ class ReportExtractor:
                             val_name = self.find_value_by_key(
                                 row, "HierarchyLevel"
                             ).get("Level", "UNKNOWN!")
-                            self.log_data('Unknown hierachy level!', row, 1)
+                            self._log_data("Unknown hierachy level!", row, 1)
 
                         val_list = ""
                         if row.get("type", "") == "RelativeDate":
@@ -528,7 +560,11 @@ class ReportExtractor:
                                 elif len(unit) == 6:
                                     include_today = False
                                 else:
-                                    self.log_data('Unknown "Include Today" setting. Setting value to included', row, 2)
+                                    self._log_data(
+                                        'Unknown "Include Today" setting. Setting value to included',
+                                        row,
+                                        2,
+                                    )
                                     include_today = True
 
                                 f_val = ""
@@ -701,7 +737,7 @@ class ReportExtractor:
                             value=filter_value,
                         )
                     else:
-                        self.log_data(f'Unused filter on page {page_name}', ex_data, 0)
+                        self._log_data(f"Unused filter on page {page_name}", ex_data, 0)
                 elif filter_variant == "Advanced":
                     local_row = self.find_value_by_key(ex_data, "Where")
 
@@ -740,7 +776,7 @@ class ReportExtractor:
                             filter_value += " years"
                         else:
                             filter_value += " unknown unit"
-                            self.log_data('Unknown filter type.', ex_data, 2)
+                            self._log_data("Unknown filter type.", ex_data, 2)
 
                         if UB:
                             filter_value += " including today"
@@ -756,9 +792,13 @@ class ReportExtractor:
                         )
 
                     else:
-                        self.log_data('Filter is relative date. No lower bound is set, skipping row!', ex_data, 2)
+                        self._log_data(
+                            "Filter is relative date. No lower bound is set, skipping row!",
+                            ex_data,
+                            2,
+                        )
                 else:
-                    self.log_data('Unknown filter variant', ex_data, 1)
+                    self._log_data("Unknown filter variant", ex_data, 1)
 
         shutil.rmtree(pathFolder)
 
@@ -780,19 +820,38 @@ def run_ui():
 
     def run_extractor():
         if _PBIX_ != [None, None] and _BIM_ != [None, None]:
-            has_log = run_cmd()
-            if has_log:
-                messagebox.showwarning(
-                        "Alert!",
-                        f"Documention generated with warnings: See {cwd}/{SAVE_NAME} for a generated log file with potential error messages",
-                    )
+                update_log()
             else:
                 messagebox.showinfo(
                         "Success",
                         f"Documentation generated without any issues: {cwd}/{SAVE_NAME}/{SAVE_NAME}.xlsx",
                     )
+
+    def update_log():
+        global REPORT_LOG
         
+        error_msg = REPORT_LOG.split('\n\n')
+        for msg in error_msg:
+            if msg == '':
+                continue
+            
+            error_level = msg[0]
+            
+            if error_level == '-':
+                c = colors['W']
+            if error_level == '0':
+                c = colors['W']
+            elif error_level == '1':
+                c = colors["Y"]
+            elif error_level == '2':
+                c = colors["O"]
+            else:
+                c = colors['R']
+            
+            add_colored_text_at_top(container, msg[2:], c)
+            
         
+
     def disable_buttons():
         for tag in ['runPBIX', 'genTSV']:
             dpg.configure_item(tag, enabled=False, show=False)
@@ -936,6 +995,18 @@ def run_ui():
     def edit_settings(sender, app_data, user_data):
         dpg.configure_item("File Settings", default_open=False)
         dpg.configure_item("Additional Settings", default_open=True)
+        dpg.configure_item("Logs", default_open=True)
+
+    def toggle_log_toggle(sender, app_data, user_data):
+        global LOG_DATA
+        LOG_DATA = dpg.get_value(sender)
+    
+    def add_colored_text_at_top(container, text, color):
+        new_text = dpg.add_text(text, parent=container, color=color)
+        children = dpg.get_item_children(container)[1]
+        if len(children) > 1:
+            dpg.move_item(new_text, parent=container, before=children[0])
+            
         
     with dpg.texture_registry(show=False):
         width, height, channels, data = dpg.load_image("logo_large.png")
@@ -1002,28 +1073,15 @@ def run_ui():
         with dpg.collapsing_header(
             label="Additional Settings", default_open=False, tag="Additional Settings"
         ):
-            dpg.add_radio_button(
-                label="Color Types",
-                items=[
-                    "Functions",
-                    "Measures",
-                    "Basics",
-                    "Variables",
-                    "Comments",
-                    "Brackets",
-                    "Quotes",
-                    "VarNames",
-                ],
-                callback=set_colors,
-                tag="radioColors",
-            )
-            dpg.add_color_picker(
-                default_value=(49, 101, 187, 255),
-                label="Selected Color",
-                tag="colorWheel",
-                width=200,
-                height=200,
-                callback=update_colors,
+            dpg.add_checkbox(label='Enable Error Logging', callback=toggle_log_toggle, tag='log_toggle', default_value=True)
+            dpg.add_spacer(height=5)
+            
+        with dpg.collapsing_header(
+            label="Logs", default_open=False, tag="Logs"
+        ):
+            
+            with dpg.child_window(width=980, height=300):
+                container = dpg.add_child_window(width=960, height=280)
             )
 
         dpg.add_spacer(height=10)
@@ -1140,11 +1198,7 @@ def gen_tsv(force:bool=False):
 
     wait_for_file(file_path=f"{cwd}\\documentation.tsv", timeout=5)
 
-
-def run_cmd():
-    global SAVE_NAME, _BIM_, _PBIX_
-
-    button_type_list = ["Bookmark", "PageNavigation"]
+    global SAVE_NAME, _BIM_, _PBIX_, LOG_DATA, REPORT_LOG
 
     cwd = os.getcwd()
     cwd_save = cwd + f'\\{_PBIX_[0]}'
@@ -1790,7 +1844,7 @@ def run_cmd():
                 v_type = "Group"
                 s_type = "Panel"
             else:
-                report_logs += f"New Visual type not yet supported! {visual_type}\n"
+                REPORT_LOG += log_data('New Visual type not yet supported!', visual_type, 1)
 
             new_data = {
                 "Item Type": v_type,
@@ -1894,6 +1948,7 @@ def run_cmd():
 
             else:
                 if isinstance(row["Item Type"], float):
+                    REPORT_LOG += log_data('NaN Item Type Encountered!', row, 2)
                     continue  # Temp fix for NaN Item Type
                 # Filters
                 format_array = [formats['bold']]
@@ -1921,15 +1976,22 @@ def run_cmd():
 
     workbook.close()
     
-    if report_logs:
+    ## Print Logging Info -- Needs more love
+    if REPORT_LOG and LOG_DATA:
         t = time.localtime()
         current_time = time.strftime("%H_%M_%S", t)
-        location = cwd + f'\\{SAVE_NAME}\\log_data_{current_time}.txt'
+        location_folder = cwd + f"\\{SAVE_NAME}\\logs"
+        location = location_folder + f"\\log_data_{current_time}.txt"
+        
+        if not os.path.exists(location_folder):
+            os.makedirs(location_folder)
+        
         with open(location, "w") as text_file:
-            text_file.write(report_logs)
-            
-        return False
-    return True
+            text_file.write(REPORT_LOG)
+
+        return "Log"
+
+    return "Success"
 
 
 if __name__ == "__main__":
