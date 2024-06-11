@@ -1399,10 +1399,33 @@ def gen_tsv(force: bool = False):
 
     wait_for_file(file_path=f"{cwd}\\documentation.tsv", timeout=5)
 
+
+def is_excel_open_with_file(file_path: str) -> bool:
+    """
+    Check if Excel is open with a specific file.
+
+    Parameters:
+        file_path (str): The path of the Excel file to check.
+
+    Returns:
+        bool: True if Excel is open with the specified file, False otherwise.
+    """
+    for process in psutil.process_iter():
+        try:
+            if process.name().lower() == "excel.exe":
+                for file in process.open_files():
+                    if file.path.lower() == file_path.lower():
+                        return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return False
+
+
     global SAVE_NAME, _BIM_, _PBIX_, LOG_DATA, REPORT_LOG
 
     cwd = os.getcwd()
-    cwd_save = cwd + f'\\{_PBIX_[0]}'
+    if is_excel_open_with_file(file_path):
+        return f"Please Close File: {SAVE_NAME}.xlsx before proceeding!"
 
     tsv_path = Path(f"{cwd_save}\\documentation.tsv")
     if not os.path.isfile(tsv_path):
