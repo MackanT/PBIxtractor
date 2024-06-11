@@ -1477,8 +1477,8 @@ def is_excel_open_with_file(file_path: str) -> bool:
         ]
         for sublist in report_filters
     ]
-    
-    report_logs = rep_ex.log
+
+    REPORT_LOG = rep_ex.log
 
     def find_nth_occurence(substring: str, string: str, n: int) -> int:
         """
@@ -1707,7 +1707,7 @@ def is_excel_open_with_file(file_path: str) -> bool:
         df.loc[-1] = new_data
         df.index = df.index + 1
     df = df.sort_index()
-    
+
     data = {
         "Type": [],
         "Child": [],
@@ -1882,12 +1882,15 @@ def is_excel_open_with_file(file_path: str) -> bool:
         worksheet.write(row_num, col, name, formats['bi'])
         col += 1
 
+    def ls_app(*args):
+        format_array.extend(args)
+
     row_num += 1
     for _, row in df.iterrows():
         vDefinition = row["Definition"]
 
         # Skip traditional columns for now
-        if row['Type'] == "Column":
+        if row["Type"] == "Column":
             continue
 
         # Find Vars and measures
@@ -1896,7 +1899,7 @@ def is_excel_open_with_file(file_path: str) -> bool:
         columns = find_columns(vDefinition)
         tables = [i for i, _ in columns]
         measures = find_measures(vDefinition)
-
+        
         for column in columns:
             if column in unused_columns:
                 unused_columns.remove(column)
@@ -1919,12 +1922,10 @@ def is_excel_open_with_file(file_path: str) -> bool:
 
         # Split the text into rows
         pattern = re.compile(r"(\(|\)|\[.*?\]|,|//|\d+\.\d+|\w+|(?<!\d)\.(?!\d)|\W)")
-
         tokens = [
             token for token in re.findall(pattern, formated_text) if token.strip()
         ]
 
-        # Iternate through the segments and add a format before the matches.
         format_array = []
         parents_array = []
 
@@ -1949,55 +1950,49 @@ def is_excel_open_with_file(file_path: str) -> bool:
                 quote_counter += 1
 
             if is_whole_line_comment:
-                format_array.append(formats['comment'])
-                format_array.append(token + " ")
+                ls_app(formats["comment"], token + " ")
             elif quote_counter > 0:
-                format_array.append(formats['quote'])
+                ls_app(formats["quote"])
                 if quote_counter == 2:
-                    format_array.append(token + " ")
+                    ls_app(token + " ")
                     quote_counter = 0
                 else:
-                    format_array.append(token)
+                    ls_app(token)
             elif token == "XXX":
-                format_array.append("\t")
+                ls_app("\t")
             elif token == "YYY":
-                format_array.append("\r\n")
+                ls_app("\r\n")
             elif token == "ZZZ":
-                format_array.append("&& ")
+                ls_app("&& ")
             elif token == "AAA":
-                format_array.append("|| ")
+                ls_app("|| ")
             elif token == "(":
                 parenthesis_count += 1
-                format_array.append(fColor[parenthesis_count])
-                format_array.append(token + " ")
+                ls_app(formats["para"][parenthesis_count], token + " ")
             elif token == ")":
-                format_array.append(fColor[parenthesis_count])
-                format_array.append(token + " ")
+                ls_app(formats["para"][parenthesis_count], token + " ")
                 parenthesis_count -= 1
             elif token == "VAR":
-                format_array.append(formats['var'])
-                format_array.append(token + " ")
+                ls_app(formats["var"], token + " ")
             elif token in var_names:
-                format_array.append(formats['varname'])
-                format_array.append(token + " ")
+                ls_app(formats["varname"], token + " ")
             elif token in measures:
-                format_array.append(fColor[parenthesis_count + 1])
-                format_array.append(token[0])
-                format_array.append(formats['measure'])
-                format_array.append(token[1:-1])
-                format_array.append(fColor[parenthesis_count + 1])
-                format_array.append(token[-1] + " ")
-            elif token in tables:
-                format_array.append(formats['measure'])
-                format_array.append(token)
+                ls_app(
+                    formats["para"][parenthesis_count + 1],
+                    token[0],
+                    formats["measure"],
+                    token[1:-1],
+                    formats["para"][parenthesis_count + 1],
+                    token[-1] + " ",
+                )
+            elif token in tables or token in columns_clean:
+                ls_app(formats["measure"], token)
             elif token in function_names:
-                format_array.append(formats['function'])
-                format_array.append(token + " ")
+                ls_app(formats["function"], token + " ")
             elif token == "RETURN":
-                format_array.append(formats['return'])
-                format_array.append(token + " ")
+                ls_app(formats["return"], token + " ")
             else:
-                format_array.append(token + " ")
+                ls_app(token, " ")
 
         for col, value in enumerate(row):
             if col == definition_index and len(format_array) != 0:
@@ -2123,7 +2118,7 @@ def is_excel_open_with_file(file_path: str) -> bool:
         slicer_switch = True
         filter_switch = True
         button_switch = True
-        for ir, row in df_sorted.iterrows():
+        for _, row in df_sorted.iterrows():
             filter_array = []
             for filter in report_filters_string:
                 if (
@@ -2131,9 +2126,9 @@ def is_excel_open_with_file(file_path: str) -> bool:
                     and filter[0] == report_name
                     and filter[1] == row["ID"]
                 ):
-                    filter_array.append(formats['bold'])
-                    filter_array.append(filter[3])
-                    filter_array.append(" " + filter[4] + "\n")
+                    filter_array.extend(
+                        [formats["bold"], filter[3], " " + filter[4] + "\n"]
+                    )
 
             if filter_array and filter_array[-1][-1] == "\n":
                 filter_array[-1] = filter_array[-1][:-1]
@@ -2156,39 +2151,39 @@ def is_excel_open_with_file(file_path: str) -> bool:
                     if rrow["Type"] != current_type:
                         current_type = rrow["Type"]
                         if im != 0:
-                            format_array.append("\n")
-                        format_array.append(formats['bold'])
-                        format_array.append(current_type + ": ")
-                    format_array.append("\n")
-
-                    format_array.append(formats['italic'])
-                    format_array.append(f'{rrow["Table"]}[{rrow["Name"]}]')
+                            ls_app("\n")
+                        ls_app(formats["bold"], current_type + ": ")
+                    ls_app("\n", formats["italic"], f'{rrow["Table"]}[{rrow["Name"]}]')
 
                     if rrow["Display Name"]:
-                        format_array.append("\n\t")
-                        format_array.append(" Display Name: ")
-                        format_array.append(formats['italic'])
-                        format_array.append(rrow["Display Name"])
+                        ls_app(
+                            "\n\t Display Name: ",
+                            formats["italic"],
+                            rrow["Display Name"],
+                        )
 
             elif row["Item Type"] in ["Button", "Group"]:
                 rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-
-                format_array = [formats['bold']]
-                format_array.append(rrow["Type"] + ": ")
-                format_array.append(formats['italic'])
-                format_array.append(rrow["Name"])
+                format_array = [
+                    formats["bold"],
+                    rrow["Type"] + ": ",
+                    formats["italic"],
+                    rrow["Name"],
+                ]
 
             else:
                 if isinstance(row["Item Type"], float):
                     REPORT_LOG += log_data('NaN Item Type Encountered!', row, 2)
                     continue  # Temp fix for NaN Item Type
+
                 # Filters
-                format_array = [formats['bold']]
-                format_array.append(report_filters_string[row["ID"]][3])
-                format_array.append(" " + report_filters_string[row["ID"]][4])
+                format_array = [formats["bold"]]
+                ls_app(
+                    report_filters_string[row["ID"]][3],
+                    " " + report_filters_string[row["ID"]][4],
+                )
 
             for col, value in enumerate(row):
-                
                 if col == 2 and len(format_array) != 0:
                     write_to_excel(worksheetX, row_num, col, format_array)
                 elif col == 3 and len(filter_array) != 0:
