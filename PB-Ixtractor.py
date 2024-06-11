@@ -1031,6 +1031,7 @@ def run_ui():
         dpg.configure_item("File Settings", default_open=False)
         dpg.configure_item("Additional Settings", default_open=True)
         dpg.configure_item("Logs", default_open=True)
+        dpg.configure_item("User Input", default_open=False)
 
     def toggle_log_toggle(sender, app_data, user_data):
         global LOG_DATA
@@ -1042,6 +1043,76 @@ def run_ui():
         if len(children) > 1:
             dpg.move_item(new_text, parent=container, before=children[0])
             
+    def add_input(version):
+        
+        cwd = os.getcwd() + '\\Input\\'
+        
+        if version == 'dataType':
+            
+            info_tag = 'dataTypeInputInfo'
+            file_name = 'DataTypes.csv'
+            val1 = dpg.get_value('dataTypeInputO')
+            val2 = dpg.get_value('dataTypeInputP')
+            
+            val1_state = False
+            val2_state = False
+            if val1 == '':
+                val1_state = True
+            if val2 == '':
+                val2_state = True
+            
+            if val1_state and val2_state:
+                msg = 'Both Inputs are non-valid!'
+            elif val2_state:
+                msg = 'Non-valid input in Data Type PBI!'
+            elif val1_state:
+                msg = 'Non-valid input in Data Type Output!'
+                
+            if val1_state or val2_state:
+                show_and_hide(info_tag, msg, 'Y')
+                return
+            
+            val1 = f'{val2},{val1}'
+            
+        elif version == 'functionName':
+            
+            info_tag = 'functionNameInputInfo'
+            file_name = 'FunctionNames.csv'
+            val1 = dpg.get_value('functionNameInput')
+            if val1 == '':
+                show_and_hide(info_tag, 'Cannot enter blank function name!', 'Y')
+                return
+        
+        elif version == 'visualType':
+            
+            info_tag = 'visualTypeInputInfo'
+            file_name = 'VisualTypes.csv'
+            val1 = dpg.get_value('visualTypeInput')
+            if val1 == '':
+                show_and_hide(info_tag, 'Cannot enter blank visual type!', 'Y')
+                return
+            
+        elif version == 'TELocation':
+            
+            info_tag = 'TELocationInputInfo'
+            file_name = 'TabularEditorLocations.txt'
+            val1 = dpg.get_value('TELocation')
+            if val1 == '':
+                show_and_hide(info_tag, 'Cannot enter blank save location of Tabular Editor 2!', 'Y')
+                return
+
+        else:
+            return
+        
+        if file_name[-3:] == 'txt':
+            with open(cwd + file_name, 'a') as txt_file:
+                txt_file.write(val1 + '\n')
+        else:
+            with open(cwd + file_name, 'a', newline='') as csv_file:
+                csv_file.write(val1 + '\n')
+        
+        show_and_hide(info_tag, 'Data saved successfully!', 'G')
+        
         
     with dpg.texture_registry(show=False):
         width, height, channels, data = dpg.load_image("logo_large.png")
@@ -1142,6 +1213,61 @@ def run_ui():
             
             with dpg.child_window(width=980, height=300):
                 container = dpg.add_child_window(width=960, height=280)
+        
+        with dpg.collapsing_header(
+            label="User Input", default_open=True, tag="User Input"
+        ):
+            
+            
+            dpg.add_input_text(
+                label="Data Type PBI",
+                tag="dataTypeInputP",
+            )
+            dpg.add_input_text(
+                label="Data Type Output",
+                tag="dataTypeInputO",
+            )
+            dpg.add_button(label="Data Type", tag='dataTypeInputButton', callback=lambda: add_input('dataType'))
+            dpg.add_text(
+                "",
+                show=False,
+                tag="dataTypeInputInfo",
+            )
+            dpg.add_spacer(height=5)
+            
+            dpg.add_input_text(
+                label="FunctionName",
+                tag="functionNameInput",
+            )
+            dpg.add_button(label="Function Name", tag='functionNameInputButton', callback=lambda: add_input('functionName'))
+            dpg.add_text(
+                "",
+                show=False,
+                tag="functionNameInputInfo",
+            )
+            dpg.add_spacer(height=5)
+            
+            dpg.add_input_text(
+                label="Visual Type",
+                tag="visualTypeInput",
+            )
+            dpg.add_button(label="Visual Type", tag='visualTypeInputButton', callback=lambda: add_input('visualType'))
+            dpg.add_text(
+                "",
+                show=False,
+                tag="visualTypeInputInfo",
+            )
+            dpg.add_spacer(height=5)
+            
+            dpg.add_input_text(
+                label="Tabular Editor Location",
+                tag="TELocation",
+            )
+            dpg.add_button(label="TE Location", tag='TELocationButton', callback=lambda: add_input('TELocation'))
+            dpg.add_text(
+                "",
+                show=False,
+                tag="TELocationInputInfo",
             )
             
         dpg.add_spacer(height=10)
