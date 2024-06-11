@@ -1858,24 +1858,27 @@ def is_excel_open_with_file(file_path: str) -> bool:
     if num_relations > 0:
         col = 0
         for name, value in new_data_rel.items():
-            worksheet.write(0, col, name, formats['bi'])
+            worksheet.write(0, col, name, formats["bi"])
             col += 1
-        
+
         print_graph = True
         for _, row in df_relations.iterrows():
-            
             if print_graph:
-                worksheet.insert_image("E1", f"{SAVE_NAME}\\{SAVE_NAME}_Relationships.png", {"x_scale": 1, "y_scale": 1})
+                worksheet.insert_image(
+                    "E1",
+                    f"{SAVE_NAME}\\{SAVE_NAME}_Relationships.png",
+                    {"x_scale": 1, "y_scale": 1},
+                )
                 print_graph = False
-            
+
             for col, value in enumerate(row):
                 worksheet.write(row_num, col, value)
             row_num += 1
-       
-    row_num += 2 
+
+    row_num += 2
     col = 0
     for name, value in new_data.items():
-        worksheet.write(row_num, col, name, formats['bi'])
+        worksheet.write(row_num, col, name, formats["bi"])
         col += 1
 
     def ls_app(*args):
