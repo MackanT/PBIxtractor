@@ -67,36 +67,40 @@ try:
 except OSError:
     print(f"Could not open/read file: {file_path}")
     sys.exit()
-    
-def log_data(message: str, error: str, severity: int = 0):
-        e = str(severity)
-        
-        if severity == -1:
-            e += " Debug: "
-        elif severity == 0:
-            e += " Info: "
-        elif severity == 1:
-            e += " Warning: "
-        elif severity == 2:
-            e += " Error: "
-        else:
-            e += " Critical: "
-            
-        line_len = 130
-        error = str(error)
-        error_clean = ''
-        error_lines = error.split('\n')
-        for line in error_lines:
-            
-            msg_len = len(line)
-            stansas = int(msg_len / line_len) + 1
-            for i in range(stansas):
-                error_clean += line[(line_len) * i: (line_len) * (i + 1)] + '\n'
-        
-        error_clean = error_clean[:-1]
 
-        e += message + f". Error on line {inspect.currentframe().f_back.f_lineno}.\n" + str(error_clean)
-        return e + "\n\n"
+
+def log_data(message: str, error: str, severity: int = 0):
+    e = str(severity)
+
+    if severity == -1:
+        e += " Debug: "
+    elif severity == 0:
+        e += " Info: "
+    elif severity == 1:
+        e += " Warning: "
+    elif severity == 2:
+        e += " Error: "
+    else:
+        e += " Critical: "
+
+    line_len = 122
+    error = str(error)
+    error_clean = ""
+    error_lines = error.split("\n")
+    for line in error_lines:
+        msg_len = len(line)
+        stansas = int(msg_len / line_len) + 1
+        for i in range(stansas):
+            error_clean += line[(line_len) * i : (line_len) * (i + 1)] + "\n"
+
+    error_clean = error_clean[:-1]
+
+    e += (
+        message
+        + f". Error on line {inspect.currentframe().f_back.f_lineno}.\n"
+        + str(error_clean)
+    )
+    return e + "\n\n"
 
 
 class ReportExtractor:
@@ -109,7 +113,6 @@ class ReportExtractor:
 
     def _log_data(self, message: str, error: str, severity: int = 0):
         self.log += log_data(message, error, severity)
-        
 
     def find_value_by_key(self, data: dict, target_key: str) -> dict | None:
         """
@@ -288,7 +291,7 @@ class ReportExtractor:
             elif "isInverted" in val[0]:
                 is_inverted = self.clean_input(val[1])
             else:
-                self._log_data('No Found message value', all_values, 0, 1)
+                self._log_data("No Found message value", all_values, 0, 1)
 
         if val_list[-2:] == ", ":
             val_list = val_list[:-2]
@@ -299,7 +302,7 @@ class ReportExtractor:
         pathFolder = f"{self.path}/temp_{self.name[:-5]}"
         try:
             shutil.rmtree(pathFolder)
-        except:
+        except FileNotFoundError:
             print(f"folder {pathFolder} not present")
         f = ZipFile(f"{self.path}/{self.name}", "r")
         f.extractall(pathFolder)
@@ -362,7 +365,7 @@ class ReportExtractor:
 
                                 # Find issues
                                 if len(temp2) <= 2 or isinstance(temp2, str):
-                                    self._log_data("Hierarchy is to short", row,  1)
+                                    self._log_data("Hierarchy is to short", row, 1)
                                     continue
 
                                 table_name = temp2[0]
@@ -416,7 +419,8 @@ class ReportExtractor:
                                 temp = self.find_value_by_key(data[rowi], "Name").split(
                                     "."
                                 )
-                                disp_name = temp[1] + ": " + temp[2]
+                                temp2 = self.find_value_by_key(data[rowi], "Level")
+                                disp_name = temp[1] + ": " + temp2
 
                             self.add_item(
                                 page=page_name,
@@ -434,25 +438,29 @@ class ReportExtractor:
                             visual_type="Group",
                             item_name="",
                             table_name="",
-                            val_name=self.find_value_by_key(t, "displayName"),
-                            disp_name="",
+                            val_name="",
+                            disp_name=self.find_value_by_key(t, "displayName"),
                             data_type="Group",
                         )
 
                     elif visual_type == "actionButton":
-                        ## TODO make this nicer!
                         temp = self.find_value_by_key(t, "type")
-                        button_type = self.find_value_by_key(temp, "Value")
-                        if button_type is None:
-                            button_type = self.find_value_by_key(t, "Value")
-                        button_type = button_type.replace("'", "")
-
-                        visual_type = None
-                        item_name = None
-                        val_name = "MISSING"
-                        table_name = None
-                        disp_name = None
-                        data_type = None
+                        
+                        values = self.find_all_values(t, "Value")
+                        disp_name = ""
+                        item_name = ""
+                        button_type = ""
+                        visual_type = "Button"
+                        table_name = ""
+                        data_type = "Button"
+                        for row in values:
+                            if 'title' in row[0]:
+                                disp_name = row[1].replace("'", "")
+                            elif 'bookmark' in row[0]:
+                                item_name = row[1].replace("'", "")
+                                val_name = item_name
+                            elif 'type' in row[0]:
+                                button_type = row[1].replace("'", "")
 
                         if button_type == "Bookmark":
                             temp2 = self.find_value_by_key(t, "bookmark")
@@ -488,7 +496,7 @@ class ReportExtractor:
                             )
                             continue
 
-                        visual_type = button_type
+                        # visual_type = button_type
 
                         self.add_item(
                             page=page_name,
@@ -811,104 +819,108 @@ def run_ui():
     from tkinter import filedialog
 
     dpg.create_context()
-    
+
     colors = {
-        'G': (102, 204, 102),
-        'R': (255, 77, 77),
-        'Y': (255, 255, 102),
-        'W': (255, 255, 255),
-        "O": (255, 1543, 51),
+        "W": (255, 255, 255),
+        "G": (102, 204, 102),
+        "Y": (255, 255, 102),
+        "O": (255, 153, 51),
+        "R": (255, 77, 77),
     }
-    
-    def show_and_hide(tag:str, msg:str, type:str = None):
-        
-        dpg.configure_item(tag, color = colors[type], show=True)
+
+    def show_and_hide(tag: str, msg: str, type: str = None):
+        dpg.configure_item(tag, color=colors[type], show=True)
         dpg.set_value(tag, msg)
         threading.Thread(target=lambda: wait_and_show(tag)).start()
 
-    def wait_and_show(tag:str):
+    def wait_and_show(tag: str):
         time.sleep(8)
         dpg.hide_item(tag)
-        
-    def progress_bar(tag:str):
+
+    def progress_bar(tag: str):
         threading.Thread(target=lambda: increment_loader(tag)).start()
-        
-    def increment_loader(tag:str):
-        
-        dpg.configure_item(tag, color=colors['W'])
+
+    def increment_loader(tag: str):
+        dpg.configure_item(tag, color=colors["W"])
         i = 0
         while not stop_event.is_set():
             time.sleep(0.2)
             dpg.show_item(tag)
-            dpg.set_value(tag, '.'*i)
+            dpg.set_value(tag, "." * i)
             i = (i + 1) % 16
-        
+
     def run_extractor():
         global stop_event
         if _PBIX_ != [None, None] and _BIM_ != [None, None]:
+            clear_textbox(container)
             stop_event = threading.Event()
-            progress_bar('runText')
+            progress_bar("runTextExtra")
             run_code = run_cmd()
             stop_event.set()
             time.sleep(0.5)
             if run_code == "Log":
-                show_and_hide('runText', f"Documention generated with warnings. See /{SAVE_NAME}/logs", 'Y')
+                show_and_hide(
+                    "runTextExtra",
+                    f"Documention generated with warnings. See /{SAVE_NAME}/logs or Logs tab below for more information",
+                    "Y",
+                )
                 update_log()
             elif run_code != "Success":
-                show_and_hide('runText', run_code, 'R')
+                show_and_hide("runTextExtra", run_code, "R")
             else:
-                show_and_hide('runText', f"Documentation generated without any issues. See: /{SAVE_NAME}/{SAVE_NAME}.xlsx", 'G')
+                show_and_hide(
+                    "runTextExtra",
+                    f"Documentation generated without any issues. See: /{SAVE_NAME}/{SAVE_NAME}.xlsx",
+                    "G",
+                )
 
     def update_log():
         global REPORT_LOG
-        
-        error_msg = REPORT_LOG.split('\n\n')
+
+        error_msg = REPORT_LOG.split("\n\n")
         for msg in error_msg:
-            if msg == '':
+            if msg == "":
                 continue
-            
+
             error_level = msg[0]
-            
-            if error_level == '-':
-                c = colors['W']
-            if error_level == '0':
-                c = colors['W']
-            elif error_level == '1':
+
+            if error_level == "-":
+                c = colors["W"]
+            if error_level == "0":
+                c = colors["W"]
+            elif error_level == "1":
                 c = colors["Y"]
-            elif error_level == '2':
+            elif error_level == "2":
                 c = colors["O"]
             else:
-                c = colors['R']
-            
+                c = colors["R"]
+
             add_colored_text_at_top(container, msg[2:], c)
-            
-        
 
     def disable_buttons():
         for tag in ["runPBIX", "genTSV"]:
-            dpg.configure_item(tag, enabled=False, show=False)
-        for tag in ["tsvText"]:
-            dpg.configure_item(tag, show=False)
+            dpg.configure_item(tag, enabled=False)
 
     def enable_buttons():
         for tag in ["runPBIX", "genTSV"]:
-            dpg.configure_item(tag, enabled=True, show=True)
-        for tag in ["tsvText"]:
-            dpg.configure_item(tag, show=True)
+            dpg.configure_item(tag, enabled=True)
 
     def generate_tsv():
         global stop_event
         if _PBIX_ != [None, None] and _BIM_ != [None, None]:
             stop_event = threading.Event()
-            progress_bar('tsvTextExtra')
+            progress_bar("tsvTextExtra")
             tsv_result = gen_tsv(force=True)
             stop_event.set()
             time.sleep(0.5)
-            if tsv_result == 'NoTabEd':
-                show_and_hide('tsvTextExtra', 'Could Not Find Tabular Editor 2 on PC. Please add location in Input/TabularEditorLocations.txt', 'R')
+            if tsv_result == "NoTabEd":
+                show_and_hide(
+                    "tsvTextExtra",
+                    "Could Not Find Tabular Editor 2 on PC. Please add location in Input/TabularEditorLocations.txt",
+                    "R",
+                )
             else:
-                show_and_hide('tsvTextExtra', 'TSV File generated successfully!', 'G')
-
+                show_and_hide("tsvTextExtra", "TSV File generated successfully!", "G")
 
     ### UI Functions ###
     def load_file(input):
@@ -1006,7 +1018,7 @@ def run_ui():
     def find_color(name):
         global default_colors
         old_color = None
-        name = name.split(' ')[0]
+        name = name.split(" ")[0]
         for i, color in enumerate(default_colors):
             if color[0] == name:
                 old_color = color[1]
@@ -1028,93 +1040,99 @@ def run_ui():
             new_color.append(int(col))
         default_colors[color_index][1] = new_color
 
-    def edit_settings(sender, app_data, user_data):
-        dpg.configure_item("File Settings", default_open=False)
-        dpg.configure_item("Additional Settings", default_open=True)
-        dpg.configure_item("Logs", default_open=True)
-        dpg.configure_item("User Input", default_open=False)
-
     def toggle_log_toggle(sender, app_data, user_data):
         global LOG_DATA
         LOG_DATA = dpg.get_value(sender)
-    
+
     def add_colored_text_at_top(container, text, color):
         new_text = dpg.add_text(text, parent=container, color=color)
         children = dpg.get_item_children(container)[1]
         if len(children) > 1:
             dpg.move_item(new_text, parent=container, before=children[0])
-            
+
+    def clear_textbox(container):
+        children = dpg.get_item_children(container, 1)
+        for child in children:
+            if dpg.get_item_type(child) == "mvAppItemType::mvText":
+                dpg.delete_item(child)
+
     def add_input(version):
-        
-        cwd = os.getcwd() + '\\Input\\'
-        
-        if version == 'dataType':
-            
-            info_tag = 'dataTypeInputInfo'
-            file_name = 'DataTypes.csv'
-            val1 = dpg.get_value('dataTypeInputO')
-            val2 = dpg.get_value('dataTypeInputP')
-            
+        cwd = os.getcwd() + "\\Input\\"
+
+        if version == "dataType":
+            info_tag = "dataTypeInputInfo"
+            file_name = "DataTypes.csv"
+            val1 = dpg.get_value("dataTypeInputO")
+            val2 = dpg.get_value("dataTypeInputP")
+
             val1_state = False
             val2_state = False
-            if val1 == '':
+            if val1 == "":
                 val1_state = True
-            if val2 == '':
+            if val2 == "":
                 val2_state = True
-            
+
             if val1_state and val2_state:
-                msg = 'Both Inputs are non-valid!'
+                msg = "Both Inputs are non-valid!"
             elif val2_state:
-                msg = 'Non-valid input in Data Type PBI!'
+                msg = "Non-valid input in Data Type PBI!"
             elif val1_state:
-                msg = 'Non-valid input in Data Type Output!'
-                
+                msg = "Non-valid input in Data Type Output!"
+
             if val1_state or val2_state:
-                show_and_hide(info_tag, msg, 'Y')
+                show_and_hide(info_tag, msg, "Y")
                 return
-            
-            val1 = f'{val2},{val1}'
-            
-        elif version == 'functionName':
-            
-            info_tag = 'functionNameInputInfo'
-            file_name = 'FunctionNames.csv'
-            val1 = dpg.get_value('functionNameInput')
-            if val1 == '':
-                show_and_hide(info_tag, 'Cannot enter blank function name!', 'Y')
+
+            val1 = f"{val2},{val1}"
+
+        elif version == "functionName":
+            info_tag = "functionNameInputInfo"
+            file_name = "FunctionNames.csv"
+            val1 = dpg.get_value("functionNameInput")
+            if val1 == "":
+                show_and_hide(info_tag, "Cannot enter blank function name!", "Y")
                 return
-        
-        elif version == 'visualType':
-            
-            info_tag = 'visualTypeInputInfo'
-            file_name = 'VisualTypes.csv'
-            val1 = dpg.get_value('visualTypeInput')
-            if val1 == '':
-                show_and_hide(info_tag, 'Cannot enter blank visual type!', 'Y')
+
+        elif version == "visualType":
+            info_tag = "visualTypeInputInfo"
+            file_name = "VisualTypes.csv"
+            val1 = dpg.get_value("visualTypeInput")
+            if val1 == "":
+                show_and_hide(info_tag, "Cannot enter blank visual type!", "Y")
                 return
-            
-        elif version == 'TELocation':
-            
-            info_tag = 'TELocationInputInfo'
-            file_name = 'TabularEditorLocations.txt'
-            val1 = dpg.get_value('TELocation')
-            if val1 == '':
-                show_and_hide(info_tag, 'Cannot enter blank save location of Tabular Editor 2!', 'Y')
+
+        elif version == "TELocation":
+            info_tag = "TELocationInputInfo"
+            file_name = "TabularEditorLocations.txt"
+            val1 = dpg.get_value("TELocation")
+            if val1 == "":
+                show_and_hide(
+                    info_tag,
+                    "Cannot enter blank save location of Tabular Editor 2!",
+                    "Y",
+                )
                 return
 
         else:
             return
-        
-        if file_name[-3:] == 'txt':
-            with open(cwd + file_name, 'a') as txt_file:
-                txt_file.write(val1 + '\n')
+
+        if file_name[-3:] == "txt":
+            with open(cwd + file_name, "a") as txt_file:
+                txt_file.write(val1 + "\n")
         else:
-            with open(cwd + file_name, 'a', newline='') as csv_file:
-                csv_file.write(val1 + '\n')
-        
-        show_and_hide(info_tag, 'Data saved successfully!', 'G')
-        
-        
+            with open(cwd + file_name, "a", newline="") as csv_file:
+                csv_file.write(val1 + "\n")
+
+        show_and_hide(info_tag, "Data saved successfully!", "G")
+
+    with dpg.theme() as disabled_theme:
+        with dpg.theme_component(dpg.mvButton, enabled_state=False):
+            dpg.add_theme_color(dpg.mvThemeCol_Text, [120, 120, 120])
+            dpg.add_theme_color(dpg.mvThemeCol_Button, [75, 75, 77])
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, [75, 75, 77])
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, [75, 75, 77])
+    dpg.bind_theme(disabled_theme)
+
     with dpg.texture_registry(show=False):
         width, height, channels, data = dpg.load_image("logo_large.png")
         dpg.add_static_texture(
@@ -1122,7 +1140,7 @@ def run_ui():
         )
 
     with dpg.window(label="PB-Ixtractor", width=1000, height=800):
-        with dpg.collapsing_header(label="PB-Ixtractor"):
+        with dpg.collapsing_header(label="About"):
             dpg.add_image("logo_texture")
         with dpg.collapsing_header(
             label="File Settings", default_open=True, tag="File Settings"
@@ -1130,19 +1148,20 @@ def run_ui():
             dpg.add_button(
                 label="Select .pbix File", callback=lambda: load_file("pbix")
             )
-            dpg.add_text("Selected File: No file selected", tag="pbix_file_path_label")
+            dpg.add_text(
+                "Selected File: No .pbix file selected", tag="pbix_file_path_label"
+            )
 
             dpg.add_spacer(height=3)
 
             dpg.add_button(
                 label="Select .bim File",
-                show=False,
-                enabled=False,
+                enabled=True,
                 tag="BimSelector",
                 callback=lambda: load_file("bim"),
             )
             dpg.add_text(
-                "Selected File: No file selected", tag="bim_file_path_label", show=False
+                "Selected File: No .bim file selected", tag="bim_file_path_label"
             )
 
             dpg.add_spacer(height=3)
@@ -1174,16 +1193,51 @@ def run_ui():
             )
             dpg.set_value("descriptionTag", DESCRIPT_TAG)
 
-            dpg.add_spacer(height=15)
-            dpg.add_button(label="Additional Settings", callback=edit_settings)
-            dpg.add_spacer(height=1)
+            dpg.add_spacer(height=10)
+            dpg.add_button(
+                label="Regenerate tsv file",
+                tag="genTSV",
+                enabled=False,
+                callback=generate_tsv,
+            )
+            dpg.add_text(
+                "To properly extract data types for measures, ensure the .pbix file is open in PBI desktop!",
+                tag="tsvText",
+            )
+            dpg.add_text(
+                "",
+                show=False,
+                tag="tsvTextExtra",
+            )
+            dpg.add_spacer(height=10)
+            dpg.add_button(
+                label="Run PB-Ixtractor",
+                tag="runPBIX",
+                enabled=False,
+                callback=run_extractor,
+            )
+            dpg.add_text(
+                "Generates the documentation files, will generate the .tsv file if it does not exist.",
+                tag="runText",
+            )
+            dpg.add_text(
+                "",
+                show=False,
+                tag="runTextExtra",
+            )
+            dpg.add_spacer(height=20)
 
         with dpg.collapsing_header(
             label="Additional Settings", default_open=False, tag="Additional Settings"
         ):
-            dpg.add_checkbox(label='Enable Error Logging', callback=toggle_log_toggle, tag='log_toggle', default_value=True)
+            dpg.add_checkbox(
+                label="Enable Error Logging",
+                callback=toggle_log_toggle,
+                tag="log_toggle",
+                default_value=True,
+            )
             dpg.add_spacer(height=5)
-            
+
             with dpg.group(horizontal=True):
                 dpg.add_color_picker(
                     default_value=(49, 101, 187, 255),
@@ -1206,21 +1260,29 @@ def run_ui():
                         "VarNames - The Word VAR in Measures.",
                     ],
                     callback=set_colors,
-                    tag="radioColors"
+                    tag="radioColors",
                 )
-                
+
+        with dpg.collapsing_header(label="Logs", default_open=False, tag="Logs"):
+            with dpg.group(horizontal=True, tag="log_data"):
+                with dpg.child_window(width=880, height=300):
+                    container = dpg.add_child_window(width=960, height=280)
+
+                with dpg.child_window(width=80, height=300):
+                    texts = ["Debug", "Info", "Warning", "Error", "Critical"]
+                    for i, color in enumerate(colors.values()):
+                        with dpg.drawlist(width=20.0, height=20.0, tag=f"drawlist{i}"):
+                            dpg.draw_rectangle(
+                                pmin=[0.0, 0.0],
+                                pmax=[20.0, 20.0],
+                                color=color,
+                                fill=color,
+                            )
+                        dpg.add_text(texts[i])
+
         with dpg.collapsing_header(
-            label="Logs", default_open=False, tag="Logs"
+            label="User Input", default_open=False, tag="User Input"
         ):
-            
-            with dpg.child_window(width=980, height=300):
-                container = dpg.add_child_window(width=960, height=280)
-        
-        with dpg.collapsing_header(
-            label="User Input", default_open=True, tag="User Input"
-        ):
-            
-            
             dpg.add_input_text(
                 label="Data Type PBI",
                 tag="dataTypeInputP",
@@ -1229,68 +1291,64 @@ def run_ui():
                 label="Data Type Output",
                 tag="dataTypeInputO",
             )
-            dpg.add_button(label="Data Type", tag='dataTypeInputButton', callback=lambda: add_input('dataType'))
+            dpg.add_button(
+                label="Data Type",
+                tag="dataTypeInputButton",
+                callback=lambda: add_input("dataType"),
+            )
             dpg.add_text(
                 "",
                 show=False,
                 tag="dataTypeInputInfo",
             )
             dpg.add_spacer(height=5)
-            
+
             dpg.add_input_text(
                 label="FunctionName",
                 tag="functionNameInput",
             )
-            dpg.add_button(label="Function Name", tag='functionNameInputButton', callback=lambda: add_input('functionName'))
+            dpg.add_button(
+                label="Function Name",
+                tag="functionNameInputButton",
+                callback=lambda: add_input("functionName"),
+            )
             dpg.add_text(
                 "",
                 show=False,
                 tag="functionNameInputInfo",
             )
             dpg.add_spacer(height=5)
-            
+
             dpg.add_input_text(
                 label="Visual Type",
                 tag="visualTypeInput",
             )
-            dpg.add_button(label="Visual Type", tag='visualTypeInputButton', callback=lambda: add_input('visualType'))
+            dpg.add_button(
+                label="Visual Type",
+                tag="visualTypeInputButton",
+                callback=lambda: add_input("visualType"),
+            )
             dpg.add_text(
                 "",
                 show=False,
                 tag="visualTypeInputInfo",
             )
             dpg.add_spacer(height=5)
-            
+
             dpg.add_input_text(
                 label="Tabular Editor Location",
                 tag="TELocation",
             )
-            dpg.add_button(label="TE Location", tag='TELocationButton', callback=lambda: add_input('TELocation'))
+            dpg.add_button(
+                label="TE Location",
+                tag="TELocationButton",
+                callback=lambda: add_input("TELocation"),
+            )
             dpg.add_text(
                 "",
                 show=False,
                 tag="TELocationInputInfo",
             )
-            
-        dpg.add_spacer(height=10)
-        dpg.add_button(label="Regenerate tsv file", tag="genTSV", callback=generate_tsv)
-        dpg.add_text(
-            "To properly extract data types for measures, ensure the .pbix file is open in PBI desktop!",
-            tag="tsvText",
-        )
-        dpg.add_text(
-            "",
-            show=False,
-            tag="tsvTextExtra",
-        )
-        dpg.add_spacer(height=10)
-        dpg.add_button(label="Run PB-Ixtractor", tag="runPBIX", callback=run_extractor)
-        dpg.add_text(
-            "",
-            show=False,
-            tag="runText",
-        )
-        disable_buttons()
 
     # Window
     dpg.create_viewport(
@@ -1304,14 +1362,14 @@ def run_ui():
 
 def gen_tsv(force: bool = False):
     cwd = os.getcwd() + f"\\{SAVE_NAME}"
-    
+
     if not os.path.exists(cwd):
         os.makedirs(cwd)
 
     def find_tabular_editor_path() -> str:
         target_exe = Path("TabularEditor.exe")
-        
-        input_dir = os.getcwd() + '\\Input\\TabularEditorLocations.txt'
+
+        input_dir = os.getcwd() + "\\Input\\TabularEditorLocations.txt"
 
         # Default directories to search
         if not os.path.exists(input_dir):
@@ -1319,16 +1377,15 @@ def gen_tsv(force: bool = False):
                 "C:\\Program Files",
                 "C:\\Program Files (x86)",
             ]
-            with open(input_dir, 'w') as file:
+            with open(input_dir, "w") as file:
                 for string in common_directories:
-                    file.write(string + '\n')
+                    file.write(string + "\n")
         else:
-            
-            with open(input_dir, 'r') as file:
+            with open(input_dir, "r") as file:
                 common_directories = file.readlines()
 
             for i, row in enumerate(common_directories):
-                common_directories[i] = Path(row.replace('\n', ''))
+                common_directories[i] = Path(row.replace("\n", ""))
 
         for directory in common_directories:
             target_path = directory / "Tabular Editor" / target_exe
@@ -1342,7 +1399,7 @@ def gen_tsv(force: bool = False):
 
     tab_edit_path = find_tabular_editor_path()
     if tab_edit_path is None:
-        return 'NoTabEd'
+        return "NoTabEd"
 
     if force and os.path.exists(f"{cwd}\\TabularScript.cs"):
         os.remove(f"{cwd}\\TabularScript.cs")
@@ -1402,13 +1459,29 @@ def gen_tsv(force: bool = False):
 
     wait_for_file(file_path=f"{cwd}\\documentation.tsv", timeout=5)
 
-def write_to_excel(worksheet, row:int, col:int, text:list[str]):
+
+def write_to_excel(worksheet, row: int, col: int, text: list[str]):
     
-    if len(text) <= 2:
-        worksheet.write(row, col, *text)
+    # if len(text) <= 2:
+    #     worksheet.write(row, col, *text)
+    # else:
+    #     if 'Group: ' in text:
+    #         1
+    #     worksheet.write_rich_string(row, col, *text)
+        # If text is a list of strings
+        
+    if isinstance(text, list):
+        if len(text) <= 2:
+            # Join the elements into a single string and write to the cell
+            worksheet.write(row, col, ' '.join(map(str, text)))  # Joining items with a space
+        else:
+            # Write a rich formatted string for lists longer than 2 elements
+            # The first and last elements should be plain strings, and the rest are formats/strings
+            worksheet.write_rich_string(row, col, *text)
     else:
-        worksheet.write_rich_string(row, col, *text)
-    
+        # If text is not a list, write the single value
+        worksheet.write(row, col, text)
+
 
 def is_excel_open_with_file(file_path: str) -> bool:
     """
@@ -1441,13 +1514,12 @@ def run_cmd():
     if is_excel_open_with_file(file_path):
         return f"Please Close File: {SAVE_NAME}.xlsx before proceeding!"
 
-    button_type_list = ["Bookmark", "PageNavigation"]
+    button_type_list = ["Bookmark", "PageNavigation", "Button"]
 
     tsv_path = Path(f"{cwd_save}\\documentation.tsv")
     if not os.path.isfile(tsv_path):
-        
-        if gen_tsv() == 'NoTabEd':
-            return 'NoTabEd'
+        if gen_tsv() == "NoTabEd":
+            return "NoTabEd"
 
     rep_ex = ReportExtractor(
         _PBIX_[1],
@@ -1905,9 +1977,9 @@ def run_cmd():
         function_names = find_functions(vDefinition)
         columns = find_columns(vDefinition)
         tables = [i for i, _ in columns]
-        columns_clean = ['[' + i + ']' for _, i in columns]
+        columns_clean = ["[" + i + "]" for _, i in columns]
         measures = find_measures(vDefinition)
-        
+
         for column in columns:
             if column in unused_columns:
                 unused_columns.remove(column)
@@ -2005,9 +2077,13 @@ def run_cmd():
         for col, value in enumerate(row):
             if col == definition_index and len(format_array) != 0:
                 write_to_excel(worksheet, row_num, col, format_array)
+                if len(format_array) == 1:
+                    1
             elif col == parent_index and len(parents_array) != 0:
                 write_to_excel(worksheet, row_num, col, parents_array)
-            else:
+                if len(parents_array) == 1:
+                    1
+            elif value != '':
                 worksheet.write(row_num, col, value)
         row_num += 1
 
@@ -2015,6 +2091,7 @@ def run_cmd():
     for col_pair in unused_columns:
         worksheet.write(row_num, 0, col_pair[0] + "[" + col_pair[1] + "]")
         row_num += 1
+
 
     # Create a tab per report page with visual info.
     for report_name in report_info["Page"].unique().tolist():
@@ -2079,7 +2156,9 @@ def run_cmd():
                 v_type = "Group"
                 s_type = "Panel"
             else:
-                REPORT_LOG += log_data('New Visual type not yet supported!', visual_type, 1)
+                REPORT_LOG += log_data(
+                    "New Visual type not yet supported!", visual_type, 1
+                )
 
             new_data = {
                 "Item Type": v_type,
@@ -2122,7 +2201,7 @@ def run_cmd():
         )
         df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
 
-        row_num = 0
+        row_num = 1
         slicer_switch = True
         filter_switch = True
         button_switch = True
@@ -2176,12 +2255,14 @@ def run_cmd():
                     formats["bold"],
                     rrow["Type"] + ": ",
                     formats["italic"],
-                    rrow["Name"],
+                    rrow["Display Name"],
+                    "\n",
+                    rrow["Name"]
                 ]
 
             else:
                 if isinstance(row["Item Type"], float):
-                    REPORT_LOG += log_data('NaN Item Type Encountered!', row, 2)
+                    REPORT_LOG += log_data("NaN Item Type Encountered!", row, 2)
                     continue  # Temp fix for NaN Item Type
 
                 # Filters
@@ -2198,23 +2279,23 @@ def run_cmd():
                     write_to_excel(worksheetX, row_num, col, filter_array)
                 elif col == 6:
                     continue
-                else:
-                    worksheetX.write(row_num + 1, col, value)
+                elif value != '':
+                    worksheetX.write(row_num, col, value)
 
             row_num += 1
 
     workbook.close()
-    
+
     ## Print Logging Info -- Needs more love
     if REPORT_LOG and LOG_DATA:
         t = time.localtime()
         current_time = time.strftime("%H_%M_%S", t)
         location_folder = cwd + f"\\{SAVE_NAME}\\logs"
         location = location_folder + f"\\log_data_{current_time}.txt"
-        
+
         if not os.path.exists(location_folder):
             os.makedirs(location_folder)
-        
+
         with open(location, "w") as text_file:
             text_file.write(REPORT_LOG)
 
@@ -2229,18 +2310,18 @@ if __name__ == "__main__":
     )
 
     # Define the command-line arguments
-    parser.add_argument("-file", dest="file", type=str, help="Name of PBIX-File")
+    parser.add_argument("-i", dest="file", type=str, help="Name of PBIX-File")
     parser.add_argument("-o", dest="output", type=str, help="Name of output-File")
     parser.add_argument(
-        "-ui", action="store_true", help="Runs in UI mode with additional options"
+        "--ui", action="store_true", help="Runs in UI mode with additional options"
     )
     parser.add_argument(
-        "-yes_man", dest="yes_man", action="store_true", help="Remove Input Protection"
+        "--yes_man", dest="yes_man", action="store_true", help="Remove Input Protection"
     )
 
     # Parse the command-line arguments
     args = parser.parse_args()
-
+    
     if args.ui:
         run_ui()
     else:
@@ -2252,17 +2333,17 @@ if __name__ == "__main__":
                 SAVE_NAME = _file_
             yes_man = args.yes_man
         else:
-            _file_ = "Order Entry"
+            _file_ = "ReportName"
             yes_man = False
             SAVE_NAME = _file_
 
         _PBIX_ = [
             _file_,
-            "C:\\Users\\Reports",
+            "C:\\Users\\",
         ]
         _BIM_ = [
             _file_,
-            "C:\\Users\\PB-Ixtractor",
+            "C:\\Users\\",
         ]
 
         result = run_cmd()
@@ -2282,3 +2363,7 @@ if __name__ == "__main__":
 ## Less valuable
 # Font size, show blanks as, padding, label position
 #
+# BUGS:
+# File Name måste vara under 31 filer
+# Script att ladda ner paket automatiskt
+# ÅÄÖ i filnamen
