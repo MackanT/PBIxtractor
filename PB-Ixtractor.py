@@ -1424,8 +1424,8 @@ def gen_tsv(force: bool = False):
 
 
     // Get their properties in TSV format (tabulator-separated):
-    //var tsv = ExportProperties(objects,"Name,ObjectType,Parent,Description,FormatString,DataType,Expression");
-    var tsv = ExportProperties(objects);
+    var tsv = ExportProperties(objects,"Name,Description,SourceColumn,Expression,FormatString,DataType,DisplayFolder"); // Updated to include FormatString + DisplayFolder
+    //var tsv = ExportProperties(objects);
 
     // Save the TSV to a file:
     SaveFile("{cwd_parsed}//documentation.tsv", tsv);
@@ -1655,6 +1655,8 @@ def run_cmd():
         "Definition": [],
         "Table": [],
         "Dependants": [],
+        "Format": [],
+        "Folder": [],
         "Comment": [],
     }
 
@@ -1765,6 +1767,8 @@ def run_cmd():
         df_definition = definition[definition_start:].strip()
         df_definition = df_definition.replace("\n", "\r\n")
         df_table = data_type[1]
+        df_format = '' if pd.isna(line_data.get('FormatString', '')) else line_data.get('FormatString', '')
+        df_display = '' if pd.isna(line_data.get('DisplayFolder', '')) else line_data.get('DisplayFolder', '')
 
         # Find which page the measures/calculations are on
         df_report_pages = []
@@ -1780,6 +1784,8 @@ def run_cmd():
             "Definition": df_definition,
             "Table": df_table,
             "Dependants": "",
+            "Format": df_format,
+            "Folder": df_display,
             "Comment": "",
         }
 
@@ -2333,20 +2339,21 @@ if __name__ == "__main__":
                 SAVE_NAME = _file_
             yes_man = args.yes_man
         else:
-            _file_ = "ReportName"
+            _file_ = "SemanticModell"
             yes_man = False
             SAVE_NAME = _file_
 
         _PBIX_ = [
             _file_,
-            "C:\\Users\\",
+            "C:\\Users\\Reports",
         ]
         _BIM_ = [
             _file_,
-            "C:\\Users\\",
+            "C:\\Users\\Reports",
         ]
 
         result = run_cmd()
+        # result = run_ui()
         print(result)
 
 # Maybe includes additional info to extract? https://www.linkedin.com/pulse/streamlining-model-documentation-tabular-editor-power-jarom-gleed
