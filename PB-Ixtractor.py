@@ -445,7 +445,7 @@ class ReportExtractor:
 
                     elif visual_type == "actionButton":
                         temp = self.find_value_by_key(t, "type")
-                        
+
                         values = self.find_all_values(t, "Value")
                         disp_name = ""
                         item_name = ""
@@ -454,12 +454,12 @@ class ReportExtractor:
                         table_name = ""
                         data_type = "Button"
                         for row in values:
-                            if 'title' in row[0]:
+                            if "title" in row[0]:
                                 disp_name = row[1].replace("'", "")
-                            elif 'bookmark' in row[0]:
+                            elif "bookmark" in row[0]:
                                 item_name = row[1].replace("'", "")
                                 val_name = item_name
-                            elif 'type' in row[0]:
+                            elif "type" in row[0]:
                                 button_type = row[1].replace("'", "")
 
                         if button_type == "Bookmark":
@@ -1461,19 +1461,20 @@ def gen_tsv(force: bool = False):
 
 
 def write_to_excel(worksheet, row: int, col: int, text: list[str]):
-    
     # if len(text) <= 2:
     #     worksheet.write(row, col, *text)
     # else:
     #     if 'Group: ' in text:
     #         1
     #     worksheet.write_rich_string(row, col, *text)
-        # If text is a list of strings
-        
+    # If text is a list of strings
+
     if isinstance(text, list):
         if len(text) <= 2:
             # Join the elements into a single string and write to the cell
-            worksheet.write(row, col, ' '.join(map(str, text)))  # Joining items with a space
+            worksheet.write(
+                row, col, " ".join(map(str, text))
+            )  # Joining items with a space
         else:
             # Write a rich formatted string for lists longer than 2 elements
             # The first and last elements should be plain strings, and the rest are formats/strings
@@ -1767,8 +1768,16 @@ def run_cmd():
         df_definition = definition[definition_start:].strip()
         df_definition = df_definition.replace("\n", "\r\n")
         df_table = data_type[1]
-        df_format = '' if pd.isna(line_data.get('FormatString', '')) else line_data.get('FormatString', '')
-        df_display = '' if pd.isna(line_data.get('DisplayFolder', '')) else line_data.get('DisplayFolder', '')
+        df_format = (
+            ""
+            if pd.isna(line_data.get("FormatString", ""))
+            else line_data.get("FormatString", "")
+        )
+        df_display = (
+            ""
+            if pd.isna(line_data.get("DisplayFolder", ""))
+            else line_data.get("DisplayFolder", "")
+        )
 
         # Find which page the measures/calculations are on
         df_report_pages = []
@@ -2089,7 +2098,7 @@ def run_cmd():
                 write_to_excel(worksheet, row_num, col, parents_array)
                 if len(parents_array) == 1:
                     1
-            elif value != '':
+            elif value != "":
                 worksheet.write(row_num, col, value)
         row_num += 1
 
@@ -2097,7 +2106,6 @@ def run_cmd():
     for col_pair in unused_columns:
         worksheet.write(row_num, 0, col_pair[0] + "[" + col_pair[1] + "]")
         row_num += 1
-
 
     # Create a tab per report page with visual info.
     for report_name in report_info["Page"].unique().tolist():
@@ -2246,7 +2254,7 @@ def run_cmd():
                         if im != 0:
                             ls_app("\n")
                         ls_app(formats["bold"], current_type + ": ")
-                    ls_app("\n", formats["italic"], f'{rrow["Table"]}[{rrow["Name"]}]')
+                    ls_app("\n", formats["italic"], f"{rrow['Table']}[{rrow['Name']}]")
 
                     if rrow["Display Name"]:
                         ls_app(
@@ -2263,7 +2271,7 @@ def run_cmd():
                     formats["italic"],
                     rrow["Display Name"],
                     "\n",
-                    rrow["Name"]
+                    rrow["Name"],
                 ]
 
             else:
@@ -2285,7 +2293,7 @@ def run_cmd():
                     write_to_excel(worksheetX, row_num, col, filter_array)
                 elif col == 6:
                     continue
-                elif value != '':
+                elif value != "":
                     worksheetX.write(row_num, col, value)
 
             row_num += 1
@@ -2319,7 +2327,10 @@ if __name__ == "__main__":
     parser.add_argument("-i", dest="file", type=str, help="Name of PBIX-File")
     parser.add_argument("-o", dest="output", type=str, help="Name of output-File")
     parser.add_argument(
-        "--ui", action="store_true", help="Runs in UI mode with additional options"
+        "--ui",
+        default=True,
+        action="store_true",
+        help="Runs in UI mode with additional options",
     )
     parser.add_argument(
         "--yes_man", dest="yes_man", action="store_true", help="Remove Input Protection"
@@ -2327,7 +2338,7 @@ if __name__ == "__main__":
 
     # Parse the command-line arguments
     args = parser.parse_args()
-    
+
     if args.ui:
         run_ui()
     else:
