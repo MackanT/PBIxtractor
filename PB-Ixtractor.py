@@ -1943,7 +1943,7 @@ def run_cmd():
         "italic": workbook.add_format({"italic": True}),
         "bi": workbook.add_format({"bold": True, "italic": True}),
         "para": [
-            workbook.add_format({"color": color}) for color in paranthesis_color * 3
+            workbook.add_format({"color": color}) for color in paranthesis_color * 5
         ],
     }
 
@@ -2063,10 +2063,10 @@ def run_cmd():
                 ls_app("|| ")
             elif token == "(":
                 parenthesis_count += 1
-                safe_count = max(0, min(parenthesis_count, 8))
+                safe_count = max(0, min(parenthesis_count, 14))
                 ls_app(formats["para"][safe_count], token + " ")
             elif token == ")":
-                safe_count = max(0, min(parenthesis_count, 8))
+                safe_count = max(0, min(parenthesis_count, 14))
                 ls_app(formats["para"][safe_count], token + " ")
                 parenthesis_count -= 1
             elif token == "VAR":
