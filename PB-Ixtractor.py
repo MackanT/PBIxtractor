@@ -1721,7 +1721,7 @@ def run_cmd():
 
         match = re.search(escape_pattern, exp)
         if match:
-            dataset.iloc[i]["Expression"] = exp.replace(match.group(0), match.group(1))
+            dataset.at[i, "Expression"] = exp.replace(match.group(0), match.group(1))
 
     # Read .tsv file and convert to usable dataframe
     for i in range(len(dataset)):
@@ -2063,9 +2063,11 @@ def run_cmd():
                 ls_app("|| ")
             elif token == "(":
                 parenthesis_count += 1
-                ls_app(formats["para"][parenthesis_count], token + " ")
+                safe_count = max(0, min(parenthesis_count, 8))
+                ls_app(formats["para"][safe_count], token + " ")
             elif token == ")":
-                ls_app(formats["para"][parenthesis_count], token + " ")
+                safe_count = max(0, min(parenthesis_count, 8))
+                ls_app(formats["para"][safe_count], token + " ")
                 parenthesis_count -= 1
             elif token == "VAR":
                 ls_app(formats["var"], token + " ")
