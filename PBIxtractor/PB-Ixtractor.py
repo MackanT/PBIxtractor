@@ -2133,9 +2133,11 @@ def run_cmd():
         save_report_name = report_name.replace("/", "_")
         worksheetX = workbook.add_worksheet(save_report_name)
 
-        worksheetX.set_column(0, 5, 30, def_format)
-        worksheetX.set_column(2, 2, 100, def_format)
-        worksheetX.set_column(3, 3, 60, def_format)
+        worksheetX.set_column(0, 7, 30, def_format)
+        worksheetX.set_column(2, 2, 20, def_format)
+        worksheetX.set_column(3, 3, 50, def_format)
+        worksheetX.set_column(4, 4, 30, def_format)
+        worksheetX.set_column(5, 5, 60, def_format)
 
         local_df = report_info[report_info["Page"] == report_name]
         visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
@@ -2145,7 +2147,9 @@ def run_cmd():
         dataX = {
             "Item Type": [],
             "Visual Type": [],
-            "Description": [],
+            "Type": [],
+            "Field": [],
+            "DisplayName": [],
             "Visual Filters": [],
             "Interactivity": [],
             "Comment": [],
@@ -2172,10 +2176,10 @@ def run_cmd():
                 s_type = "Gauge"
             elif visual_type == "slicer":
                 v_type = "Slicer"
-                s_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Table"]
+                s_type = "Slicer"
             elif visual_type == "advancedSlicerVisual":
-                v_type = "Slicer (new)"
-                s_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Table"]
+                v_type = "Slicer"
+                s_type = "Slicer (new)"
             elif visual_type in visual_type_list:
                 words = re.findall("[a-zA-Z][^A-Z]*", visual_type)
                 s_type = ""
@@ -2198,7 +2202,9 @@ def run_cmd():
             new_data = {
                 "Item Type": v_type,
                 "Visual Type": s_type,
-                "Description": "",
+                "Type": "",
+                "Field": "",
+                "DisplayName": "",
                 "Visual Filters": "",
                 "Interactivity": "",
                 "Comment": "",
@@ -2213,7 +2219,9 @@ def run_cmd():
                 new_data = {
                     "Item Type": "Filter",
                     "Visual Type": "This Page",
-                    "Description": "",
+                    "Type": "",
+                    "Field": "",
+                    "DisplayName": "",
                     "Visual Filters": "",
                     "Interactivity": "",
                     "Comment": "",
@@ -2265,35 +2273,46 @@ def run_cmd():
                 button_switch = False
 
             if filter_switch:
-                # Regular Measures
-                format_array = []
+                # Regular Visuals/Slicers - create one row per field
                 r_data = local_df[local_df["Visual ID"] == row["ID"]]
-                current_type = None
-                for im, rrow in enumerate(r_data.iloc()):
-                    if rrow["Type"] != current_type:
-                        current_type = rrow["Type"]
-                        if im != 0:
-                            ls_app("\n")
-                        ls_app(formats["bold"], current_type + ": ")
-                    ls_app("\n", formats["italic"], f"{rrow['Table']}[{rrow['Name']}]")
+                for field_idx, rrow in enumerate(r_data.iloc()):
+                    # Write Item Type and Visual Type on every row
+                    worksheetX.write(row_num, 0, row["Item Type"])
+                    worksheetX.write(row_num, 1, row["Visual Type"])
 
-                    if rrow["Display Name"]:
-                        ls_app(
-                            "\n\t Display Name: ",
-                            formats["italic"],
-                            rrow["Display Name"],
-                        )
+                    # Write Type, Field, DisplayName
+                    worksheetX.write(row_num, 2, rrow["Type"])
+                    worksheetX.write(row_num, 3, f"{rrow['Table']}[{rrow['Name']}]")
+                    # Use field name if Display Name is missing
+                    display_name = (
+                        str(rrow["Display Name"])
+                        if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
+                        else rrow["Name"]
+                    )
+                    worksheetX.write(row_num, 4, display_name)
+
+                    # Write Visual Filters on every row
+                    if len(filter_array) != 0:
+                        write_to_excel(worksheetX, row_num, 5, filter_array)
+
+                    row_num += 1
 
             elif row["Item Type"] in ["Button", "Group"]:
                 rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                format_array = [
-                    formats["bold"],
-                    rrow["Type"] + ": ",
-                    formats["italic"],
-                    rrow["Display Name"],
-                    "\n",
-                    rrow["Name"],
-                ]
+                worksheetX.write(row_num, 0, row["Item Type"])
+                worksheetX.write(row_num, 1, row["Visual Type"])
+                worksheetX.write(row_num, 2, rrow["Type"])
+                worksheetX.write(row_num, 3, rrow["Name"])
+                # Use field name if Display Name is missing
+                display_name = (
+                    str(rrow["Display Name"])
+                    if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
+                    else rrow["Name"]
+                )
+                worksheetX.write(row_num, 4, display_name)
+                if len(filter_array) != 0:
+                    write_to_excel(worksheetX, row_num, 5, filter_array)
+                row_num += 1
 
             else:
                 if isinstance(row["Item Type"], float):
@@ -2301,23 +2320,214 @@ def run_cmd():
                     continue  # Temp fix for NaN Item Type
 
                 # Filters
-                format_array = [formats["bold"]]
-                ls_app(
-                    report_filters_string[row["ID"]][3],
-                    " " + report_filters_string[row["ID"]][4],
+                worksheetX.write(row_num, 0, row["Item Type"])
+                worksheetX.write(row_num, 1, row["Visual Type"])
+                worksheetX.write(row_num, 2, "")
+                filter_field = report_filters_string[row["ID"]][3]
+                filter_details = report_filters_string[row["ID"]][4]
+                worksheetX.write(row_num, 3, filter_field)
+                worksheetX.write(row_num, 4, filter_details)
+                row_num += 1
+
+    # Create consolidated "Pages" tab with all pages combined
+    worksheetPages = workbook.add_worksheet("Pages")
+    worksheetPages.set_column(0, 8, 30, def_format)
+    worksheetPages.set_column(3, 3, 20, def_format)
+    worksheetPages.set_column(4, 4, 50, def_format)
+    worksheetPages.set_column(5, 5, 30, def_format)
+    worksheetPages.set_column(6, 6, 60, def_format)
+
+    # Write header with "Page" column added at the beginning
+    col = 0
+    worksheetPages.write(0, col, "Page", formats["bi"])
+    col += 1
+    for name in [
+        "Item Type",
+        "Visual Type",
+        "Type",
+        "Field",
+        "DisplayName",
+        "Visual Filters",
+        "Interactivity",
+        "Comment",
+    ]:
+        worksheetPages.write(0, col, name, formats["bi"])
+        col += 1
+
+    row_num = 1
+    # Loop through all pages and consolidate data
+    for report_name in report_info["Page"].unique().tolist():
+        local_df = report_info[report_info["Page"] == report_name]
+        visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
+        local_df = local_df.sort_values(by=["Visual Type", "Type"])
+
+        dataX = {
+            "Item Type": [],
+            "Visual Type": [],
+            "Type": [],
+            "Field": [],
+            "DisplayName": [],
+            "Visual Filters": [],
+            "Interactivity": [],
+            "Comment": [],
+            "ID": [],
+        }
+
+        dfX = pd.DataFrame(dataX)
+
+        for visual in visual_ids:
+            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0][
+                "Visual Type"
+            ]
+
+            v_type = "Visual"
+            if visual_type == "tableEx":
+                s_type = "Table"
+            elif visual_type == "pivotTable":
+                s_type = "Matrix"
+            elif visual_type == "card":
+                s_type = "Card"
+            elif visual_type == "cardVisual":
+                s_type = "Card (new)"
+            elif visual_type == "gauge":
+                s_type = "Gauge"
+            elif visual_type == "slicer":
+                v_type = "Slicer"
+                s_type = "Slicer"
+            elif visual_type == "advancedSlicerVisual":
+                v_type = "Slicer"
+                s_type = "Slicer (new)"
+            elif visual_type in visual_type_list:
+                words = re.findall("[a-zA-Z][^A-Z]*", visual_type)
+                s_type = ""
+                for word in words:
+                    s_type += word.capitalize() + " "
+            elif visual_type in button_type_list:
+                v_type = "Button"
+                s_type = visual_type
+            elif visual_type in ["actionButton"]:
+                v_type = "Button"
+                s_type = "Button"
+            elif visual_type == "Group":
+                v_type = "Group"
+                s_type = "Panel"
+            else:
+                REPORT_LOG += log_data(
+                    "New Visual type not yet supported!", visual_type, 1
                 )
 
-            for col, value in enumerate(row):
-                if col == 2 and len(format_array) != 0:
-                    write_to_excel(worksheetX, row_num, col, format_array)
-                elif col == 3 and len(filter_array) != 0:
-                    write_to_excel(worksheetX, row_num, col, filter_array)
-                elif col == 6:
-                    continue
-                elif value != "":
-                    worksheetX.write(row_num, col, value)
+            new_data = {
+                "Item Type": v_type,
+                "Visual Type": s_type,
+                "Type": "",
+                "Field": "",
+                "DisplayName": "",
+                "Visual Filters": "",
+                "Interactivity": "",
+                "Comment": "",
+                "ID": visual,
+            }
 
-            row_num += 1
+            dfX.loc[-1] = new_data
+            dfX.index = dfX.index + 1
+
+        for i_filter, filter in enumerate(report_filters_string):
+            if filter[2] == "This Page" and filter[0] == report_name:
+                new_data = {
+                    "Item Type": "Filter",
+                    "Visual Type": "This Page",
+                    "Type": "",
+                    "Field": "",
+                    "DisplayName": "",
+                    "Visual Filters": "",
+                    "Interactivity": "",
+                    "Comment": "",
+                    "ID": i_filter,
+                }
+
+                dfX.loc[-1] = new_data
+                dfX.index = dfX.index + 1
+
+        sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
+        dfX["Item Type"] = pd.Categorical(
+            dfX["Item Type"], categories=sort_order, ordered=True
+        )
+        df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
+
+        for _, row in df_sorted.iterrows():
+            filter_array = []
+            for filter in report_filters_string:
+                if (
+                    filter[2] == "Visual"
+                    and filter[0] == report_name
+                    and filter[1] == row["ID"]
+                ):
+                    filter_array.extend(
+                        [formats["bold"], filter[3], " " + filter[4] + "\n"]
+                    )
+
+            if filter_array and filter_array[-1][-1] == "\n":
+                filter_array[-1] = filter_array[-1][:-1]
+
+            if row["Item Type"] in ["Visual", "Slicer"]:
+                # Create one row per field for visuals/slicers
+                r_data = local_df[local_df["Visual ID"] == row["ID"]]
+                for field_idx, rrow in enumerate(r_data.iloc()):
+                    # Write Page name and Item Type/Visual Type on every row
+                    worksheetPages.write(row_num, 0, report_name)
+                    worksheetPages.write(row_num, 1, row["Item Type"])
+                    worksheetPages.write(row_num, 2, row["Visual Type"])
+
+                    # Write Type, Field, DisplayName
+                    worksheetPages.write(row_num, 3, rrow["Type"])
+                    worksheetPages.write(row_num, 4, f"{rrow['Table']}[{rrow['Name']}]")
+                    # Use field name if Display Name is missing
+                    display_name = (
+                        str(rrow["Display Name"])
+                        if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
+                        else rrow["Name"]
+                    )
+                    worksheetPages.write(row_num, 5, display_name)
+
+                    # Write Visual Filters on every row
+                    if len(filter_array) != 0:
+                        write_to_excel(worksheetPages, row_num, 6, filter_array)
+
+                    row_num += 1
+
+            elif row["Item Type"] in ["Button", "Group"]:
+                rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
+                worksheetPages.write(row_num, 0, report_name)
+                worksheetPages.write(row_num, 1, row["Item Type"])
+                worksheetPages.write(row_num, 2, row["Visual Type"])
+                worksheetPages.write(row_num, 3, rrow["Type"])
+                worksheetPages.write(row_num, 4, rrow["Name"])
+                # Use field name if Display Name is missing
+                display_name = (
+                    str(rrow["Display Name"])
+                    if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
+                    else rrow["Name"]
+                )
+                worksheetPages.write(row_num, 5, display_name)
+                if len(filter_array) != 0:
+                    write_to_excel(worksheetPages, row_num, 6, filter_array)
+                row_num += 1
+
+            else:
+                if isinstance(row["Item Type"], float):
+                    REPORT_LOG += log_data("NaN Item Type Encountered!", row, 2)
+                    continue
+
+                # Filters
+                worksheetPages.write(row_num, 0, report_name)
+                worksheetPages.write(row_num, 1, row["Item Type"])
+                worksheetPages.write(row_num, 2, row["Visual Type"])
+                worksheetPages.write(row_num, 3, "")
+                filter_field = report_filters_string[row["ID"]][3]
+                filter_details = report_filters_string[row["ID"]][4]
+                worksheetPages.write(row_num, 4, filter_field)
+                worksheetPages.write(row_num, 5, filter_details)
+                row_num += 1
 
     workbook.close()
 
