@@ -2135,11 +2135,10 @@ def run_cmd():
         save_report_name = report_name.replace("/", "_")
         worksheetX = workbook.add_worksheet(save_report_name)
 
-        worksheetX.set_column(0, 7, 30, def_format)
-        worksheetX.set_column(2, 2, 20, def_format)
-        worksheetX.set_column(3, 3, 50, def_format)
-        worksheetX.set_column(4, 4, 30, def_format)
-        worksheetX.set_column(5, 5, 60, def_format)
+        worksheetX.set_column(0, 6, 30, def_format)
+        worksheetX.set_column(2, 2, 50, def_format)
+        worksheetX.set_column(3, 3, 60, def_format)
+        worksheetX.set_column(4, 4, 60, def_format)
 
         local_df = report_info[report_info["Page"] == report_name]
         visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
@@ -2233,12 +2232,18 @@ def run_cmd():
                 dfX.loc[-1] = new_data
                 dfX.index = dfX.index + 1
 
-        col = 0
-        for name, value in new_data.items():
-            if name == "ID":
-                continue
-            worksheetX.write(0, col, name, formats["bi"])
-            col += 1
+        for col_idx, name in enumerate(
+            [
+                "Item Type",
+                "Visual Type",
+                "ID",
+                "Description",
+                "Visual Filters",
+                "Interactivity",
+                "Comment",
+            ]
+        ):
+            worksheetX.write(0, col_idx, name, formats["bi"])
 
         sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
         dfX["Item Type"] = pd.Categorical(
@@ -2247,9 +2252,6 @@ def run_cmd():
         df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
 
         row_num = 1
-        slicer_switch = True
-        filter_switch = True
-        button_switch = True
         for _, row in df_sorted.iterrows():
             filter_array = []
             for filter in report_filters_string:
@@ -2265,79 +2267,72 @@ def run_cmd():
             if filter_array and filter_array[-1][-1] == "\n":
                 filter_array[-1] = filter_array[-1][:-1]
 
-            if slicer_switch and row["Item Type"] == "Slicer":
-                slicer_switch = False
-
-            if filter_switch and row["Item Type"] == "Filter":
-                filter_switch = False
-
-            if button_switch and row["Item Type"] == "Button":
-                button_switch = False
-
-            if filter_switch:
-                # Regular Visuals/Slicers - create one row per field
+            if row["Item Type"] in ["Visual", "Slicer"]:
+                # One row per visual - build Description grouped by Type
                 r_data = local_df[local_df["Visual ID"] == row["ID"]]
-                for field_idx, rrow in enumerate(r_data.iloc()):
-                    # Write Item Type and Visual Type on every row
-                    worksheetX.write(row_num, 0, row["Item Type"])
-                    worksheetX.write(row_num, 1, row["Visual Type"])
-
-                    # Write Type, Field, DisplayName
-                    worksheetX.write(row_num, 2, rrow["Type"])
-                    worksheetX.write(row_num, 3, f"{rrow['Table']}[{rrow['Name']}]")
-                    # Use field name if Display Name is missing
-                    display_name = (
-                        str(rrow["Display Name"])
-                        if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
-                        else rrow["Name"]
-                    )
-                    worksheetX.write(row_num, 4, display_name)
-
-                    # Write Visual Filters on every row
-                    if len(filter_array) != 0:
-                        write_to_excel(worksheetX, row_num, 5, filter_array)
-
-                    row_num += 1
+                description_parts = []
+                for field_type, group in r_data.groupby("Type", sort=False):
+                    description_parts.append(f"{field_type}:")
+                    for _, rrow in group.iterrows():
+                        display_name = (
+                            str(rrow["Display Name"])
+                            if not pd.isna(rrow["Display Name"])
+                            and rrow["Display Name"]
+                            else rrow["Name"]
+                        )
+                        if display_name != rrow["Name"]:
+                            description_parts.append(
+                                f"  {rrow['Table']}[{rrow['Name']}] ({display_name})"
+                            )
+                        else:
+                            description_parts.append(
+                                f"  {rrow['Table']}[{rrow['Name']}]"
+                            )
+                worksheetX.write(row_num, 0, row["Item Type"])
+                worksheetX.write(row_num, 1, row["Visual Type"])
+                worksheetX.write(row_num, 2, row["ID"])
+                worksheetX.write(row_num, 3, "\n".join(description_parts))
+                if len(filter_array) != 0:
+                    write_to_excel(worksheetX, row_num, 4, filter_array)
+                row_num += 1
 
             elif row["Item Type"] in ["Button", "Group"]:
                 rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                worksheetX.write(row_num, 0, row["Item Type"])
-                worksheetX.write(row_num, 1, row["Visual Type"])
-                worksheetX.write(row_num, 2, rrow["Type"])
-                worksheetX.write(row_num, 3, rrow["Name"])
-                # Use field name if Display Name is missing
                 display_name = (
                     str(rrow["Display Name"])
                     if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
                     else rrow["Name"]
                 )
-                worksheetX.write(row_num, 4, display_name)
+                worksheetX.write(row_num, 0, row["Item Type"])
+                worksheetX.write(row_num, 1, row["Visual Type"])
+                worksheetX.write(row_num, 2, row["ID"])
+                worksheetX.write(row_num, 3, display_name)
                 if len(filter_array) != 0:
-                    write_to_excel(worksheetX, row_num, 5, filter_array)
+                    write_to_excel(worksheetX, row_num, 4, filter_array)
+                row_num += 1
+
+            elif row["Item Type"] == "Filter":
+                filter_field = report_filters_string[row["ID"]][3]
+                filter_details = report_filters_string[row["ID"]][4]
+                worksheetX.write(row_num, 0, row["Item Type"])
+                worksheetX.write(row_num, 1, row["Visual Type"])
+                worksheetX.write(row_num, 2, "")
+                worksheetX.write(row_num, 3, f"{filter_field} {filter_details}")
                 row_num += 1
 
             else:
                 if isinstance(row["Item Type"], float):
                     REPORT_LOG += log_data("NaN Item Type Encountered!", row, 2)
-                    continue  # Temp fix for NaN Item Type
-
-                # Filters
-                worksheetX.write(row_num, 0, row["Item Type"])
-                worksheetX.write(row_num, 1, row["Visual Type"])
-                worksheetX.write(row_num, 2, "")
-                filter_field = report_filters_string[row["ID"]][3]
-                filter_details = report_filters_string[row["ID"]][4]
-                worksheetX.write(row_num, 3, filter_field)
-                worksheetX.write(row_num, 4, filter_details)
-                row_num += 1
+                    continue
 
     # Create consolidated "Pages" tab with all pages combined
     worksheetPages = workbook.add_worksheet("Pages")
-    worksheetPages.set_column(0, 8, 30, def_format)
-    worksheetPages.set_column(3, 3, 20, def_format)
-    worksheetPages.set_column(4, 4, 50, def_format)
-    worksheetPages.set_column(5, 5, 30, def_format)
-    worksheetPages.set_column(6, 6, 60, def_format)
+    worksheetPages.set_column(0, 9, 30, def_format)
+    worksheetPages.set_column(3, 3, 50, def_format)
+    worksheetPages.set_column(4, 4, 20, def_format)
+    worksheetPages.set_column(5, 5, 50, def_format)
+    worksheetPages.set_column(6, 6, 30, def_format)
+    worksheetPages.set_column(7, 7, 60, def_format)
 
     # Write header with "Page" column added at the beginning
     col = 0
@@ -2346,6 +2341,7 @@ def run_cmd():
     for name in [
         "Item Type",
         "Visual Type",
+        "ID",
         "Type",
         "Field",
         "DisplayName",
@@ -2475,44 +2471,37 @@ def run_cmd():
                 # Create one row per field for visuals/slicers
                 r_data = local_df[local_df["Visual ID"] == row["ID"]]
                 for field_idx, rrow in enumerate(r_data.iloc()):
-                    # Write Page name and Item Type/Visual Type on every row
                     worksheetPages.write(row_num, 0, report_name)
                     worksheetPages.write(row_num, 1, row["Item Type"])
                     worksheetPages.write(row_num, 2, row["Visual Type"])
-
-                    # Write Type, Field, DisplayName
-                    worksheetPages.write(row_num, 3, rrow["Type"])
-                    worksheetPages.write(row_num, 4, f"{rrow['Table']}[{rrow['Name']}]")
-                    # Use field name if Display Name is missing
+                    worksheetPages.write(row_num, 3, row["ID"])
+                    worksheetPages.write(row_num, 4, rrow["Type"])
+                    worksheetPages.write(row_num, 5, f"{rrow['Table']}[{rrow['Name']}]")
                     display_name = (
                         str(rrow["Display Name"])
                         if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
                         else rrow["Name"]
                     )
-                    worksheetPages.write(row_num, 5, display_name)
-
-                    # Write Visual Filters on every row
+                    worksheetPages.write(row_num, 6, display_name)
                     if len(filter_array) != 0:
-                        write_to_excel(worksheetPages, row_num, 6, filter_array)
-
+                        write_to_excel(worksheetPages, row_num, 7, filter_array)
                     row_num += 1
 
             elif row["Item Type"] in ["Button", "Group"]:
                 rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                worksheetPages.write(row_num, 0, report_name)
-                worksheetPages.write(row_num, 1, row["Item Type"])
-                worksheetPages.write(row_num, 2, row["Visual Type"])
-                worksheetPages.write(row_num, 3, rrow["Type"])
-                worksheetPages.write(row_num, 4, rrow["Name"])
-                # Use field name if Display Name is missing
                 display_name = (
                     str(rrow["Display Name"])
                     if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
                     else rrow["Name"]
                 )
+                worksheetPages.write(row_num, 0, report_name)
+                worksheetPages.write(row_num, 1, row["Item Type"])
+                worksheetPages.write(row_num, 2, row["Visual Type"])
+                worksheetPages.write(row_num, 3, row["ID"])
+                worksheetPages.write(row_num, 4, rrow["Type"])
                 worksheetPages.write(row_num, 5, display_name)
                 if len(filter_array) != 0:
-                    write_to_excel(worksheetPages, row_num, 6, filter_array)
+                    write_to_excel(worksheetPages, row_num, 7, filter_array)
                 row_num += 1
 
             else:
@@ -2527,8 +2516,8 @@ def run_cmd():
                 worksheetPages.write(row_num, 3, "")
                 filter_field = report_filters_string[row["ID"]][3]
                 filter_details = report_filters_string[row["ID"]][4]
-                worksheetPages.write(row_num, 4, filter_field)
-                worksheetPages.write(row_num, 5, filter_details)
+                worksheetPages.write(row_num, 5, filter_field)
+                worksheetPages.write(row_num, 6, filter_details)
                 row_num += 1
 
     workbook.close()
@@ -2568,11 +2557,12 @@ def run_cmd():
 
     # Tab 1: "pages" - Copy of the consolidated Pages tab
     worksheet_pages_data = workbook_data.add_worksheet("pages")
-    worksheet_pages_data.set_column(0, 8, 30, def_format_data)
-    worksheet_pages_data.set_column(3, 3, 20, def_format_data)
-    worksheet_pages_data.set_column(4, 4, 50, def_format_data)
-    worksheet_pages_data.set_column(5, 5, 30, def_format_data)
-    worksheet_pages_data.set_column(6, 6, 60, def_format_data)
+    worksheet_pages_data.set_column(0, 9, 30, def_format_data)
+    worksheet_pages_data.set_column(3, 3, 50, def_format_data)
+    worksheet_pages_data.set_column(4, 4, 20, def_format_data)
+    worksheet_pages_data.set_column(5, 5, 50, def_format_data)
+    worksheet_pages_data.set_column(6, 6, 30, def_format_data)
+    worksheet_pages_data.set_column(7, 7, 60, def_format_data)
 
     # Write header
     col = 0
@@ -2581,6 +2571,7 @@ def run_cmd():
     for name in [
         "Item Type",
         "Visual Type",
+        "ID",
         "Type",
         "Field",
         "DisplayName",
@@ -2712,38 +2703,36 @@ def run_cmd():
                     worksheet_pages_data.write(row_num, 0, report_name)
                     worksheet_pages_data.write(row_num, 1, row["Item Type"])
                     worksheet_pages_data.write(row_num, 2, row["Visual Type"])
-
-                    worksheet_pages_data.write(row_num, 3, rrow["Type"])
+                    worksheet_pages_data.write(row_num, 3, row["ID"])
+                    worksheet_pages_data.write(row_num, 4, rrow["Type"])
                     worksheet_pages_data.write(
-                        row_num, 4, f"{rrow['Table']}[{rrow['Name']}]"
+                        row_num, 5, f"{rrow['Table']}[{rrow['Name']}]"
                     )
                     display_name = (
                         str(rrow["Display Name"])
                         if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
                         else rrow["Name"]
                     )
-                    worksheet_pages_data.write(row_num, 5, display_name)
-
+                    worksheet_pages_data.write(row_num, 6, display_name)
                     if len(filter_array) != 0:
-                        write_to_excel(worksheet_pages_data, row_num, 6, filter_array)
-
+                        write_to_excel(worksheet_pages_data, row_num, 7, filter_array)
                     row_num += 1
 
             elif row["Item Type"] in ["Button", "Group"]:
                 rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                worksheet_pages_data.write(row_num, 0, report_name)
-                worksheet_pages_data.write(row_num, 1, row["Item Type"])
-                worksheet_pages_data.write(row_num, 2, row["Visual Type"])
-                worksheet_pages_data.write(row_num, 3, rrow["Type"])
-                worksheet_pages_data.write(row_num, 4, rrow["Name"])
                 display_name = (
                     str(rrow["Display Name"])
                     if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
                     else rrow["Name"]
                 )
+                worksheet_pages_data.write(row_num, 0, report_name)
+                worksheet_pages_data.write(row_num, 1, row["Item Type"])
+                worksheet_pages_data.write(row_num, 2, row["Visual Type"])
+                worksheet_pages_data.write(row_num, 3, row["ID"])
+                worksheet_pages_data.write(row_num, 4, rrow["Type"])
                 worksheet_pages_data.write(row_num, 5, display_name)
                 if len(filter_array) != 0:
-                    write_to_excel(worksheet_pages_data, row_num, 6, filter_array)
+                    write_to_excel(worksheet_pages_data, row_num, 7, filter_array)
                 row_num += 1
 
             else:
@@ -2757,8 +2746,8 @@ def run_cmd():
                 worksheet_pages_data.write(row_num, 3, "")
                 filter_field = report_filters_string[row["ID"]][3]
                 filter_details = report_filters_string[row["ID"]][4]
-                worksheet_pages_data.write(row_num, 4, filter_field)
-                worksheet_pages_data.write(row_num, 5, filter_details)
+                worksheet_pages_data.write(row_num, 5, filter_field)
+                worksheet_pages_data.write(row_num, 6, filter_details)
                 row_num += 1
 
     # Tab 2: "common" - Main data without relationships and unused measures
@@ -2774,7 +2763,7 @@ def run_cmd():
 
     # Write header
     col = 0
-    for name, value in new_data.items():
+    for name in df.columns:
         worksheet_common.write(0, col, name, formats_data["bi"])
         col += 1
 
