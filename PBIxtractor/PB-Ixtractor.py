@@ -2046,11 +2046,13 @@ def run_cmd():
         is_whole_line_comment = False
         quote_counter = 0
 
-        # Store away all parents used in func. Columns get table name as prefix, measures get default measure table
-        if len(columns) > 0:
-            for token in [i + "[" + j + "]" for i, j in columns]:
-                parents_array.append(token)
-                parents_array.append("\n")
+        # Store away all parents used in func. Columns get table name as prefix, standalone measures as [Name]
+        standalone_measures = [m for m in measures if m not in columns_clean]
+        all_parents = [i + "[" + j + "]" for i, j in columns] + standalone_measures
+        for token in all_parents:
+            parents_array.append(token)
+            parents_array.append("\n")
+        if parents_array:
             parents_array.pop(-1)
 
         # Iternate through the segments and add a format before the corresponding tokens.
@@ -2807,10 +2809,12 @@ def run_cmd():
         is_whole_line_comment = False
         quote_counter = 0
 
-        if len(columns) > 0:
-            for token in [i + "[" + j + "]" for i, j in columns]:
-                parents_array.append(token)
-                parents_array.append("\n")
+        standalone_measures = [m for m in measures if m not in columns_clean]
+        all_parents = [i + "[" + j + "]" for i, j in columns] + standalone_measures
+        for token in all_parents:
+            parents_array.append(token)
+            parents_array.append("\n")
+        if parents_array:
             parents_array.pop(-1)
 
         for token in tokens:
