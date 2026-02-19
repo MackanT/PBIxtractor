@@ -2906,6 +2906,34 @@ def run_cmd():
         worksheet_unused.write(row_num, 0, col_pair[0] + "[" + col_pair[1] + "]")
         row_num += 1
 
+    # Tab 5: "dependencies" - one row per measure+dependent pair
+    worksheet_deps = workbook_data.add_worksheet("dependencies")
+    worksheet_deps.set_column(0, 0, 50, wrap_format_data)
+    worksheet_deps.set_column(1, 1, 50, wrap_format_data)
+
+    worksheet_deps.write(0, 0, "MeasureName", formats_data["bi"])
+    worksheet_deps.write(0, 1, "Dependent", formats_data["bi"])
+
+    row_num = 1
+    for _, row in df.iterrows():
+        if row["Type"] == "Column":
+            continue
+
+        vDefinition = row["Definition"]
+        measure_name = f"{row['Table']}[{row['Name']}]"
+
+        dep_columns = find_columns(vDefinition)
+        dep_measures = find_measures(vDefinition)
+        columns_clean_local = ["[" + j + "]" for _, j in dep_columns]
+        standalone = [m for m in dep_measures if m not in columns_clean_local]
+
+        all_deps = [i + "[" + j + "]" for i, j in dep_columns] + standalone
+
+        for dep in all_deps:
+            worksheet_deps.write(row_num, 0, measure_name)
+            worksheet_deps.write(row_num, 1, dep)
+            row_num += 1
+
     workbook_data.close()
 
     ## Print Logging Info -- Needs more love
