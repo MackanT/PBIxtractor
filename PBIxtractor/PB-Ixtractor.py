@@ -2531,6 +2531,390 @@ def run_cmd():
 
     workbook.close()
 
+    # Create second Excel file with reorganized structure
+    excel_file_data = cwd_save + "\\" + SAVE_NAME + "_data.xlsx"
+    if os.path.exists(excel_file_data):
+        os.remove(excel_file_data)
+
+    workbook_data = xlsxwriter.Workbook(excel_file_data)
+
+    # Reuse the same formats from the first workbook
+    def_format_data = workbook_data.add_format({"align": "top", "text_wrap": True})
+    wrap_format_data = workbook_data.add_format({"text_wrap": True})
+
+    def get_workbook_data_format(index: int):
+        return workbook_data.add_format(
+            {"color": rgba_tuple_to_hex(default_colors[index][1])}
+        )
+
+    formats_data = {
+        "function": get_workbook_data_format(0),
+        "measure": get_workbook_data_format(1),
+        "return": get_workbook_data_format(2),
+        "varname": get_workbook_data_format(3),
+        "comment": get_workbook_data_format(4),
+        "quote": get_workbook_data_format(5),
+        "var": get_workbook_data_format(6),
+        "bold": workbook_data.add_format({"bold": True}),
+        "italic": workbook_data.add_format({"italic": True}),
+        "bi": workbook_data.add_format({"bold": True, "italic": True}),
+        "para": [
+            workbook_data.add_format({"color": color})
+            for color in paranthesis_color * 5
+        ],
+    }
+
+    # Tab 1: "pages" - Copy of the consolidated Pages tab
+    worksheet_pages_data = workbook_data.add_worksheet("pages")
+    worksheet_pages_data.set_column(0, 8, 30, def_format_data)
+    worksheet_pages_data.set_column(3, 3, 20, def_format_data)
+    worksheet_pages_data.set_column(4, 4, 50, def_format_data)
+    worksheet_pages_data.set_column(5, 5, 30, def_format_data)
+    worksheet_pages_data.set_column(6, 6, 60, def_format_data)
+
+    # Write header
+    col = 0
+    worksheet_pages_data.write(0, col, "Page", formats_data["bi"])
+    col += 1
+    for name in [
+        "Item Type",
+        "Visual Type",
+        "Type",
+        "Field",
+        "DisplayName",
+        "Visual Filters",
+        "Interactivity",
+        "Comment",
+    ]:
+        worksheet_pages_data.write(0, col, name, formats_data["bi"])
+        col += 1
+
+    row_num = 1
+    # Loop through all pages and consolidate data (same logic as before)
+    for report_name in report_info["Page"].unique().tolist():
+        local_df = report_info[report_info["Page"] == report_name]
+        visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
+        local_df = local_df.sort_values(by=["Visual Type", "Type"])
+
+        dataX = {
+            "Item Type": [],
+            "Visual Type": [],
+            "Type": [],
+            "Field": [],
+            "DisplayName": [],
+            "Visual Filters": [],
+            "Interactivity": [],
+            "Comment": [],
+            "ID": [],
+        }
+
+        dfX = pd.DataFrame(dataX)
+
+        for visual in visual_ids:
+            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0][
+                "Visual Type"
+            ]
+
+            v_type = "Visual"
+            if visual_type == "tableEx":
+                s_type = "Table"
+            elif visual_type == "pivotTable":
+                s_type = "Matrix"
+            elif visual_type == "card":
+                s_type = "Card"
+            elif visual_type == "cardVisual":
+                s_type = "Card (new)"
+            elif visual_type == "gauge":
+                s_type = "Gauge"
+            elif visual_type == "slicer":
+                v_type = "Slicer"
+                s_type = "Slicer"
+            elif visual_type == "advancedSlicerVisual":
+                v_type = "Slicer"
+                s_type = "Slicer (new)"
+            elif visual_type in visual_type_list:
+                words = re.findall("[a-zA-Z][^A-Z]*", visual_type)
+                s_type = ""
+                for word in words:
+                    s_type += word.capitalize() + " "
+            elif visual_type in button_type_list:
+                v_type = "Button"
+                s_type = visual_type
+            elif visual_type in ["actionButton"]:
+                v_type = "Button"
+                s_type = "Button"
+            elif visual_type == "Group":
+                v_type = "Group"
+                s_type = "Panel"
+            else:
+                REPORT_LOG += log_data(
+                    "New Visual type not yet supported!", visual_type, 1
+                )
+
+            new_data_visual = {
+                "Item Type": v_type,
+                "Visual Type": s_type,
+                "Type": "",
+                "Field": "",
+                "DisplayName": "",
+                "Visual Filters": "",
+                "Interactivity": "",
+                "Comment": "",
+                "ID": visual,
+            }
+
+            dfX.loc[-1] = new_data_visual
+            dfX.index = dfX.index + 1
+
+        for i_filter, filter in enumerate(report_filters_string):
+            if filter[2] == "This Page" and filter[0] == report_name:
+                new_data_filter = {
+                    "Item Type": "Filter",
+                    "Visual Type": "This Page",
+                    "Type": "",
+                    "Field": "",
+                    "DisplayName": "",
+                    "Visual Filters": "",
+                    "Interactivity": "",
+                    "Comment": "",
+                    "ID": i_filter,
+                }
+
+                dfX.loc[-1] = new_data_filter
+                dfX.index = dfX.index + 1
+
+        sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
+        dfX["Item Type"] = pd.Categorical(
+            dfX["Item Type"], categories=sort_order, ordered=True
+        )
+        df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
+
+        for _, row in df_sorted.iterrows():
+            filter_array = []
+            for filter in report_filters_string:
+                if (
+                    filter[2] == "Visual"
+                    and filter[0] == report_name
+                    and filter[1] == row["ID"]
+                ):
+                    filter_array.extend(
+                        [formats_data["bold"], filter[3], " " + filter[4] + "\n"]
+                    )
+
+            if filter_array and filter_array[-1][-1] == "\n":
+                filter_array[-1] = filter_array[-1][:-1]
+
+            if row["Item Type"] in ["Visual", "Slicer"]:
+                r_data = local_df[local_df["Visual ID"] == row["ID"]]
+                for field_idx, rrow in enumerate(r_data.iloc()):
+                    worksheet_pages_data.write(row_num, 0, report_name)
+                    worksheet_pages_data.write(row_num, 1, row["Item Type"])
+                    worksheet_pages_data.write(row_num, 2, row["Visual Type"])
+
+                    worksheet_pages_data.write(row_num, 3, rrow["Type"])
+                    worksheet_pages_data.write(
+                        row_num, 4, f"{rrow['Table']}[{rrow['Name']}]"
+                    )
+                    display_name = (
+                        str(rrow["Display Name"])
+                        if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
+                        else rrow["Name"]
+                    )
+                    worksheet_pages_data.write(row_num, 5, display_name)
+
+                    if len(filter_array) != 0:
+                        write_to_excel(worksheet_pages_data, row_num, 6, filter_array)
+
+                    row_num += 1
+
+            elif row["Item Type"] in ["Button", "Group"]:
+                rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
+                worksheet_pages_data.write(row_num, 0, report_name)
+                worksheet_pages_data.write(row_num, 1, row["Item Type"])
+                worksheet_pages_data.write(row_num, 2, row["Visual Type"])
+                worksheet_pages_data.write(row_num, 3, rrow["Type"])
+                worksheet_pages_data.write(row_num, 4, rrow["Name"])
+                display_name = (
+                    str(rrow["Display Name"])
+                    if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
+                    else rrow["Name"]
+                )
+                worksheet_pages_data.write(row_num, 5, display_name)
+                if len(filter_array) != 0:
+                    write_to_excel(worksheet_pages_data, row_num, 6, filter_array)
+                row_num += 1
+
+            else:
+                if isinstance(row["Item Type"], float):
+                    REPORT_LOG += log_data("NaN Item Type Encountered!", row, 2)
+                    continue
+
+                worksheet_pages_data.write(row_num, 0, report_name)
+                worksheet_pages_data.write(row_num, 1, row["Item Type"])
+                worksheet_pages_data.write(row_num, 2, row["Visual Type"])
+                worksheet_pages_data.write(row_num, 3, "")
+                filter_field = report_filters_string[row["ID"]][3]
+                filter_details = report_filters_string[row["ID"]][4]
+                worksheet_pages_data.write(row_num, 4, filter_field)
+                worksheet_pages_data.write(row_num, 5, filter_details)
+                row_num += 1
+
+    # Tab 2: "common" - Main data without relationships and unused measures
+    worksheet_common = workbook_data.add_worksheet("common")
+    worksheet_common.set_column(0, len(new_data), 30, wrap_format_data)
+    worksheet_common.set_column(
+        definition_index, definition_index, 100, def_format_data
+    )
+    worksheet_common.set_column(
+        definition_index + 1, definition_index + 1, 30, wrap_format_data
+    )
+    worksheet_common.set_column(parent_index, parent_index, 50, wrap_format_data)
+
+    # Write header
+    col = 0
+    for name, value in new_data.items():
+        worksheet_common.write(0, col, name, formats_data["bi"])
+        col += 1
+
+    row_num = 1
+    for _, row in df.iterrows():
+        vDefinition = row["Definition"]
+
+        if row["Type"] == "Column":
+            continue
+
+        var_names = find_vars(vDefinition)
+        function_names = find_functions(vDefinition)
+        columns = find_columns(vDefinition)
+        tables = [i for i, _ in columns]
+        columns_clean = ["[" + i + "]" for _, i in columns]
+        measures = find_measures(vDefinition)
+
+        formated_text = vDefinition.replace("\t", " XXX ")
+        formated_text = formated_text.replace("\r\n", " YYY ")
+        formated_text = formated_text.replace("\n", " YYY ")
+        formated_text = formated_text.replace("&&", " ZZZ ")
+        formated_text = formated_text.replace("||", " AAA ")
+
+        pattern = re.compile(r"(\(|\)|\[.*?\]|,|//|\d+\.\d+|\w+|(?<!\d)\.(?!\d)|\W)")
+        tokens = [
+            token for token in re.findall(pattern, formated_text) if token.strip()
+        ]
+
+        format_array = []
+        parents_array = []
+        parenthesis_count = -1
+        is_whole_line_comment = False
+        quote_counter = 0
+
+        if len(columns) > 0:
+            for token in [i + "[" + j + "]" for i, j in columns]:
+                parents_array.append(token)
+                parents_array.append("\n")
+            parents_array.pop(-1)
+
+        for token in tokens:
+            if token == "//":
+                is_whole_line_comment = True
+            elif token == "YYY":
+                is_whole_line_comment = False
+
+            if token == '"' and not is_whole_line_comment:
+                quote_counter += 1
+
+            if is_whole_line_comment:
+                ls_app(formats_data["comment"], token + " ")
+            elif quote_counter > 0:
+                ls_app(formats_data["quote"])
+                if quote_counter == 2:
+                    ls_app(token + " ")
+                    quote_counter = 0
+                else:
+                    ls_app(token)
+            elif token == "XXX":
+                ls_app("\t")
+            elif token == "YYY":
+                ls_app("\n")
+            elif token == "ZZZ":
+                ls_app("&& ")
+            elif token == "AAA":
+                ls_app("|| ")
+            elif token == "(":
+                parenthesis_count += 1
+                safe_count = max(0, min(parenthesis_count, 14))
+                ls_app(formats_data["para"][safe_count], token + " ")
+            elif token == ")":
+                safe_count = max(0, min(parenthesis_count, 14))
+                ls_app(formats_data["para"][safe_count], token + " ")
+                parenthesis_count -= 1
+            elif token == "VAR":
+                ls_app(formats_data["var"], token + " ")
+            elif token in var_names:
+                ls_app(formats_data["varname"], token + " ")
+            elif token in measures:
+                ls_app(
+                    formats_data["para"][parenthesis_count + 1],
+                    token[0],
+                    formats_data["measure"],
+                    token[1:-1],
+                    formats_data["para"][parenthesis_count + 1],
+                    token[-1] + " ",
+                )
+            elif token in tables or token in columns_clean:
+                ls_app(formats_data["measure"], token)
+            elif token in function_names:
+                ls_app(formats_data["function"], token + " ")
+            elif token == "RETURN":
+                ls_app(formats_data["return"], token + " ")
+            else:
+                ls_app(token, " ")
+
+        for col, value in enumerate(row):
+            if col == definition_index and len(format_array) != 0:
+                write_to_excel(worksheet_common, row_num, col, format_array)
+            elif col == parent_index and len(parents_array) != 0:
+                write_to_excel(worksheet_common, row_num, col, parents_array)
+            elif value != "":
+                worksheet_common.write(row_num, col, value)
+        row_num += 1
+
+    # Tab 3: "relationships"
+    worksheet_relationships = workbook_data.add_worksheet("relationships")
+    worksheet_relationships.set_column(0, 3, 30, wrap_format_data)
+
+    if num_relations > 0:
+        col = 0
+        for name, value in new_data_rel.items():
+            worksheet_relationships.write(0, col, name, formats_data["bi"])
+            col += 1
+
+        row_num = 1
+        print_graph = True
+        for _, row in df_relations.iterrows():
+            if print_graph:
+                worksheet_relationships.insert_image(
+                    "E1",
+                    f"{SAVE_NAME}\\{SAVE_NAME}_Relationships.png",
+                    {"x_scale": 1, "y_scale": 1},
+                )
+                print_graph = False
+
+            for col, value in enumerate(row):
+                worksheet_relationships.write(row_num, col, value)
+            row_num += 1
+
+    # Tab 4: "unused measures"
+    worksheet_unused = workbook_data.add_worksheet("unused measures")
+    worksheet_unused.set_column(0, 0, 50, wrap_format_data)
+
+    worksheet_unused.write(0, 0, "Unused Columns and Measures", formats_data["bi"])
+    row_num = 1
+    for col_pair in unused_columns:
+        worksheet_unused.write(row_num, 0, col_pair[0] + "[" + col_pair[1] + "]")
+        row_num += 1
+
+    workbook_data.close()
+
     ## Print Logging Info -- Needs more love
     if REPORT_LOG and LOG_DATA:
         t = time.localtime()
