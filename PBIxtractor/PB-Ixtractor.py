@@ -2563,6 +2563,7 @@ def run_cmd():
     worksheet_pages_data.set_column(5, 5, 50, def_format_data)
     worksheet_pages_data.set_column(6, 6, 30, def_format_data)
     worksheet_pages_data.set_column(7, 7, 60, def_format_data)
+    worksheet_pages_data.set_column(8, 8, 60, def_format_data)
 
     # Write header
     col = 0
@@ -2578,6 +2579,7 @@ def run_cmd():
         "Visual Filters",
         "Interactivity",
         "Comment",
+        "Description",
     ]:
         worksheet_pages_data.write(0, col, name, formats_data["bi"])
         col += 1
@@ -2599,6 +2601,7 @@ def run_cmd():
             "Interactivity": [],
             "Comment": [],
             "ID": [],
+            "Description": [],
         }
 
         dfX = pd.DataFrame(dataX)
@@ -2671,6 +2674,7 @@ def run_cmd():
                     "Interactivity": "",
                     "Comment": "",
                     "ID": i_filter,
+                    "Description": "",
                 }
 
                 dfX.loc[-1] = new_data_filter
@@ -2699,6 +2703,27 @@ def run_cmd():
 
             if row["Item Type"] in ["Visual", "Slicer"]:
                 r_data = local_df[local_df["Visual ID"] == row["ID"]]
+                description_parts = []
+                for field_type, group in r_data.groupby("Type", sort=False):
+                    description_parts.append(f"{field_type}:")
+                    for _, rrow_desc in group.iterrows():
+                        display_name_desc = (
+                            str(rrow_desc["Display Name"])
+                            if not pd.isna(rrow_desc["Display Name"])
+                            and rrow_desc["Display Name"]
+                            else rrow_desc["Name"]
+                        )
+                        if display_name_desc != rrow_desc["Name"]:
+                            description_parts.append(
+                                f"  {rrow_desc['Table']}[{rrow_desc['Name']}] ({display_name_desc})"
+                            )
+                        else:
+                            description_parts.append(
+                                f"  {rrow_desc['Table']}[{rrow_desc['Name']}]"
+                            )
+                full_description = "\n".join(description_parts)
+
+                # Write one row per field
                 for field_idx, rrow in enumerate(r_data.iloc()):
                     worksheet_pages_data.write(row_num, 0, report_name)
                     worksheet_pages_data.write(row_num, 1, row["Item Type"])
@@ -2716,6 +2741,7 @@ def run_cmd():
                     worksheet_pages_data.write(row_num, 6, display_name)
                     if len(filter_array) != 0:
                         write_to_excel(worksheet_pages_data, row_num, 7, filter_array)
+                    worksheet_pages_data.write(row_num, 10, full_description)
                     row_num += 1
 
             elif row["Item Type"] in ["Button", "Group"]:
