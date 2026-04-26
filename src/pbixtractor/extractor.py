@@ -41,31 +41,42 @@ default_colors = [
 
 cwd = os.getcwd()
 
-# Reads user defined Visual Types from external file
+# Import package data paths
 try:
-    file_path = f"{cwd}\\Input\\VisualTypes.csv"
-    visual_type_list = pd.read_csv(file_path)
+    from .data import VISUAL_TYPES_CSV, DATA_TYPES_CSV, FUNCTION_NAMES_CSV
+except ImportError:
+    # Fallback for direct script execution (legacy mode)
+    from pathlib import Path
+    _script_dir = Path(__file__).parent
+    VISUAL_TYPES_CSV = _script_dir / "data" / "VisualTypes.csv"
+    DATA_TYPES_CSV = _script_dir / "data" / "DataTypes.csv"
+    FUNCTION_NAMES_CSV = _script_dir / "data" / "FunctionNames.csv"
+
+# Reads user defined Visual Types from package data
+try:
+    visual_type_list = pd.read_csv(VISUAL_TYPES_CSV)
     visual_type_list = visual_type_list["PBI Visual Name"].values.tolist()
-except OSError:
-    print(f"Could not open/read file: {file_path}")
+except OSError as e:
+    print(f"Could not open/read file: {VISUAL_TYPES_CSV}")
+    print(f"Error: {e}")
     sys.exit()
 
-# Reads user defined Data Types from external file
+# Reads user defined Data Types from package data
 try:
-    file_path = f"{cwd}\\Input\\DataTypes.csv"
-    data_type_list = pd.read_csv(file_path)
+    data_type_list = pd.read_csv(DATA_TYPES_CSV)
     data_type_list = data_type_list[["PBI Name", "Output Name"]].values.tolist()
-except OSError:
-    print(f"Could not open/read file: {file_path}")
+except OSError as e:
+    print(f"Could not open/read file: {DATA_TYPES_CSV}")
+    print(f"Error: {e}")
     sys.exit()
 
-# Reads user defined PBI Functions from external file
+# Reads user defined PBI Functions from package data
 try:
-    file_path = f"{cwd}\\Input\\FunctionNames.csv"
-    known_functions = pd.read_csv(file_path)
+    known_functions = pd.read_csv(FUNCTION_NAMES_CSV)
     known_functions = known_functions["PBI Function Name"].values.tolist()
-except OSError:
-    print(f"Could not open/read file: {file_path}")
+except OSError as e:
+    print(f"Could not open/read file: {FUNCTION_NAMES_CSV}")
+    print(f"Error: {e}")
     sys.exit()
 
 
