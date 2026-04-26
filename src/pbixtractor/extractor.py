@@ -20,6 +20,7 @@ import matplotlib
 import threading
 import inspect
 
+
 matplotlib.use("agg")
 
 
@@ -93,11 +94,7 @@ def log_data(message: str, error: str, severity: int = 0):
 
     error_clean = error_clean[:-1]
 
-    e += (
-        message
-        + f". Error on line {inspect.currentframe().f_back.f_lineno}.\n"
-        + str(error_clean)
-    )
+    e += message + f". Error on line {inspect.currentframe().f_back.f_lineno}.\n" + str(error_clean)
     return e + "\n\n"
 
 
@@ -108,92 +105,20 @@ class ReportExtractor:
         self.result = []
         self.filters = []
         self.log = ""
+        
+        # Import modular extractors
+        from .extractors import PageExtractor
+        
+        # Initialize page extractor with config
+        self.page_extractor = PageExtractor(
+            config=extraction_rules,
+            visual_types=visual_type_list,
+            data_types=data_type_list,
+            log_callback=self._log_data
+        )
 
     def _log_data(self, message: str, error: str, severity: int = 0):
         self.log += log_data(message, error, severity)
-
-    def find_value_by_key(self, data: dict, target_key: str) -> dict | None:
-        """
-        Looks through input dict and finds first occurence that matches specific key
-
-        data: Input dictionary
-        target_key: Searched for string key
-
-        return dict with data or None
-        """
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if key == target_key:
-                    return value
-                elif isinstance(value, (dict, list)):
-                    result = self.find_value_by_key(value, target_key)
-                    if result is not None:
-                        return result
-        elif isinstance(data, list):
-            for item in data:
-                result = self.find_value_by_key(item, target_key)
-                if result is not None:
-                    return result
-
-        return None
-
-    def find_all_values(self, data: dict, key_word: str = "Value") -> list:
-        """
-        Returns list of all paths and values from dict with specified key word
-
-        data: input dict to search
-        key_word: str to search for
-
-        returns [[Path, Value], [Path, Value], ...]
-        """
-
-        occurrences = []
-
-        def search_in_data(data, path=""):
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    new_path = f"{path}.{key}" if path else key
-                    if isinstance(value, dict):
-                        if key_word in value:
-                            occurrences.append((new_path, value[key_word]))
-                        search_in_data(value, new_path)
-                    elif isinstance(value, (dict, list)):
-                        search_in_data(value, new_path)
-            elif isinstance(data, list):
-                for idx, item in enumerate(data):
-                    new_path = f"{path}[{idx}]"
-                    if isinstance(item, dict):
-                        if key_word in item:
-                            occurrences.append((new_path, item[key_word]))
-                        search_in_data(item, new_path)
-                    elif isinstance(item, (dict, list)):
-                        search_in_data(item, new_path)
-
-        search_in_data(data)
-        return occurrences
-
-    def find_comparison_kind_occurrences(self, data: dict) -> list:
-        """
-        Searches data for 'ComparissonKind' information, returns list of comparisson integers
-
-        data: input dict to search
-
-        returns [x, y]
-        """
-
-        def _search_comparison_kind(data):
-            occurrences = []
-            if isinstance(data, dict):
-                if "ComparisonKind" in data:
-                    occurrences.append(data["ComparisonKind"])
-                for key, value in data.items():
-                    occurrences.extend(_search_comparison_kind(value))
-            elif isinstance(data, list):
-                for item in data:
-                    occurrences.extend(_search_comparison_kind(item))
-            return occurrences
-
-        return _search_comparison_kind(data)
 
     def add_item(
         self,
@@ -245,564 +170,47 @@ class ReportExtractor:
 
         self.filters.append(filter_set)
 
-    def clean_input(self, input_string: str) -> str:
-        """Attempts to clean input to integer. If not applicable returns input value
-        Also removes exxcess "'" from input
-
-        Args:
-            input_string (str): input string to attempt to convert
-
-        Returns:
-            str: either cleaned numeric input as a string or original string
-        """
-
-        try:
-            if input_string == "true":
-                return "True"
-            elif input_string == "false":
-                return "False"
-
-            if "datetime" in input_string:
-                return re.search(r"'(.*?)'", input_string).group(1)
-
-            if input_string[-1] == "L":
-                return str(int(input_string[:-1]))
-            else:
-                return str(int(input_string))
-        except ValueError:
-            return input_string.replace("'", "")
-
-    def gen_val_string(self, all_values: list) -> tuple[str, bool]:
-        """
-        Converts list of incoming data into valid strings that can be stored in the self.result/self.filters fields
-
-        all_values: list of incoming data
-
-        returns valid string, boolean if condition is inverted
-        """
-        val_list = ""
-        is_inverted = False
-
-        for val in all_values:
-            if "Where" in val[0]:
-                val_list += self.clean_input(val[1]) + ", "
-            elif "isInverted" in val[0]:
-                is_inverted = self.clean_input(val[1])
-            else:
-                self._log_data("No Found message value", all_values, 0, 1)
-
-        if val_list[-2:] == ", ":
-            val_list = val_list[:-2]
-
-        return val_list, is_inverted
-
     def extract(self):
+        """Extract data from Power BI report using modular extractors."""
+        # Prepare extraction folder
         pathFolder = f"{self.path}/temp_{self.name[:-5]}"
         try:
             shutil.rmtree(pathFolder)
         except FileNotFoundError:
             print(f"folder {pathFolder} not present")
+        
+        # Extract .pbix file (it's a ZIP archive)
         f = ZipFile(f"{self.path}/{self.name}", "r")
         f.extractall(pathFolder)
+        
+        # Load report layout JSON
         report_layout = json.loads(
             open(f"{pathFolder}/Report/Layout", "r", encoding="utf-16 le").read()
         )
-
         f.close()
-
+        
+        # Parse nested JSON strings in the layout
         report_layout["config"] = json.loads(report_layout["config"])
         for section in report_layout["sections"]:
             for visual_container in section["visualContainers"]:
                 for key in ["config", "filters", "query", "dataTransforms"]:
                     if key in visual_container.keys():
                         visual_container[key] = json.loads(visual_container[key])
-
-        for s in report_layout["sections"]:
-            page_name = s["displayName"]
-
-            if page_name == "Template":
-                continue
-
-            for ex_data in s["visualContainers"]:
-                if ex_data.get("config", "") != "":
-                    t = ex_data["config"]
-
-                    item_name = t["name"]
-                    visual_type = self.find_value_by_key(t, "visualType")
-
-                    if visual_type in ("shape", "image", "textbox"):
-                        continue
-
-                    elif visual_type in visual_type_list:
-                        data_types = self.find_value_by_key(t, "projections")
-
-                        data_list = []
-                        for d_list in data_type_list:
-                            temp_list = []
-                            for row in data_types.get(d_list[0], []):
-                                temp_list.append(row["queryRef"])
-
-                            data_list.append(temp_list)
-
-                        # Add Correct Display Names if applicable
-                        vis_names = self.find_all_values(t, "Name")
-                        vis_disp_names = self.find_all_values(t, "NativeReferenceName")
-                        vis_name_disp_name = []
-                        for vn in vis_names:
-                            for vdn in vis_disp_names:
-                                if vn[0] == vdn[0]:
-                                    vis_name_disp_name.append([vn[1], vdn[1]])
-                                    break
-
-                        data = self.find_value_by_key(t, "Select")
-
-                        for rowi, row in enumerate(data):
-                            if row.get("HierarchyLevel", "") != "":
-                                temp = self.find_value_by_key(row, "Name")
-                                temp2 = temp.split(".")
-
-                                # Find issues
-                                if len(temp2) <= 2 or isinstance(temp2, str):
-                                    self._log_data("Hierarchy is to short", row, 1)
-                                    continue
-
-                                table_name = temp2[0]
-                                val_name = temp2[2]
-                            elif (
-                                row.get("Measure", "") != ""
-                                or row.get("Column", "") != ""
-                            ):
-                                temp = row["Name"]
-                                temp2 = temp.split(".", 1)
-                                if temp2[0][0:4] == "Sum(":
-                                    temp2[0] = temp2[0][4:]
-                                table_name = temp2[0]
-                                val_name = temp2[1]
-                                val_name2 = self.find_value_by_key(row, "Property")
-                                if val_name2 is not None and val_name != val_name2:
-                                    val_name = val_name2
-                            elif row.get("Aggregation", "") != "":
-                                temp = row["Name"]
-                                s1 = temp.find("(") + 1
-                                s2 = temp.rfind(")")
-                                temp2 = temp[s1:s2].split(".")
-
-                                table_name = temp2[0]
-                                val_name = temp2[1]
-                            else:
-                                self._log_data("Unspecified row type", row, 0)
-
-                            # Determine Data Type + Display Name
-                            data_type = None
-                            disp_name = None
-                            for di, dlist in enumerate(data_list):
-                                if temp in dlist:
-                                    data_type = data_type_list[di][1]
-
-                                    for vname in vis_name_disp_name:
-                                        if temp == vname[0]:
-                                            disp_name = vname[1]
-                                            break
-
-                                    break
-                            if not data_type:
-                                data_type = "UNKNOWN Data Type"
-                                self._log_data("Unknown data type", data_type, 1)
-
-                            if not disp_name or disp_name == val_name:
-                                disp_name = None
-
-                            if data[rowi].get("HierarchyLevel", "") != "":
-                                data_type = "Hierarchy"
-                                temp = self.find_value_by_key(data[rowi], "Name").split(
-                                    "."
-                                )
-                                temp2 = self.find_value_by_key(data[rowi], "Level")
-                                disp_name = temp[1] + ": " + temp2
-
-                            self.add_item(
-                                page=page_name,
-                                visual_type=visual_type,
-                                item_name=item_name,
-                                table_name=table_name,
-                                val_name=val_name,
-                                disp_name=disp_name,
-                                data_type=data_type,
-                            )
-
-                    elif visual_type is None:
-                        self.add_item(
-                            page=page_name,
-                            visual_type="Group",
-                            item_name="",
-                            table_name="",
-                            val_name="",
-                            disp_name=self.find_value_by_key(t, "displayName"),
-                            data_type="Group",
-                        )
-
-                    elif visual_type == "actionButton":
-                        temp = self.find_value_by_key(t, "type")
-
-                        values = self.find_all_values(t, "Value")
-                        disp_name = ""
-                        item_name = ""
-                        button_type = ""
-                        visual_type = "Button"
-                        table_name = ""
-                        data_type = "Button"
-                        for row in values:
-                            if "title" in row[0]:
-                                disp_name = row[1].replace("'", "")
-                            elif "bookmark" in row[0]:
-                                item_name = row[1].replace("'", "")
-                                val_name = item_name
-                            elif "type" in row[0]:
-                                button_type = row[1].replace("'", "")
-
-                        if button_type == "Bookmark":
-                            temp2 = self.find_value_by_key(t, "bookmark")
-                            item_name = self.find_value_by_key(ex_data, "Value")
-                            item_name = item_name.replace("'", "")
-                            data_type = "Bookmark"
-
-                        elif button_type == "PageNavigation":
-                            temp2 = self.find_value_by_key(t, "navigationSection")
-
-                            ## Find issues
-                            if not temp2:
-                                self._log_data("Page Navigation error", ex_data, 1)
-                                continue
-                            item_name = self.find_value_by_key(temp2, "Value")
-                            item_name = item_name.replace("'", "")
-
-                            data_type = "Page"
-                            disp_name = "Page Navigation"
-                            for x in report_layout["sections"]:
-                                if item_name == x.get("name", ""):
-                                    val_name = x["displayName"]
-                        elif button_type == "custom":
-                            item_name = "Filter"
-                            data_type = "Icon"
-                            disp_name = "Filter Icon"  ## TODO currently not used as visual, is more of a "Button"
-                            continue
-                        else:
-                            self._log_data(
-                                f"Unknown visual type {button_type} on {page_name}",
-                                ex_data,
-                                1,
-                            )
-                            continue
-
-                        # visual_type = button_type
-
-                        self.add_item(
-                            page=page_name,
-                            visual_type=visual_type,
-                            item_name=item_name,
-                            table_name=table_name,
-                            val_name=val_name,
-                            disp_name=disp_name,
-                            data_type=data_type,
-                        )
-
-                    else:
-                        self._log_data(
-                            f"New Visual type not yet supported! {visual_type}",
-                            ex_data,
-                            1,
-                        )
-
-                # Add filters
-                if ex_data.get("filters", []) != []:
-                    t = ex_data["filters"]
-
-                    local_config = ex_data["config"]
-                    item_name = self.find_value_by_key(local_config, "name")
-
-                    filter_type = "Visual"
-
-                    for row in t:
-                        if row.get("filter", "{}") == "{}":
-                            continue
-
-                        all_values = self.find_all_values(row)
-                        comp_values = self.find_comparison_kind_occurrences(row)
-
-                        table_name = self.find_value_by_key(row, "Entity")
-                        val_name = self.find_value_by_key(row, "Property")
-                        if val_name is None and self.find_value_by_key(
-                            row, "HierarchyLevel"
-                        ):
-                            val_name = self.find_value_by_key(
-                                row, "HierarchyLevel"
-                            ).get("Level", "UNKNOWN!")
-                            self._log_data("Unknown hierachy level!", row, 1)
-
-                        val_list = ""
-                        if row.get("type", "") == "RelativeDate":
-                            unit = self.find_all_values(row, "TimeUnit")
-
-                            # Is in this
-                            if len(unit) == 1:
-                                val_list = "is"
-                                time_span = unit[0][1]
-                                if time_span == 0:
-                                    val_list += " today"
-                                elif time_span == 1:
-                                    val_list += " in this week"
-                                elif time_span == 2:
-                                    val_list += " in this month"
-                                elif time_span == 3:
-                                    val_list += " in this year"
-
-                                filter_value = ""
-
-                            else:
-                                if len(unit) == 4:
-                                    include_today = True
-                                elif len(unit) == 6:
-                                    include_today = False
-                                else:
-                                    self._log_data(
-                                        'Unknown "Include Today" setting. Setting value to included',
-                                        row,
-                                        2,
-                                    )
-                                    include_today = True
-
-                                f_val = ""
-                                if unit[2][1] != 0:
-                                    f_val += "calendar "
-                                if unit[1][1] == 0:
-                                    f_val += "days"
-                                elif unit[1][1] == 1:
-                                    f_val += "week"
-                                elif unit[1][1] == 2:
-                                    f_val += "month"
-                                elif unit[1][1] == 3:
-                                    f_val += "year"
-
-                                lb = self.find_all_values(row, "Amount")
-
-                                if lb[0][1] > 0:
-                                    val_list = "is in the next "
-                                else:
-                                    val_list = "is in the last "
-
-                                filter_value = ""
-                                val_list += str(abs(lb[0][1])) + " " + f_val
-                                if include_today:
-                                    val_list += " including today"
-
-                        elif row.get("type", "") == "TopN":
-                            temp_t_name = []
-                            for ttemp in self.find_all_values(row, "Entity"):
-                                if "From[0]" in ttemp[0]:
-                                    temp_t_name.append(ttemp)
-
-                            count = self.find_value_by_key(row, "Top")
-                            temp = self.find_value_by_key(row, "OrderBy")
-
-                            val_list = (
-                                temp_t_name[-1][1]
-                                + "["
-                                + self.find_value_by_key(temp, "Property")
-                                + "]"
-                            )
-
-                            if temp[0].get("Direction", 0) == 2:
-                                order = "Top"
-                            else:
-                                order = "Bottom"
-
-                            filter_value = "by " + order + " " + str(count)
-
-                        elif comp_values:
-                            val_list = ""
-                            filter_value = ""
-                            if "And" in all_values[0][0]:
-                                f_add = "and"
-                            elif "Or" in all_values[0][0]:
-                                f_add = "or"
-                            else:
-                                f_add = ""
-
-                            for ival, c_val in enumerate(comp_values):
-                                val_local, _ = self.gen_val_string([all_values[ival]])
-
-                                if c_val == 0:
-                                    if "Not" in all_values[ival][0]:
-                                        if all_values[ival][1] == "null":
-                                            f_value = "is not blank"
-                                            val_local = ""
-                                        else:
-                                            f_value = "is not"
-                                    else:
-                                        if all_values[ival][1] == "null":
-                                            f_value = "is blank"
-                                            val_local = ""
-                                        else:
-                                            f_value = "is"
-
-                                elif c_val == 1:
-                                    f_value = "is greater than"
-                                elif c_val == 2:
-                                    f_value = "is greater than or equal to"
-                                elif c_val == 3:
-                                    f_value = "is less than"
-                                elif c_val == 4:
-                                    f_value = "is less than or equal to"
-                                else:
-                                    f_value = f"Not implemented... :') {c_val}"
-
-                                val_list += f_value + " " + val_local + " "
-                                if ival == 0:
-                                    val_list += f_add + " "
-
-                            val_list = " ".join(val_list.split())
-
-                        else:
-                            val_list, is_inverted = self.gen_val_string(all_values)
-
-                            if is_inverted:
-                                if val_list.find(",") != -1:
-                                    filter_value = "not in"
-                                else:
-                                    filter_value = "<>"
-                            else:
-                                if val_list.find(",") != -1:
-                                    filter_value = "in"
-                                else:
-                                    filter_value = "="
-
-                        self.add_filter(
-                            page=page_name,
-                            item_name=item_name,
-                            filter_type=filter_type,
-                            table_name=table_name,
-                            val_name=val_name,
-                            ver=filter_value,
-                            value=val_list,
-                        )
-
-            # Add page filters
-            filter_data = json.loads(s["filters"])
-            for ex_data in filter_data:
-                filter_type = "This Page"
-                table_name = self.find_value_by_key(ex_data, "Entity")
-                val_name = self.find_value_by_key(ex_data, "Property")
-                if ex_data.get("displayName", "") != "":
-                    item_name = ex_data["displayName"]
-                else:
-                    item_name = val_name
-
-                filter_variant = self.find_value_by_key(ex_data, "type")
-
-                if filter_variant == "Categorical":
-                    data_list = self.find_value_by_key(ex_data, "Values")
-
-                    if data_list:
-                        is_inverted = False
-                        temp = self.find_value_by_key(
-                            ex_data, "isInvertedSelectionMode"
-                        )
-                        if temp:
-                            is_inverted = bool(temp["expr"]["Literal"]["Value"])
-
-                        if len(data_list) == 1:
-                            if is_inverted:
-                                filter_ver = "<>"
-                            else:
-                                filter_ver = "="
-                        else:
-                            if is_inverted:
-                                filter_ver = "not in"
-                            else:
-                                filter_ver = "in"
-
-                        filter_value = ""
-                        for il1, l1 in enumerate(data_list):
-                            filter_value += self.find_value_by_key(l1, "Value")
-                            if il1 < len(data_list) - 1:
-                                filter_value += ", "
-
-                        filter_value = filter_value.replace("'", "")
-
-                        self.add_filter(
-                            page=page_name,
-                            item_name=item_name,
-                            filter_type=filter_type,
-                            table_name=table_name,
-                            val_name=val_name,
-                            ver=filter_ver,
-                            value=filter_value,
-                        )
-                    else:
-                        self._log_data(f"Unused filter on page {page_name}", ex_data, 0)
-                elif filter_variant == "Advanced":
-                    local_row = self.find_value_by_key(ex_data, "Where")
-
-                    for r in local_row:
-                        filter_ver = "is"
-                        temp = self.find_value_by_key(r, "Not")
-                        if temp:
-                            filter_ver = "is not"
-
-                        filter_value = self.find_value_by_key(r, "Right")["Literal"][
-                            "Value"
-                        ]
-                        filter_value = filter_value.replace("'", "")
-
-                        self.add_filter(
-                            page=page_name,
-                            item_name=item_name,
-                            filter_type=filter_type,
-                            table_name=table_name,
-                            val_name=val_name,
-                            ver=filter_ver,
-                            value=filter_value,
-                        )
-                elif filter_variant == "RelativeDate":
-                    LB = self.find_value_by_key(ex_data, "LowerBound")
-                    UB = self.find_value_by_key(ex_data, "UpperBound")
-                    if LB:
-                        temp = LB["DateSpan"]["Expression"]["DateAdd"]
-                        time_am = temp["Amount"]
-                        time_span = temp["TimeUnit"]
-
-                        filter_ver = "in the last"
-                        filter_value = str(abs(time_am))
-
-                        if time_span == 3:
-                            filter_value += " years"
-                        else:
-                            filter_value += " unknown unit"
-                            self._log_data("Unknown filter type.", ex_data, 2)
-
-                        if UB:
-                            filter_value += " including today"
-
-                        self.add_filter(
-                            page=page_name,
-                            item_name=item_name,
-                            filter_type=filter_type,
-                            table_name=table_name,
-                            val_name=val_name,
-                            ver=filter_ver,
-                            value=filter_value,
-                        )
-
-                    else:
-                        self._log_data(
-                            "Filter is relative date. No lower bound is set, skipping row!",
-                            ex_data,
-                            2,
-                        )
-                else:
-                    self._log_data("Unknown filter variant", ex_data, 1)
-
+        
+        # Extract data from each page using PageExtractor
+        for page in report_layout["sections"]:
+            items, filters = self.page_extractor.extract(page)
+            
+            # Convert Pydantic models to legacy list format
+            for item in items:
+                self.result.append(item.to_list())
+            
+            for filter_obj in filters:
+                self.filters.append(filter_obj.to_list())
+        
+        # Clean up temporary folder
         shutil.rmtree(pathFolder)
+
 
 
 def rgba_tuple_to_hex(color):
@@ -859,7 +267,7 @@ def run_ui():
             if run_code == "Log":
                 show_and_hide(
                     "runTextExtra",
-                    f"Documention generated with warnings. See /{SAVE_NAME}/logs or Logs tab below for more information",
+                    f"Documention generated with warnings. See output/{SAVE_NAME}/logs or Logs tab below for more information",
                     "Y",
                 )
                 update_log()
@@ -868,7 +276,7 @@ def run_ui():
             else:
                 show_and_hide(
                     "runTextExtra",
-                    f"Documentation generated without any issues. See: /{SAVE_NAME}/{SAVE_NAME}.xlsx",
+                    f"Documentation generated without any issues. See: output/{SAVE_NAME}/{SAVE_NAME}.xlsx",
                     "G",
                 )
 
@@ -922,22 +330,12 @@ def run_ui():
 
     ### UI Functions ###
     def load_file(input):
-        global \
-            pbix_file_path, \
-            bim_file_path, \
-            unique_data_tables, \
-            _PBIX_, \
-            _BIM_, \
-            SAVE_NAME
+        global pbix_file_path, bim_file_path, unique_data_tables, _PBIX_, _BIM_, SAVE_NAME
 
         if input == "pbix":
-            pbix_file_path = filedialog.askopenfilename(
-                filetypes=[("pbix files", "*.pbix")]
-            )
+            pbix_file_path = filedialog.askopenfilename(filetypes=[("pbix files", "*.pbix")])
             if pbix_file_path:
-                dpg.set_value(
-                    "pbix_file_path_label", f"Selected File: {pbix_file_path}"
-                )
+                dpg.set_value("pbix_file_path_label", f"Selected File: {pbix_file_path}")
 
                 _PBIX_ = [
                     pbix_file_path[pbix_file_path.rfind("/") + 1 : -5],
@@ -955,9 +353,7 @@ def run_ui():
                     _BIM_ = [None, None]
                     disable_buttons()
                 else:
-                    dpg.set_value(
-                        "bim_file_path_label", f"Selected File: {bim_file_path}"
-                    )
+                    dpg.set_value("bim_file_path_label", f"Selected File: {bim_file_path}")
                     _BIM_ = [
                         bim_file_path[bim_file_path.rfind("/") + 1 : -4],
                         bim_file_path[: bim_file_path.rfind("/")],
@@ -988,9 +384,7 @@ def run_ui():
                     dpg.configure_item("defMeasTable", items=items)
 
         elif input == "bim":
-            bim_file_path = filedialog.askopenfilename(
-                filetypes=[("bim files", "*.bim")]
-            )
+            bim_file_path = filedialog.askopenfilename(filetypes=[("bim files", "*.bim")])
             if bim_file_path:
                 dpg.set_value("bim_file_path_label", f"Selected File: {bim_file_path}")
                 _BIM_ = [
@@ -1056,6 +450,10 @@ def run_ui():
 
     def add_input(version):
         cwd = os.getcwd() + "\\Input\\"
+        
+        # Create Input directory if it doesn't exist
+        if not os.path.exists(cwd):
+            os.makedirs(cwd)
 
         if version == "dataType":
             info_tag = "dataTypeInputInfo"
@@ -1133,22 +531,14 @@ def run_ui():
 
     with dpg.texture_registry(show=False):
         width, height, channels, data = dpg.load_image("logo_large.png")
-        dpg.add_static_texture(
-            width=width, height=height, default_value=data, tag="logo_texture"
-        )
+        dpg.add_static_texture(width=width, height=height, default_value=data, tag="logo_texture")
 
     with dpg.window(label="PB-Ixtractor", width=1000, height=800):
         with dpg.collapsing_header(label="About"):
             dpg.add_image("logo_texture")
-        with dpg.collapsing_header(
-            label="File Settings", default_open=True, tag="File Settings"
-        ):
-            dpg.add_button(
-                label="Select .pbix File", callback=lambda: load_file("pbix")
-            )
-            dpg.add_text(
-                "Selected File: No .pbix file selected", tag="pbix_file_path_label"
-            )
+        with dpg.collapsing_header(label="File Settings", default_open=True, tag="File Settings"):
+            dpg.add_button(label="Select .pbix File", callback=lambda: load_file("pbix"))
+            dpg.add_text("Selected File: No .pbix file selected", tag="pbix_file_path_label")
 
             dpg.add_spacer(height=3)
 
@@ -1158,9 +548,7 @@ def run_ui():
                 tag="BimSelector",
                 callback=lambda: load_file("bim"),
             )
-            dpg.add_text(
-                "Selected File: No .bim file selected", tag="bim_file_path_label"
-            )
+            dpg.add_text("Selected File: No .bim file selected", tag="bim_file_path_label")
 
             dpg.add_spacer(height=3)
 
@@ -1278,9 +666,7 @@ def run_ui():
                             )
                         dpg.add_text(texts[i])
 
-        with dpg.collapsing_header(
-            label="User Input", default_open=False, tag="User Input"
-        ):
+        with dpg.collapsing_header(label="User Input", default_open=False, tag="User Input"):
             dpg.add_input_text(
                 label="Data Type PBI",
                 tag="dataTypeInputP",
@@ -1349,9 +735,7 @@ def run_ui():
             )
 
     # Window
-    dpg.create_viewport(
-        title="PB-Ixtractor", width=1000, height=800, large_icon="logo.ico"
-    )
+    dpg.create_viewport(title="PB-Ixtractor", width=1000, height=800, large_icon="logo.ico")
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.start_dearpygui()
@@ -1359,7 +743,12 @@ def run_ui():
 
 
 def gen_tsv(force: bool = False):
-    cwd = os.getcwd() + f"\\{SAVE_NAME}"
+    # Use output directory instead of current directory
+    output_dir = os.path.join(os.getcwd(), "output")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    cwd = os.path.join(output_dir, SAVE_NAME)
 
     if not os.path.exists(cwd):
         os.makedirs(cwd)
@@ -1368,22 +757,27 @@ def gen_tsv(force: bool = False):
         target_exe = Path("TabularEditor.exe")
 
         input_dir = os.getcwd() + "\\Input\\TabularEditorLocations.txt"
+        
+        # Ensure Input directory exists
+        input_folder = os.path.dirname(input_dir)
+        if not os.path.exists(input_folder):
+            os.makedirs(input_folder)
 
         # Default directories to search
         if not os.path.exists(input_dir):
             common_directories = [
-                "C:\\Program Files",
-                "C:\\Program Files (x86)",
+                Path("C:\\Program Files"),
+                Path("C:\\Program Files (x86)"),
             ]
             with open(input_dir, "w") as file:
-                for string in common_directories:
-                    file.write(string + "\n")
+                for directory in common_directories:
+                    file.write(str(directory) + "\n")
         else:
             with open(input_dir, "r") as file:
                 common_directories = file.readlines()
 
             for i, row in enumerate(common_directories):
-                common_directories[i] = Path(row.replace("\n", ""))
+                common_directories[i] = Path(row.strip())
 
         for directory in common_directories:
             target_path = directory / "Tabular Editor" / target_exe
@@ -1436,9 +830,7 @@ def gen_tsv(force: bool = False):
     if os.path.exists(tsv_path):
         os.remove(tsv_path)
 
-    command = (
-        f'& {tab_edit_path} "{_BIM_[1]}/{_BIM_[0]}.bim" -S "{cwd}\\TabularScript.cs"'
-    )
+    command = f'& {tab_edit_path} "{_BIM_[1]}/{_BIM_[0]}.bim" -S "{cwd}\\TabularScript.cs"'
     process = subprocess.Popen(["powershell", "-Command", command])
     process.wait()
 
@@ -1450,9 +842,7 @@ def gen_tsv(force: bool = False):
         start_time = time.time()
         while not os.path.exists(file_path):
             if timeout is not None and time.time() - start_time > timeout:
-                raise TimeoutError(
-                    f"File {file_path} not found within the timeout period"
-                )
+                raise TimeoutError(f"File {file_path} not found within the timeout period")
             time.sleep(0.1)
 
     wait_for_file(file_path=f"{cwd}\\documentation.tsv", timeout=5)
@@ -1470,9 +860,7 @@ def write_to_excel(worksheet, row: int, col: int, text: list[str]):
     if isinstance(text, list):
         if len(text) <= 2:
             # Join the elements into a single string and write to the cell
-            worksheet.write(
-                row, col, " ".join(map(str, text))
-            )  # Joining items with a space
+            worksheet.write(row, col, " ".join(map(str, text)))  # Joining items with a space
         else:
             # Write a rich formatted string for lists longer than 2 elements
             # Convert any non-string values (like floats) to strings, but keep format objects as-is
@@ -1518,11 +906,65 @@ def is_excel_open_with_file(file_path: str) -> bool:
     return False
 
 
+def run_test_extraction():
+    """
+    Run extraction with hardcoded test file paths.
+    Useful for development and testing.
+
+    To use this function, update the paths below to point to your test files.
+    """
+    global SAVE_NAME, _BIM_, _PBIX_, LOG_DATA, REPORT_LOG
+
+    test_pbix_path = r"C:\Users\MarcusToftås\OneDrive - Random Forest AB\Dokument\_Arbete\Rowico\Rowico Home Data Cloud\Reports\Reports V1\Invoices.pbix"
+    test_bim_path = r"C:\Users\MarcusToftås\OneDrive - Random Forest AB\Dokument\_Arbete\Rowico\Rowico Home Data Cloud\Reports\Reports V1\Invoices.bim"
+    # ============================================================================
+
+    # Validate paths exist
+    if not os.path.exists(test_pbix_path):
+        return f"Test PBIX file not found: {test_pbix_path}\nPlease update the path in extractor.py -> run_test_extraction()"
+
+    if not os.path.exists(test_bim_path):
+        return f"Test BIM file not found: {test_bim_path}\nPlease update the path in extractor.py -> run_test_extraction()"
+
+    # Extract file name and directory from paths
+    pbix_path_obj = Path(test_pbix_path)
+    bim_path_obj = Path(test_bim_path)
+
+    # Set global variables
+    _PBIX_ = [pbix_path_obj.stem, str(pbix_path_obj.parent)]
+    _BIM_ = [bim_path_obj.stem, str(bim_path_obj.parent)]
+    SAVE_NAME = pbix_path_obj.stem + '_NEW'
+    LOG_DATA = True
+    REPORT_LOG = ""
+
+    print(f"PBIX: {test_pbix_path}")
+    print(f"BIM:  {test_bim_path}")
+    print(f"Output: output/{SAVE_NAME}/\n")
+
+    # Run the extraction
+    result = run_cmd()
+
+    # Display log if there were issues
+    if REPORT_LOG:
+        print("\n" + "="*80)
+        print("EXTRACTION LOG:")
+        print("="*80)
+        print(REPORT_LOG)
+
+    return result if result else "Success"
+
+
 def run_cmd():
     global SAVE_NAME, _BIM_, _PBIX_, LOG_DATA, REPORT_LOG
 
     cwd = os.getcwd()
-    cwd_save = cwd + f"\\{SAVE_NAME}"
+
+    # Create output directory if it doesn't exist
+    output_dir = os.path.join(cwd, "output")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    cwd_save = os.path.join(output_dir, SAVE_NAME)
 
     file_path = f"{cwd_save}\\{SAVE_NAME}.xlsx"
     if is_excel_open_with_file(file_path):
@@ -1556,11 +998,7 @@ def run_cmd():
     )
 
     report_filters = []
-    [
-        report_filters.append(sublist)
-        for sublist in rep_ex.filters
-        if sublist not in report_filters
-    ]
+    [report_filters.append(sublist) for sublist in rep_ex.filters if sublist not in report_filters]
     report_filters_string = [
         [
             sublist[0],
@@ -1784,9 +1222,7 @@ def run_cmd():
         df_definition = df_definition.replace("\r", "\n")
         df_table = data_type[1]
         df_format = (
-            ""
-            if pd.isna(line_data.get("FormatString", ""))
-            else line_data.get("FormatString", "")
+            "" if pd.isna(line_data.get("FormatString", "")) else line_data.get("FormatString", "")
         )
         df_display = (
             ""
@@ -1871,9 +1307,7 @@ def run_cmd():
         for i, node in enumerate(child_nodes):
             color_map[node] = colors[i % len(colors)]
 
-        node_colors = [
-            color_map[node] if node in child_nodes else "lightgreen" for node in G.nodes
-        ]
+        node_colors = [color_map[node] if node in child_nodes else "lightgreen" for node in G.nodes]
 
         labels = {node: split_label(node) for node in parent_nodes}
 
@@ -1910,7 +1344,9 @@ def run_cmd():
             loc="upper left",
         )
 
-        plt.savefig(f"{SAVE_NAME}\\{SAVE_NAME}_Relationships.png", bbox_inches="tight")
+        # Save to output directory
+        output_path = os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png")
+        plt.savefig(output_path, bbox_inches="tight")
         plt.close()
 
     generate_graph(df_relations, 12, (len(df_relations) + 1) * 14.4 / 72)
@@ -1942,9 +1378,7 @@ def run_cmd():
     worksheet.set_column(parent_index, parent_index, 50, wrap_format)
 
     def get_workbook_format(index: int):
-        return workbook.add_format(
-            {"color": rgba_tuple_to_hex(default_colors[index][1])}
-        )
+        return workbook.add_format({"color": rgba_tuple_to_hex(default_colors[index][1])})
 
     paranthesis_color = ["#0433fa", "#319331", "#7b3831"]
     formats = {
@@ -1958,9 +1392,7 @@ def run_cmd():
         "bold": workbook.add_format({"bold": True}),
         "italic": workbook.add_format({"italic": True}),
         "bi": workbook.add_format({"bold": True, "italic": True}),
-        "para": [
-            workbook.add_format({"color": color}) for color in paranthesis_color * 5
-        ],
+        "para": [workbook.add_format({"color": color}) for color in paranthesis_color * 5],
     }
 
     ## Print Relation Section
@@ -1977,7 +1409,7 @@ def run_cmd():
             if print_graph:
                 worksheet.insert_image(
                     "E1",
-                    f"{SAVE_NAME}\\{SAVE_NAME}_Relationships.png",
+                    os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png"),
                     {"x_scale": 1, "y_scale": 1},
                 )
                 print_graph = False
@@ -2034,9 +1466,7 @@ def run_cmd():
 
         # Split the text into rows
         pattern = re.compile(r"(\(|\)|\[.*?\]|,|//|\d+\.\d+|\w+|(?<!\d)\.(?!\d)|\W)")
-        tokens = [
-            token for token in re.findall(pattern, formated_text) if token.strip()
-        ]
+        tokens = [token for token in re.findall(pattern, formated_text) if token.strip()]
 
         format_array = []
         parents_array = []
@@ -2158,9 +1588,7 @@ def run_cmd():
         dfX = pd.DataFrame(dataX)
 
         for visual in visual_ids:
-            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0][
-                "Visual Type"
-            ]
+            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Visual Type"]
 
             v_type = "Visual"
             if visual_type == "tableEx":
@@ -2194,9 +1622,7 @@ def run_cmd():
                 v_type = "Group"
                 s_type = "Panel"
             else:
-                REPORT_LOG += log_data(
-                    "New Visual type not yet supported!", visual_type, 1
-                )
+                REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
 
             new_data = {
                 "Item Type": v_type,
@@ -2244,23 +1670,15 @@ def run_cmd():
             worksheetX.write(0, col_idx, name, formats["bi"])
 
         sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
-        dfX["Item Type"] = pd.Categorical(
-            dfX["Item Type"], categories=sort_order, ordered=True
-        )
+        dfX["Item Type"] = pd.Categorical(dfX["Item Type"], categories=sort_order, ordered=True)
         df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
 
         row_num = 1
         for _, row in df_sorted.iterrows():
             filter_array = []
             for filter in report_filters_string:
-                if (
-                    filter[2] == "Visual"
-                    and filter[0] == report_name
-                    and filter[1] == row["ID"]
-                ):
-                    filter_array.extend(
-                        [formats["bold"], filter[3], " " + filter[4] + "\n"]
-                    )
+                if filter[2] == "Visual" and filter[0] == report_name and filter[1] == row["ID"]:
+                    filter_array.extend([formats["bold"], filter[3], " " + filter[4] + "\n"])
 
             if filter_array and filter_array[-1][-1] == "\n":
                 filter_array[-1] = filter_array[-1][:-1]
@@ -2274,8 +1692,7 @@ def run_cmd():
                     for _, rrow in group.iterrows():
                         display_name = (
                             str(rrow["Display Name"])
-                            if not pd.isna(rrow["Display Name"])
-                            and rrow["Display Name"]
+                            if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
                             else rrow["Name"]
                         )
                         if display_name != rrow["Name"]:
@@ -2283,9 +1700,7 @@ def run_cmd():
                                 f"  {rrow['Table']}[{rrow['Name']}] ({display_name})"
                             )
                         else:
-                            description_parts.append(
-                                f"  {rrow['Table']}[{rrow['Name']}]"
-                            )
+                            description_parts.append(f"  {rrow['Table']}[{rrow['Name']}]")
                 worksheetX.write(row_num, 0, row["Item Type"])
                 worksheetX.write(row_num, 1, row["Visual Type"])
                 worksheetX.write(row_num, 2, row["ID"])
@@ -2372,9 +1787,7 @@ def run_cmd():
         dfX = pd.DataFrame(dataX)
 
         for visual in visual_ids:
-            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0][
-                "Visual Type"
-            ]
+            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Visual Type"]
 
             v_type = "Visual"
             if visual_type == "tableEx":
@@ -2408,9 +1821,7 @@ def run_cmd():
                 v_type = "Group"
                 s_type = "Panel"
             else:
-                REPORT_LOG += log_data(
-                    "New Visual type not yet supported!", visual_type, 1
-                )
+                REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
 
             new_data = {
                 "Item Type": v_type,
@@ -2445,22 +1856,14 @@ def run_cmd():
                 dfX.index = dfX.index + 1
 
         sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
-        dfX["Item Type"] = pd.Categorical(
-            dfX["Item Type"], categories=sort_order, ordered=True
-        )
+        dfX["Item Type"] = pd.Categorical(dfX["Item Type"], categories=sort_order, ordered=True)
         df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
 
         for _, row in df_sorted.iterrows():
             filter_array = []
             for filter in report_filters_string:
-                if (
-                    filter[2] == "Visual"
-                    and filter[0] == report_name
-                    and filter[1] == row["ID"]
-                ):
-                    filter_array.extend(
-                        [formats["bold"], filter[3], " " + filter[4] + "\n"]
-                    )
+                if filter[2] == "Visual" and filter[0] == report_name and filter[1] == row["ID"]:
+                    filter_array.extend([formats["bold"], filter[3], " " + filter[4] + "\n"])
 
             if filter_array and filter_array[-1][-1] == "\n":
                 filter_array[-1] = filter_array[-1][:-1]
@@ -2532,9 +1935,7 @@ def run_cmd():
     wrap_format_data = workbook_data.add_format({"text_wrap": True})
 
     def get_workbook_data_format(index: int):
-        return workbook_data.add_format(
-            {"color": rgba_tuple_to_hex(default_colors[index][1])}
-        )
+        return workbook_data.add_format({"color": rgba_tuple_to_hex(default_colors[index][1])})
 
     formats_data = {
         "function": get_workbook_data_format(0),
@@ -2547,10 +1948,7 @@ def run_cmd():
         "bold": workbook_data.add_format({"bold": True}),
         "italic": workbook_data.add_format({"italic": True}),
         "bi": workbook_data.add_format({"bold": True, "italic": True}),
-        "para": [
-            workbook_data.add_format({"color": color})
-            for color in paranthesis_color * 5
-        ],
+        "para": [workbook_data.add_format({"color": color}) for color in paranthesis_color * 5],
     }
 
     # Tab 1: "pages" - Copy of the consolidated Pages tab
@@ -2605,9 +2003,7 @@ def run_cmd():
         dfX = pd.DataFrame(dataX)
 
         for visual in visual_ids:
-            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0][
-                "Visual Type"
-            ]
+            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Visual Type"]
 
             v_type = "Visual"
             if visual_type == "tableEx":
@@ -2641,9 +2037,7 @@ def run_cmd():
                 v_type = "Group"
                 s_type = "Panel"
             else:
-                REPORT_LOG += log_data(
-                    "New Visual type not yet supported!", visual_type, 1
-                )
+                REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
 
             new_data_visual = {
                 "Item Type": v_type,
@@ -2679,22 +2073,14 @@ def run_cmd():
                 dfX.index = dfX.index + 1
 
         sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
-        dfX["Item Type"] = pd.Categorical(
-            dfX["Item Type"], categories=sort_order, ordered=True
-        )
+        dfX["Item Type"] = pd.Categorical(dfX["Item Type"], categories=sort_order, ordered=True)
         df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
 
         for _, row in df_sorted.iterrows():
             filter_array = []
             for filter in report_filters_string:
-                if (
-                    filter[2] == "Visual"
-                    and filter[0] == report_name
-                    and filter[1] == row["ID"]
-                ):
-                    filter_array.extend(
-                        [formats_data["bold"], filter[3], " " + filter[4] + "\n"]
-                    )
+                if filter[2] == "Visual" and filter[0] == report_name and filter[1] == row["ID"]:
+                    filter_array.extend([formats_data["bold"], filter[3], " " + filter[4] + "\n"])
 
             if filter_array and filter_array[-1][-1] == "\n":
                 filter_array[-1] = filter_array[-1][:-1]
@@ -2707,8 +2093,7 @@ def run_cmd():
                     for _, rrow_desc in group.iterrows():
                         display_name_desc = (
                             str(rrow_desc["Display Name"])
-                            if not pd.isna(rrow_desc["Display Name"])
-                            and rrow_desc["Display Name"]
+                            if not pd.isna(rrow_desc["Display Name"]) and rrow_desc["Display Name"]
                             else rrow_desc["Name"]
                         )
                         if display_name_desc != rrow_desc["Name"]:
@@ -2716,9 +2101,7 @@ def run_cmd():
                                 f"  {rrow_desc['Table']}[{rrow_desc['Name']}] ({display_name_desc})"
                             )
                         else:
-                            description_parts.append(
-                                f"  {rrow_desc['Table']}[{rrow_desc['Name']}]"
-                            )
+                            description_parts.append(f"  {rrow_desc['Table']}[{rrow_desc['Name']}]")
                 full_description = "\n".join(description_parts)
 
                 # Write one row per field
@@ -2728,9 +2111,7 @@ def run_cmd():
                     worksheet_pages_data.write(row_num, 2, row["Visual Type"])
                     worksheet_pages_data.write(row_num, 3, row["ID"])
                     worksheet_pages_data.write(row_num, 4, rrow["Type"])
-                    worksheet_pages_data.write(
-                        row_num, 5, f"{rrow['Table']}[{rrow['Name']}]"
-                    )
+                    worksheet_pages_data.write(row_num, 5, f"{rrow['Table']}[{rrow['Name']}]")
                     display_name = (
                         str(rrow["Display Name"])
                         if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
@@ -2777,12 +2158,8 @@ def run_cmd():
     # Tab 2: "common" - Main data without relationships and unused measures
     worksheet_common = workbook_data.add_worksheet("common")
     worksheet_common.set_column(0, len(new_data), 30, wrap_format_data)
-    worksheet_common.set_column(
-        definition_index, definition_index, 100, def_format_data
-    )
-    worksheet_common.set_column(
-        definition_index + 1, definition_index + 1, 30, wrap_format_data
-    )
+    worksheet_common.set_column(definition_index, definition_index, 100, def_format_data)
+    worksheet_common.set_column(definition_index + 1, definition_index + 1, 30, wrap_format_data)
     worksheet_common.set_column(parent_index, parent_index, 50, wrap_format_data)
 
     # Write header
@@ -2812,9 +2189,7 @@ def run_cmd():
         formated_text = formated_text.replace("||", " AAA ")
 
         pattern = re.compile(r"(\(|\)|\[.*?\]|,|//|\d+\.\d+|\w+|(?<!\d)\.(?!\d)|\W)")
-        tokens = [
-            token for token in re.findall(pattern, formated_text) if token.strip()
-        ]
+        tokens = [token for token in re.findall(pattern, formated_text) if token.strip()]
 
         format_array = []
         parents_array = []
@@ -2911,7 +2286,7 @@ def run_cmd():
             if print_graph:
                 worksheet_relationships.insert_image(
                     "E1",
-                    f"{SAVE_NAME}\\{SAVE_NAME}_Relationships.png",
+                    os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png"),
                     {"x_scale": 1, "y_scale": 1},
                 )
                 print_graph = False
@@ -2964,8 +2339,8 @@ def run_cmd():
     if REPORT_LOG and LOG_DATA:
         t = time.localtime()
         current_time = time.strftime("%H_%M_%S", t)
-        location_folder = cwd + f"\\{SAVE_NAME}\\logs"
-        location = location_folder + f"\\log_data_{current_time}.txt"
+        location_folder = os.path.join(cwd_save, "logs")
+        location = os.path.join(location_folder, f"log_data_{current_time}.txt")
 
         if not os.path.exists(location_folder):
             os.makedirs(location_folder)

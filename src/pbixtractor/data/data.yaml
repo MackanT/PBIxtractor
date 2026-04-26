@@ -1,0 +1,183 @@
+data_types:
+  - name: Tooltips
+    friendly_name: Tooltips
+  - name: Category
+    friendly_name: Categorical
+  - name: X
+    friendly_name: X-Values
+  - name: Y
+    friendly_name: Y-Values
+  - name: Y2
+    friendly_name: Y2-Values
+  - name: Size
+    friendly_name: Size Indicator
+  - name: Series
+    friendly_name: Series
+  - name: Rows
+    friendly_name: Rows
+  - name: Columns
+    friendly_name: Cols
+  - name: Play
+    friendly_name: Play
+  - name: Breakdown
+    friendly_name: Breakdown
+  - name: Group
+    friendly_name: Group
+  - name: Values
+    friendly_name: Values
+  - name: Details
+    friendly_name: Details
+  - name: Indicator
+    friendly_name: Indicators
+  - name: TrendLine
+    friendly_name: Trendlines
+  - name: Goal  
+    friendly_name: Goals
+  - name: Target
+    friendly_name: Targets
+  - name: ExplainBy
+    friendly_name: Explained By
+  - name: Anazlze
+    friendly_name: Analyzed
+  - name: Data
+    friendly_name: Data
+  - name: MaxValue
+    friendly_name: Max Values
+  - name: MinValue
+    friendly_name: Min Values
+  - name: TargetValue
+    friendly_name: Target Values
+
+function_names:
+  - IF
+  - DIVIDE
+  - MOD
+  - FORMAT
+  - CALCULATE
+  - CALCULATETABLE
+  - VALUES
+  - ISBLANK
+  - YEAR
+  - MONTH
+  - DAY
+  - WEEKDAY
+  - WEEKNUM
+  - DATEDIFF
+  - DATEADD
+  - DATESBETWEEN
+  - DATESINPERIOD
+  - SWITCH
+  - DATE
+  - LASTDATE
+  - FIRSTDATE
+  - EDATE
+  - TODAY
+  - EOMONTH
+  - PREVIOUSMONTH
+  - ISFILTERED
+  - "FALSE"
+  - "TRUE"
+  - SUM
+  - SUMX
+  - AVERAGE
+  - AVERAGEX
+  - DISTINCTCOUNT
+  - COUNT
+  - COUNTX
+  - CONCATENATE
+  - CONCATENATEX
+  - SAMEPERIODLASTYEAR
+  - ALL
+  - ALLSELECTED
+  - COUNTROWS
+  - MIN
+  - MINX
+  - MAX
+  - MAXX
+  - IN
+  - LEFT
+  - RIGHT
+  - DISTINCT
+  - SELECTEDVALUE
+  - BLANK
+  - ISINSCOPE
+  - FILTER
+  - USERELATIONSHIP
+  - REMOVEFILTERS
+  - KEEPFILTERS
+  - ABS
+  - HASONEVALUE
+  - RELATED
+  - RELATEDTABLE
+  - INT
+  - NOT
+  - ISEMPTY
+  - AND
+  - OR
+
+visual_types:
+  - lineClusteredColumnComboChart
+  - clusteredColumnChart
+  - clusteredBarChart
+  - donutChart
+  - azureMap
+  - barChart
+  - scatterChart
+  - columnChart
+  - hundredPercentStackedBarChart
+  - hundredPercentStackedColumnChart
+  - lineChart
+  - areaChart
+  - stackedAreaChart
+  - lineStackedColumnComboChart
+  - ribbonChart
+  - waterfallChart
+  - funnel
+  - pieChart
+  - treemap
+  - map
+  - filledMap
+  - multiRowCard
+  - kpi
+  - pivotTable
+  - keyDriversVisual
+  - decompositionTreeVisual
+  - card
+  - cardVisual
+  - gauge
+  - tableEx
+  - slicer
+  - advancedSlicerVisual
+
+# Extraction configuration for automated visual parsing
+extraction_rules:
+  # Default rule applies to all visual types unless overridden
+  default:
+    enabled: true
+    projections_path: "config.singleVisual.projections"
+    select_path: "config.singleVisual.objects.general[0].properties.selection.Select"
+    name_path: "config.singleVisual.objects.*.properties.*.expr.*.Name"
+    display_name_path: "config.singleVisual.objects.*.properties.*.expr.*.NativeReferenceName"
+    skip_types: ["shape", "image", "textbox"]
+  
+  # Visual-specific overrides (optional - only if they differ from default)
+  overrides:
+    actionButton:
+      extract_type: "button"
+      title_path: "config.singleVisual.objects.*.properties.text.expr.Literal.Value"
+      bookmark_path: "config.singleVisual.objects.*.properties.bookmark.expr.Literal.Value"
+      navigation_path: "config.singleVisual.objects.*.properties.navigationSection.expr.Literal.Value"
+
+# Filter extraction rules
+filter_rules:
+  visual_filter:
+    entity_path: "filter.From[0].Entity"
+    property_path: "filter.Where[0].Condition.*.Property"
+    value_path: "filter.Where[0].Condition.*.Value"
+    enabled: true
+  
+  page_filter:
+    entity_path: "Entity"
+    property_path: "Property"
+    display_name_path: "displayName"
+    enabled: true
