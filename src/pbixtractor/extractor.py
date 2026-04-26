@@ -1,5 +1,6 @@
+"""Main extractor module for PBI-Ixtractor."""
+
 import argparse
-import inspect
 import json
 import logging
 import os
@@ -15,42 +16,132 @@ from zipfile import ZipFile
 import matplotlib
 import networkx as nx
 import pandas as pd
-import psutil
 import xlsxwriter
 import yaml
 from matplotlib import pyplot as plt
 
 matplotlib.use("agg")
 
-# Initialize logger
-from .logger import get_logger, setup_logger, wrap_long_message
+# Local imports
+from .constants import DEFAULT_COLORS, DESCRIPT_TAG, REPORT_COLUMNS, UI_COLORS
+from .logger import get_logger, setup_logger
+from .utils import (
+    ensure_directory,
+    find_nth_occurrence,
+    find_vars,
+    is_excel_open_with_file,
+    rgba_tuple_to_hex,
+    write_to_excel,
+)
 
+# Initialize logger
 logger, log_capture = setup_logger("pbixtractor", level=logging.INFO, capture=True)
 
-
+# Global state variables
 LOG_DATA = True
 SAVE_NAME = ""
 _PBIX_ = [None, None]
 _BIM_ = [None, None]
-DESCRIPT_TAG = "////"
 
-default_colors = [
-    ["Functions", (49, 101, 187, 255)],
-    ["Measures", (0, 16, 128, 255)],
-    ["Return", (24, 0, 255, 255)],
-    ["Variables", (9, 134, 88, 255)],
-    ["Comments", (8, 128, 15, 255)],
-    ["Quotes", (163, 21, 21, 255)],
-    ["VarNames", (0, 15, 255, 255)],
-]
 
-cwd = os.getcwd()
+# ============================================================================
+# DAX Analysis Helper Functions
+# ============================================================================
+
+
+def find_functions(dax_code: str, known_functions: list) -> list[str]:
+    """
+    Find all known DAX functions used in code.
+
+    Args:
+        dax_code: DAX code string
+        known_functions: List of known function names
+
+    Returns:
+        List of functions found in the code
+    """
+    used_functions = [] 
+    for func in known_functions:
+        if func in dax_code:
+            used_functions.append(func)
+    return used_functions
+
+
+def find_measures(dax_code: str) -> list[str]:
+    """
+    Extract measure references from DAX code.
+
+    Args:
+        dax_code: DAX code string
+
+    Returns:
+        List of unique measure references (e.g., "[Measure Name]")
+    """
+    pattern = r"\[.*?\]"
+    all_measures = re.findall(pattern, dax_code)
+    return list(set(all_measures))
+
+
+def find_columns(dax_code: str) -> list[tuple[str, str]]:
+    """
+    Extract column references from DAX code.
+
+    Args:
+        dax_code: DAX code string
+
+    Returns:
+        List of (table, column) tuples
+    """
+    pattern = re.compile(r"(\w+)\[(.*?)\]")
+    all_columns = re.findall(pattern, dax_code)
+    return list(set(all_columns))
+
+
+def parse_tsv_object_name(object_name: str) -> tuple[str, str, str]:
+    """
+    Parse TSV object name to extract type, table, and column.
+
+    Args:
+        object_name: Object name from TSV (e.g., "Model.Table.C.[Column]")
+
+    Returns:
+        Tuple of (type, table, column) where type is Table/Column/Hierarchy/Measure
+    """
+    data_type = "Table"
+    start_pos = find_nth_occurrence(".", object_name, 2) + 1
+    end_pos = find_nth_occurrence(".", object_name, 3)
+
+    if end_pos == -1:
+        table = object_name[start_pos:]
+    else:
+        table = object_name[start_pos:end_pos]
+
+    column = ""
+    if any(substring in object_name for substring in [".C.", ".H.", ".M."]):
+        start_pos = find_nth_occurrence(".", object_name, 4) + 1
+        end_pos = find_nth_occurrence(".", object_name, 5)
+
+        if end_pos == -1 or end_pos < len(object_name):
+            column = object_name[start_pos:]
+        else:
+            column = object_name[start_pos:end_pos]
+
+        column = column.strip("[]")
+
+        if ".C." in object_name:
+            data_type = "Column"
+        elif ".H." in object_name:
+            data_type = "Hierarchy"
+        elif ".M." in object_name:
+            data_type = "Measure"
+
+    return (data_type, table, column)
+
 
 # Load configuration from YAML file
 try:
     from .data import YAML_FILE
 except ImportError:
-    # Fallback for direct script execution (legacy mode)
     from pathlib import Path
 
     YAML_FILE = Path(__file__).parent / "data" / "data.yaml"
@@ -77,40 +168,17 @@ except Exception as e:
     sys.exit(1)
 
 
-def log_message(message: str, data: str = "", severity: int = 0):
-    """
-    Log a message with specified severity level.
-
-    Args:
-        message: Main log message
-        data: Additional data/context
-        severity: -1=DEBUG, 0=INFO, 1=WARNING, 2=ERROR, 3+=CRITICAL
-    """
-    # Get caller line number for context
-    caller_line = inspect.currentframe().f_back.f_lineno
-
-    # Format the full message
-    full_message = f"{message} (line {caller_line})"
-    if data:
-        data_str = str(data)
-        wrapped_data = wrap_long_message(data_str, max_length=122)
-        full_message += f"\n{wrapped_data}"
-
-    # Log at appropriate level
-    if severity == -1:
-        logger.debug(full_message)
-    elif severity == 0:
-        logger.info(full_message)
-    elif severity == 1:
-        logger.warning(full_message)
-    elif severity == 2:
-        logger.error(full_message)
-    else:
-        logger.critical(full_message)
-
-
 class ReportExtractor:
-    def __init__(self, path, name):
+    """Extracts visual and filter data from Power BI .pbix files."""
+
+    def __init__(self, path: str, name: str):
+        """
+        Initialize report extractor.
+
+        Args:
+            path: Directory path containing the .pbix file
+            name: Name of the .pbix file
+        """
         self.path = path
         self.name = name
         self.result = []
@@ -128,10 +196,6 @@ class ReportExtractor:
             logger=self.logger,
         )
 
-    def _log_data(self, message: str, error: str, severity: int = 0):
-        """Legacy log method for backward compatibility."""
-        log_message(message, error, severity)
-
     def add_item(
         self,
         page: str,
@@ -143,19 +207,28 @@ class ReportExtractor:
         data_type: str,
     ) -> None:
         """
-        Stores input data into the self.result field
-        """
-        field_values = [
-            page,
-            visual_type,
-            item_name,
-            table_name,
-            val_name,
-            disp_name,
-            data_type,
-        ]
+        Store extracted item data.
 
-        self.result.append(field_values)
+        Args:
+            page: Page name
+            visual_type: Type of visual element
+            item_name: Visual item identifier
+            table_name: Table name
+            val_name: Value/field name
+            disp_name: Display name
+            data_type: Data type
+        """
+        self.result.append(
+            [
+                page,
+                visual_type,
+                item_name,
+                table_name,
+                val_name,
+                disp_name,
+                data_type,
+            ]
+        )
 
     def add_filter(
         self,
@@ -164,49 +237,66 @@ class ReportExtractor:
         filter_type: str,
         table_name: str,
         val_name: str,
-        ver: str,
+        operator: str,
         value: str,
-    ):
+    ) -> None:
         """
-        Stores input data into the self.filters field
+        Store extracted filter data.
+
+        Args:
+            page: Page name
+            item_name: Visual item identifier
+            filter_type: Type of filter
+            table_name: Table name
+            val_name: Field name
+            operator: Filter operator
+            value: Filter value
         """
-        filter_set = [
-            page,
-            item_name,
-            filter_type,
-            table_name,
-            val_name,
-            ver,
-            value,
-        ]
+        self.filters.append(
+            [
+                page,
+                item_name,
+                filter_type,
+                table_name,
+                val_name,
+                operator,
+                value,
+            ]
+        )
 
-        self.filters.append(filter_set)
+    def extract(self) -> None:
+        """
+        Extract all data from the Power BI report.
 
-    def extract(self):
-        """Extract data from Power BI report using modular extractors."""
+        This method:
+        1. Extracts the .pbix file (ZIP archive)
+        2. Loads the report layout JSON
+        3. Parses visual containers and filters
+        4. Extracts items and filters using PageExtractor
+        5. Cleans up temporary files
+        """
         # Prepare extraction folder
-        path_folder = f"{self.path}/temp_{self.name[:-5]}"
+        temp_folder = f"{self.path}/temp_{self.name[:-5]}"
         try:
-            shutil.rmtree(path_folder)
+            shutil.rmtree(temp_folder)
         except FileNotFoundError:
-            print(f"folder {path_folder} not present")
+            self.logger.debug(f"Temporary folder {temp_folder} not present")
 
         # Extract .pbix file (it's a ZIP archive)
-        f = ZipFile(f"{self.path}/{self.name}", "r")
-        f.extractall(path_folder)
+        with ZipFile(f"{self.path}/{self.name}", "r") as zip_file:
+            zip_file.extractall(temp_folder)
 
         # Load report layout JSON
-        report_layout = json.loads(
-            open(f"{path_folder}/Report/Layout", "r", encoding="utf-16 le").read()
-        )
-        f.close()
+        layout_path = f"{temp_folder}/Report/Layout"
+        with open(layout_path, "r", encoding="utf-16 le") as layout_file:
+            report_layout = json.loads(layout_file.read())
 
         # Parse nested JSON strings in the layout
         report_layout["config"] = json.loads(report_layout["config"])
         for section in report_layout["sections"]:
             for visual_container in section["visualContainers"]:
                 for key in ["config", "filters", "query", "dataTransforms"]:
-                    if key in visual_container.keys():
+                    if key in visual_container:
                         visual_container[key] = json.loads(visual_container[key])
 
         # Extract data from each page using PageExtractor
@@ -221,33 +311,19 @@ class ReportExtractor:
                 self.filters.append(filter_obj.to_list())
 
         # Clean up temporary folder
-        shutil.rmtree(path_folder)
-
-
-def rgba_tuple_to_hex(color):
-    """Convert RGBA tuple to a hexadecimal color code."""
-    r, g, b, _ = color
-    hex_color = "#{:02x}{:02x}{:02x}".format(r, g, b)
-    return hex_color
+        shutil.rmtree(temp_folder)
 
 
 def run_ui():
+    """Launch the DearPyGUI-based user interface."""
     from tkinter import filedialog
 
     import dearpygui.dearpygui as dpg
 
     dpg.create_context()
 
-    colors = {
-        "W": (255, 255, 255),
-        "G": (102, 204, 102),
-        "Y": (255, 255, 102),
-        "O": (255, 153, 51),
-        "R": (255, 77, 77),
-    }
-
     def show_and_hide(tag: str, msg: str, type: str = None):
-        dpg.configure_item(tag, color=colors[type], show=True)
+        dpg.configure_item(tag, color=UI_COLORS[type], show=True)
         dpg.set_value(tag, msg)
         threading.Thread(target=lambda: wait_and_show(tag)).start()
 
@@ -259,7 +335,7 @@ def run_ui():
         threading.Thread(target=lambda: increment_loader(tag)).start()
 
     def increment_loader(tag: str):
-        dpg.configure_item(tag, color=colors["W"])
+        dpg.configure_item(tag, color=UI_COLORS["W"])
         i = 0
         while not stop_event.is_set():
             time.sleep(0.2)
@@ -301,15 +377,15 @@ def run_ui():
 
             # Determine color based on log level
             if "DEBUG:" in msg:
-                c = colors["W"]
+                c = UI_COLORS["W"]
             elif "INFO:" in msg:
-                c = colors["W"]
+                c = UI_COLORS["W"]
             elif "WARNING:" in msg:
-                c = colors["Y"]
+                c = UI_COLORS["Y"]
             elif "ERROR:" in msg:
-                c = colors["O"]
+                c = UI_COLORS["O"]
             else:
-                c = colors["R"]
+                c = UI_COLORS["R"]
 
             # Remove log level prefix for display
             if ":" in msg:
@@ -424,10 +500,9 @@ def run_ui():
         DESCRIPT_TAG = dpg.get_value("descriptionTag")
 
     def find_color(name):
-        global default_colors
         old_color = None
         name = name.split(" ")[0]
-        for i, color in enumerate(default_colors):
+        for i, color in enumerate(DEFAULT_COLORS):
             if color[0] == name:
                 old_color = color[1]
                 break
@@ -439,14 +514,14 @@ def run_ui():
         dpg.set_value("colorWheel", find_color(button_type)[1])
 
     def update_colors(sender, app_data):
-        global default_colors
         button_type = dpg.get_value("radioColors")
         color_index = find_color(button_type)[0]
 
         new_color = []
         for col in dpg.get_value("colorWheel"):
             new_color.append(int(col))
-        default_colors[color_index][1] = new_color
+        # Note: This modifies the imported constant - consider using a mutable copy
+        DEFAULT_COLORS[color_index][1] = new_color
 
     def toggle_log_toggle(sender, app_data, user_data):
         global LOG_DATA
@@ -672,7 +747,7 @@ def run_ui():
 
                 with dpg.child_window(width=80, height=300):
                     texts = ["Debug", "Info", "Warning", "Error", "Critical"]
-                    for i, color in enumerate(colors.values()):
+                    for i, color in enumerate(UI_COLORS.values()):
                         with dpg.drawlist(width=20.0, height=20.0, tag=f"drawlist{i}"):
                             dpg.draw_rectangle(
                                 pmin=[0.0, 0.0],
@@ -864,64 +939,6 @@ def gen_tsv(force: bool = False):
     wait_for_file(file_path=f"{cwd}\\documentation.tsv", timeout=5)
 
 
-def write_to_excel(worksheet, row: int, col: int, text: list[str]):
-    # if len(text) <= 2:
-    #     worksheet.write(row, col, *text)
-    # else:
-    #     if 'Group: ' in text:
-    #         1
-    #     worksheet.write_rich_string(row, col, *text)
-    # If text is a list of strings
-
-    if isinstance(text, list):
-        if len(text) <= 2:
-            # Join the elements into a single string and write to the cell
-            worksheet.write(row, col, " ".join(map(str, text)))  # Joining items with a space
-        else:
-            # Write a rich formatted string for lists longer than 2 elements
-            # Convert any non-string values (like floats) to strings, but keep format objects as-is
-            cleaned_text = []
-            for item in text:
-                # Check if item is a format object (has 'xf_format_indices' attribute)
-                if hasattr(item, "xf_format_indices"):
-                    cleaned_text.append(item)
-                else:
-                    # Convert to string if not already
-                    str_item = str(item)
-                    # Skip empty strings to avoid Excel warnings
-                    if str_item:
-                        cleaned_text.append(str_item)
-            # Only write if we have content
-            if cleaned_text:
-                worksheet.write_rich_string(row, col, *cleaned_text)
-            else:
-                worksheet.write(row, col, "")
-    else:
-        # If text is not a list, write the single value
-        worksheet.write(row, col, text)
-
-
-def is_excel_open_with_file(file_path: str) -> bool:
-    """
-    Check if Excel is open with a specific file.
-
-    Parameters:
-        file_path (str): The path of the Excel file to check.
-
-    Returns:
-        bool: True if Excel is open with the specified file, False otherwise.
-    """
-    for process in psutil.process_iter():
-        try:
-            if process.name().lower() == "excel.exe":
-                for file in process.open_files():
-                    if file.path.lower() == file_path.lower():
-                        return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-    return False
-
-
 def run_test_extraction():
     """
     Run extraction with hardcoded test file paths.
@@ -974,144 +991,66 @@ def run_test_extraction():
 
 
 def run_cmd():
+    """
+    Main command to extract and document Power BI report.
+
+    This function orchestrates the entire documentation generation process:
+    1. Setup output directories and validate files
+    2. Extract data from PBIX using ReportExtractor
+    3. Process TSV file from Tabular Editor
+    4. Build relationships and generate graph
+    5. Create Excel documentation workbooks
+
+    Returns:
+        Status string: "Success", "Log", or error message
+    """
     global SAVE_NAME, _BIM_, _PBIX_, LOG_DATA
 
-    cwd = os.getcwd()
+    # ========================================================================
+    # SECTION 1: SETUP AND INITIALIZATION
+    # ========================================================================
 
-    # Create output directory if it doesn't exist
-    output_dir = os.path.join(cwd, "output")
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    # Setup output directories
+    output_dir = os.path.join(os.getcwd(), "output")
+    ensure_directory(output_dir)
 
     cwd_save = os.path.join(output_dir, SAVE_NAME)
+    ensure_directory(cwd_save)
 
-    file_path = f"{cwd_save}\\{SAVE_NAME}.xlsx"
+    # Check if Excel file is already open
+    file_path = os.path.join(cwd_save, f"{SAVE_NAME}.xlsx")
     if is_excel_open_with_file(file_path):
         return f"Please Close File: {SAVE_NAME}.xlsx before proceeding!"
 
-    tsv_path = Path(f"{cwd_save}\\documentation.tsv")
-    if not os.path.isfile(tsv_path):
+    # Generate TSV file if it doesn't exist
+    tsv_path = Path(os.path.join(cwd_save, "documentation.tsv"))
+    if not tsv_path.is_file():
         if gen_tsv() == "NoTabEd":
             return "NoTabEd"
 
-    rep_ex = ReportExtractor(
-        _PBIX_[1],
-        f"{_PBIX_[0]}.pbix",
-    )
+    excel_file = cwd_save + "\\" + SAVE_NAME + ".xlsx"
 
+    # ========================================================================
+    # SECTION 2: EXTRACT REPORT DATA FROM PBIX
+    # ========================================================================
+
+    rep_ex = ReportExtractor(_PBIX_[1], f"{_PBIX_[0]}.pbix")
     rep_ex.extract()
 
-    report_info = pd.DataFrame(
-        rep_ex.result,
-        columns=[
-            "Page",
-            "Visual Type",
-            "Visual ID",
-            "Table",
-            "Name",
-            "Display Name",
-            "Type",
-        ],
-    )
+    report_info = pd.DataFrame(rep_ex.result, columns=REPORT_COLUMNS)
 
+    # Process filters - remove duplicates and format
     report_filters = []
     [report_filters.append(sublist) for sublist in rep_ex.filters if sublist not in report_filters]
+
     report_filters_string = [
-        [
-            sublist[0],
-            sublist[1],
-            sublist[2],
-            f"{sublist[3]}[{sublist[4]}]",
-            " ".join(sublist[5:]),
-        ]
+        [sublist[0], sublist[1], sublist[2], f"{sublist[3]}[{sublist[4]}]", " ".join(sublist[5:])]
         for sublist in report_filters
     ]
 
-    def find_nth_occurence(substring: str, string: str, n: int) -> int:
-        """
-        returns starting index of n:th substring in string
-        """
-        count = 0
-        index = -1
-
-        while count < n:
-            index = string.find(substring, index + 1)
-
-            if index == -1:
-                break
-
-            count += 1
-
-        return index
-
-    def find_vars(string: str) -> tuple[str]:
-        """Returns all formatted variable names"""
-        var_names = []
-        tokens = string.split()
-
-        if tokens.count("VAR") != 0:
-            indexes = [index for index, value in enumerate(tokens) if value == "VAR"]
-
-            for index in indexes:
-                var_names.append(tokens[index + 1])
-
-        return var_names
-
-    def find_functions(string: str) -> tuple[str]:
-        """
-        Checks through input string and returns list of all known functions
-        """
-        used_functions = []
-
-        for func in known_functions:
-            if string.find(func) != -1:
-                used_functions.append(func)
-
-        return used_functions
-
-    def find_measures(string: str) -> tuple[str]:
-        pattern = r"\[.*?\]"
-        all_measures = re.findall(pattern, string)
-        unique_measures = list(set(all_measures))
-        return unique_measures
-
-    def find_columns(string: str) -> tuple[str]:
-        pattern = re.compile(r"(\w+)\[(.*?)\]")
-        all_columns = re.findall(pattern, string)
-        unique_columns = list(set(all_columns))
-        return unique_columns
-
-    def get_data_type(string: str) -> tuple[str, str, str]:
-        data = "Table"
-        start_pos = find_nth_occurence(".", string, 2) + 1
-        end_pos = find_nth_occurence(".", string, 3)
-        if end_pos == -1:
-            table = string[start_pos:]
-        else:
-            table = string[start_pos:end_pos]
-
-        column = ""
-        if any(substring in string for substring in [".C.", ".H.", ".M."]):
-            start_pos = find_nth_occurence(".", string, 4) + 1
-            end_pos = find_nth_occurence(".", string, 5)
-            if end_pos == -1 or end_pos < len(string):
-                column = string[start_pos:]
-            else:
-                column = string[start_pos:end_pos]
-
-            if column[0] == "[":
-                column = column[1:]
-            if column[-1] == "]":
-                column = column[:-1]
-
-            if ".C." in string:
-                data = "Column"
-            elif ".H." in string:
-                data = "Hierarchy"
-            elif ".M." in string:
-                data = "Measure"
-
-        return (data, table, column)
+    # ========================================================================
+    # SECTION 3: INITIALIZE DATA STRUCTURES
+    # ========================================================================
 
     # Create the DataFrame
     data = {
@@ -1156,6 +1095,10 @@ def run_cmd():
         all_visuals[ind][1] = unique_pages_index[page_index]
         unique_pages_index[page_index] += 1
 
+    # ========================================================================
+    # SECTION 4: PROCESS TSV FILE FROM TABULAR EDITOR
+    # ========================================================================
+
     dataset = pd.read_csv(
         f"{cwd_save}\\documentation.tsv",
         sep="\t",
@@ -1168,14 +1111,14 @@ def run_cmd():
         r"^Relationship\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     )
     for i in range(len(dataset)):
-        data_type = get_data_type(dataset.iloc[i]["Object"])
-        if data_type[0] == "Table":
-            rel_pattern = re.match(tab_rel_pattern, data_type[1])
+        data_type, table_name, column_name = parse_tsv_object_name(dataset.iloc[i]["Object"])
+        if data_type == "Table":
+            rel_pattern = re.match(tab_rel_pattern, table_name)
             if rel_pattern is not None and rel_pattern not in all_relationships:
                 all_relationships.append(dataset.iloc[i]["Name"])
 
-            elif data_type[1] not in all_tables and "Relationship." not in data_type[1]:
-                all_tables.append(data_type[1])
+            elif table_name not in all_tables and "Relationship." not in table_name:
+                all_tables.append(table_name)
 
     # Remove excess " ' " surrounding table names
     escape_pattern = r"'(?:\s*)(" + "|".join(map(re.escape, all_tables)) + r")(?:\s*)'"
@@ -1194,18 +1137,18 @@ def run_cmd():
     for i in range(len(dataset)):
         line_data = dataset.iloc[i]
 
-        data_type = get_data_type(line_data["Object"])
+        df_type, df_table, df_column = parse_tsv_object_name(line_data["Object"])
 
         # Currently don't need to do anything with all tables or hierarchies
-        if data_type[0] == "Table":
+        if df_type == "Table":
             continue
 
-        elif data_type[0] == "Hierarchy":
-            all_hierarchies.append((data_type[1], data_type[2]))
+        elif df_type == "Hierarchy":
+            all_hierarchies.append((df_table, df_column))
             continue
 
-        elif data_type[0] == "Column" or data_type[0] == "Measure":
-            unused_columns.append((data_type[1], data_type[2]))
+        elif df_type == "Column" or df_type == "Measure":
+            unused_columns.append((df_table, df_column))
 
         if not isinstance(line_data["Expression"], float):
             definition = line_data["Expression"]
@@ -1216,15 +1159,14 @@ def run_cmd():
 
         # Extract description if embedded in definition
         if definition.find(DESCRIPT_TAG) != -1:
-            comment_start = find_nth_occurence(DESCRIPT_TAG, definition, 1) + 5
-            comment_end = find_nth_occurence(DESCRIPT_TAG, definition, 2) - 1
+            comment_start = find_nth_occurrence(DESCRIPT_TAG, definition, 1) + 5
+            comment_end = find_nth_occurrence(DESCRIPT_TAG, definition, 2) - 1
             definition_start = comment_end + 6
         else:
             comment_start = 0
             comment_end = comment_start
             definition_start = comment_start
 
-        df_type = data_type[0]
         df_name = line_data["Name"]
         df_data_type = line_data["DataType"]
         if pd.isna(line_data["Description"]):
@@ -1235,7 +1177,6 @@ def run_cmd():
         df_definition = definition[definition_start:].strip()
         df_definition = df_definition.replace("\r\n", "\n")
         df_definition = df_definition.replace("\r", "\n")
-        df_table = data_type[1]
         df_format = (
             "" if pd.isna(line_data.get("FormatString", "")) else line_data.get("FormatString", "")
         )
@@ -1268,6 +1209,10 @@ def run_cmd():
         df.loc[-1] = new_data
         df.index = df.index + 1
     df = df.sort_index()
+
+    # ========================================================================
+    # SECTION 5: BUILD RELATIONSHIPS AND GENERATE GRAPH
+    # ========================================================================
 
     data = {
         "Type": [],
@@ -1366,6 +1311,10 @@ def run_cmd():
 
     generate_graph(df_relations, 12, (len(df_relations) + 1) * 14.4 / 72)
 
+    # ========================================================================
+    # SECTION 6: IDENTIFY UNUSED COLUMNS
+    # ========================================================================
+
     # Remove Cols/Measures from 'unused_columns' that are used in visuals
     for row in report_info.iloc():
         used_columns = (row["Table"], row["Name"])
@@ -1376,6 +1325,10 @@ def run_cmd():
         temp_col = (filter[3], filter[4])
         if temp_col in unused_columns:
             unused_columns.remove(temp_col)
+
+    # ========================================================================
+    # SECTION 7: CREATE MAIN EXCEL WORKBOOK
+    # ========================================================================
 
     # Delete old data
     if os.path.exists(excel_file):
@@ -1393,7 +1346,7 @@ def run_cmd():
     worksheet.set_column(parent_index, parent_index, 50, wrap_format)
 
     def get_workbook_format(index: int):
-        return workbook.add_format({"color": rgba_tuple_to_hex(default_colors[index][1])})
+        return workbook.add_format({"color": rgba_tuple_to_hex(DEFAULT_COLORS[index][1])})
 
     paranthesis_color = ["#0433fa", "#319331", "#7b3831"]
     formats = {
@@ -1452,7 +1405,7 @@ def run_cmd():
 
         # Find Vars and measures
         var_names = find_vars(v_definition)
-        function_names = find_functions(v_definition)
+        function_names = find_functions(v_definition, known_functions)
         columns = find_columns(v_definition)
         tables = [i for i, _ in columns]
         columns_clean = ["[" + i + "]" for _, i in columns]
@@ -1572,6 +1525,10 @@ def run_cmd():
     for col_pair in unused_columns:
         worksheet.write(row_num, 0, col_pair[0] + "[" + col_pair[1] + "]")
         row_num += 1
+
+    # ========================================================================
+    # SECTION 8: CREATE PAGE-SPECIFIC TABS (One Tab Per Report Page)
+    # ========================================================================
 
     # Create a tab per report page with visual info.
     for report_name in report_info["Page"].unique().tolist():
@@ -1892,6 +1849,10 @@ def run_cmd():
 
     workbook.close()
 
+    # ========================================================================
+    # SECTION 10: CREATE SECOND EXCEL WORKBOOK (_data.xlsx)
+    # ========================================================================
+
     # Create second Excel file with reorganized structure
     excel_file_data = cwd_save + "\\" + SAVE_NAME + "_data.xlsx"
     if os.path.exists(excel_file_data):
@@ -1904,7 +1865,7 @@ def run_cmd():
     wrap_format_data = workbook_data.add_format({"text_wrap": True})
 
     def get_workbook_data_format(index: int):
-        return workbook_data.add_format({"color": rgba_tuple_to_hex(default_colors[index][1])})
+        return workbook_data.add_format({"color": rgba_tuple_to_hex(DEFAULT_COLORS[index][1])})
 
     formats_data = {
         "function": get_workbook_data_format(0),
@@ -2122,7 +2083,7 @@ def run_cmd():
             continue
 
         var_names = find_vars(v_definition)
-        function_names = find_functions(v_definition)
+        function_names = find_functions(v_definition, known_functions)
         columns = find_columns(v_definition)
         tables = [i for i, _ in columns]
         columns_clean = ["[" + i + "]" for _, i in columns]
@@ -2280,6 +2241,10 @@ def run_cmd():
             row_num += 1
 
     workbook_data.close()
+
+    # ========================================================================
+    # SECTION 11: SAVE LOGS AND RETURN STATUS
+    # ========================================================================
 
     ## Print Logging Info
     captured_logs = log_capture.get_logs()

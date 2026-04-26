@@ -2,13 +2,14 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
-from jsonpath_ng import parse as jsonpath_parse
 from jsonpath_ng.ext import parse as jsonpath_ext_parse
 
 from .logger import get_logger
 from .models import ExtractedFilter, ExtractedItem
+
+_JSONPATH_CACHE = {}
 
 
 class BaseExtractor(ABC):
@@ -27,7 +28,7 @@ class BaseExtractor(ABC):
 
     def query_json(self, data: dict, path: str, default: Any = None) -> Any:
         """
-        Query JSON data using JSONPath.
+        Query JSON data using JSONPath with caching.
 
         Args:
             data: JSON data to query
@@ -38,7 +39,11 @@ class BaseExtractor(ABC):
             First matching value or default
         """
         try:
-            matches = jsonpath_ext_parse(path).find(data)
+            # Use cached compiled expression if available
+            if path not in _JSONPATH_CACHE:
+                _JSONPATH_CACHE[path] = jsonpath_ext_parse(path)
+
+            matches = _JSONPATH_CACHE[path].find(data)
             if matches:
                 return matches[0].value
             return default
@@ -48,7 +53,7 @@ class BaseExtractor(ABC):
 
     def query_all_json(self, data: dict, path: str) -> list:
         """
-        Query JSON data and return all matches.
+        Query JSON data and return all matches with caching.
 
         Args:
             data: JSON data to query
@@ -58,10 +63,14 @@ class BaseExtractor(ABC):
             List of all matching values
         """
         try:
-            matches = jsonpath_ext_parse(path).find(data)
+            # Use cached compiled expression if available
+            if path not in _JSONPATH_CACHE:
+                _JSONPATH_CACHE[path] = jsonpath_ext_parse(path)
+
+            matches = _JSONPATH_CACHE[path].find(data)
             return [match.value for match in matches]
         except Exception as e:
-            self.log(f"JSONPath query failed: {path}", str(e), 1)
+            self.logger.warning(f"JSONPath query failed: {path}. Error: {str(e)}")
             return []
 
     def clean_value(self, value: str) -> str:
@@ -325,9 +334,23 @@ class FilterExtractor:
         self.logger = logger or get_logger("pbixtractor")
 
     def query_json(self, data: dict, path: str, default: Any = None) -> Any:
-        """Query JSON data using JSONPath."""
+        """
+        Query JSON data using JSONPath with caching.
+
+        Args:
+            data: JSON data to query
+            path: JSONPath expression
+            default: Value to return if no matches found
+
+        Returns:
+            First matching value or default
+        """
         try:
-            matches = jsonpath_ext_parse(path).find(data)
+            # Use cached compiled expression if available
+            if path not in _JSONPATH_CACHE:
+                _JSONPATH_CACHE[path] = jsonpath_ext_parse(path)
+
+            matches = _JSONPATH_CACHE[path].find(data)
             if matches:
                 return matches[0].value
             return default
@@ -336,9 +359,22 @@ class FilterExtractor:
             return default
 
     def query_all_json(self, data: dict, path: str) -> list:
-        """Query JSON data and return all matches."""
+        """
+        Query JSON data and return all matches with caching.
+
+        Args:
+            data: JSON data to query
+            path: JSONPath expression
+
+        Returns:
+            List of all matching values
+        """
         try:
-            matches = jsonpath_ext_parse(path).find(data)
+            # Use cached compiled expression if available
+            if path not in _JSONPATH_CACHE:
+                _JSONPATH_CACHE[path] = jsonpath_ext_parse(path)
+
+            matches = _JSONPATH_CACHE[path].find(data)
             return [match.value for match in matches]
         except Exception as e:
             self.logger.warning(f"JSONPath query failed: {path}. Error: {str(e)}")
