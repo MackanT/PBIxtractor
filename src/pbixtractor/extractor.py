@@ -8,6 +8,7 @@ import time
 import psutil
 
 import json
+import yaml
 from zipfile import ZipFile, is_zipfile, BadZipFile
 import shutil
 
@@ -41,43 +42,29 @@ default_colors = [
 
 cwd = os.getcwd()
 
-# Import package data paths
+# Load configuration from YAML file
 try:
-    from .data import VISUAL_TYPES_CSV, DATA_TYPES_CSV, FUNCTION_NAMES_CSV
+    from .data import YAML_FILE
 except ImportError:
     # Fallback for direct script execution (legacy mode)
     from pathlib import Path
-    _script_dir = Path(__file__).parent
-    VISUAL_TYPES_CSV = _script_dir / "data" / "VisualTypes.csv"
-    DATA_TYPES_CSV = _script_dir / "data" / "DataTypes.csv"
-    FUNCTION_NAMES_CSV = _script_dir / "data" / "FunctionNames.csv"
+    YAML_FILE = Path(__file__).parent / "data" / "data.yaml"
 
-# Reads user defined Visual Types from package data
 try:
-    visual_type_list = pd.read_csv(VISUAL_TYPES_CSV)
-    visual_type_list = visual_type_list["PBI Visual Name"].values.tolist()
-except OSError as e:
-    print(f"Could not open/read file: {VISUAL_TYPES_CSV}")
-    print(f"Error: {e}")
-    sys.exit()
+    with open(YAML_FILE, "r") as yaml_file:
+        config_data = yaml.safe_load(yaml_file)
 
-# Reads user defined Data Types from package data
-try:
-    data_type_list = pd.read_csv(DATA_TYPES_CSV)
-    data_type_list = data_type_list[["PBI Name", "Output Name"]].values.tolist()
-except OSError as e:
-    print(f"Could not open/read file: {DATA_TYPES_CSV}")
-    print(f"Error: {e}")
-    sys.exit()
+    visual_type_list = config_data.get("visual_types", [])
+    data_types_raw = config_data.get("data_types", [])
+    data_type_list = [[dt["name"], dt["friendly_name"]] for dt in data_types_raw]
+    known_functions = config_data.get("function_names", [])
+    extraction_rules = config_data.get("extraction_rules", {})
+    filter_rules = config_data.get("filter_rules", {})
 
-# Reads user defined PBI Functions from package data
-try:
-    known_functions = pd.read_csv(FUNCTION_NAMES_CSV)
-    known_functions = known_functions["PBI Function Name"].values.tolist()
-except OSError as e:
-    print(f"Could not open/read file: {FUNCTION_NAMES_CSV}")
-    print(f"Error: {e}")
-    sys.exit()
+except Exception as e:
+    print(f"Error loading YAML configuration file: {YAML_FILE}")
+    print(f"Exception: {e}")
+    sys.exit(1)
 
 
 def log_data(message: str, error: str, severity: int = 0):
