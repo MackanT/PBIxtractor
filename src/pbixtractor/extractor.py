@@ -1,25 +1,23 @@
 import argparse
-import pandas as pd
-import os
-import sys
-import re
-import xlsxwriter
-import time
-import psutil
-
-import json
-import yaml
-from zipfile import ZipFile, is_zipfile, BadZipFile
-import shutil
-
-import subprocess
-from pathlib import Path
-import networkx as nx
-from matplotlib import pyplot as plt
-import matplotlib
-import threading
 import inspect
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from zipfile import ZipFile
 
+import matplotlib
+import networkx as nx
+import pandas as pd
+import psutil
+import xlsxwriter
+import yaml
+from matplotlib import pyplot as plt
 
 matplotlib.use("agg")
 
@@ -49,6 +47,7 @@ try:
 except ImportError:
     # Fallback for direct script execution (legacy mode)
     from pathlib import Path
+
     YAML_FILE = Path(__file__).parent / "data" / "data.yaml"
 
 try:
@@ -61,6 +60,11 @@ try:
     known_functions = config_data.get("function_names", [])
     extraction_rules = config_data.get("extraction_rules", {})
     filter_rules = config_data.get("filter_rules", {})
+
+    # Create visual type mapper for display names
+    from .visual_helpers import create_visual_mapper
+
+    visual_mapper = create_visual_mapper(config_data)
 
 except Exception as e:
     print(f"Error loading YAML configuration file: {YAML_FILE}")
@@ -105,16 +109,16 @@ class ReportExtractor:
         self.result = []
         self.filters = []
         self.log = ""
-        
+
         # Import modular extractors
         from .extractors import PageExtractor
-        
+
         # Initialize page extractor with config
         self.page_extractor = PageExtractor(
             config=extraction_rules,
             visual_types=visual_type_list,
             data_types=data_type_list,
-            log_callback=self._log_data
+            log_callback=self._log_data,
         )
 
     def _log_data(self, message: str, error: str, severity: int = 0):
@@ -173,22 +177,22 @@ class ReportExtractor:
     def extract(self):
         """Extract data from Power BI report using modular extractors."""
         # Prepare extraction folder
-        pathFolder = f"{self.path}/temp_{self.name[:-5]}"
+        path_folder = f"{self.path}/temp_{self.name[:-5]}"
         try:
-            shutil.rmtree(pathFolder)
+            shutil.rmtree(path_folder)
         except FileNotFoundError:
-            print(f"folder {pathFolder} not present")
-        
+            print(f"folder {path_folder} not present")
+
         # Extract .pbix file (it's a ZIP archive)
         f = ZipFile(f"{self.path}/{self.name}", "r")
-        f.extractall(pathFolder)
-        
+        f.extractall(path_folder)
+
         # Load report layout JSON
         report_layout = json.loads(
-            open(f"{pathFolder}/Report/Layout", "r", encoding="utf-16 le").read()
+            open(f"{path_folder}/Report/Layout", "r", encoding="utf-16 le").read()
         )
         f.close()
-        
+
         # Parse nested JSON strings in the layout
         report_layout["config"] = json.loads(report_layout["config"])
         for section in report_layout["sections"]:
@@ -196,21 +200,20 @@ class ReportExtractor:
                 for key in ["config", "filters", "query", "dataTransforms"]:
                     if key in visual_container.keys():
                         visual_container[key] = json.loads(visual_container[key])
-        
+
         # Extract data from each page using PageExtractor
         for page in report_layout["sections"]:
             items, filters = self.page_extractor.extract(page)
-            
+
             # Convert Pydantic models to legacy list format
             for item in items:
                 self.result.append(item.to_list())
-            
+
             for filter_obj in filters:
                 self.filters.append(filter_obj.to_list())
-        
-        # Clean up temporary folder
-        shutil.rmtree(pathFolder)
 
+        # Clean up temporary folder
+        shutil.rmtree(path_folder)
 
 
 def rgba_tuple_to_hex(color):
@@ -221,8 +224,9 @@ def rgba_tuple_to_hex(color):
 
 
 def run_ui():
-    import dearpygui.dearpygui as dpg
     from tkinter import filedialog
+
+    import dearpygui.dearpygui as dpg
 
     dpg.create_context()
 
@@ -450,7 +454,7 @@ def run_ui():
 
     def add_input(version):
         cwd = os.getcwd() + "\\Input\\"
-        
+
         # Create Input directory if it doesn't exist
         if not os.path.exists(cwd):
             os.makedirs(cwd)
@@ -747,7 +751,7 @@ def gen_tsv(force: bool = False):
     output_dir = os.path.join(os.getcwd(), "output")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    
+
     cwd = os.path.join(output_dir, SAVE_NAME)
 
     if not os.path.exists(cwd):
@@ -757,7 +761,7 @@ def gen_tsv(force: bool = False):
         target_exe = Path("TabularEditor.exe")
 
         input_dir = os.getcwd() + "\\Input\\TabularEditorLocations.txt"
-        
+
         # Ensure Input directory exists
         input_folder = os.path.dirname(input_dir)
         if not os.path.exists(input_folder):
@@ -933,7 +937,7 @@ def run_test_extraction():
     # Set global variables
     _PBIX_ = [pbix_path_obj.stem, str(pbix_path_obj.parent)]
     _BIM_ = [bim_path_obj.stem, str(bim_path_obj.parent)]
-    SAVE_NAME = pbix_path_obj.stem + '_NEW'
+    SAVE_NAME = pbix_path_obj.stem + "_NEW"
     LOG_DATA = True
     REPORT_LOG = ""
 
@@ -946,9 +950,9 @@ def run_test_extraction():
 
     # Display log if there were issues
     if REPORT_LOG:
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("EXTRACTION LOG:")
-        print("="*80)
+        print("=" * 80)
         print(REPORT_LOG)
 
     return result if result else "Success"
@@ -969,8 +973,6 @@ def run_cmd():
     file_path = f"{cwd_save}\\{SAVE_NAME}.xlsx"
     if is_excel_open_with_file(file_path):
         return f"Please Close File: {SAVE_NAME}.xlsx before proceeding!"
-
-    button_type_list = ["Bookmark", "PageNavigation", "Button"]
 
     tsv_path = Path(f"{cwd_save}\\documentation.tsv")
     if not os.path.isfile(tsv_path):
@@ -1429,19 +1431,19 @@ def run_cmd():
 
     row_num += 1
     for _, row in df.iterrows():
-        vDefinition = row["Definition"]
+        v_definition = row["Definition"]
 
         # Skip traditional columns for now
         if row["Type"] == "Column":
             continue
 
         # Find Vars and measures
-        var_names = find_vars(vDefinition)
-        function_names = find_functions(vDefinition)
-        columns = find_columns(vDefinition)
+        var_names = find_vars(v_definition)
+        function_names = find_functions(v_definition)
+        columns = find_columns(v_definition)
         tables = [i for i, _ in columns]
         columns_clean = ["[" + i + "]" for _, i in columns]
-        measures = find_measures(vDefinition)
+        measures = find_measures(v_definition)
 
         for column in columns:
             if column in unused_columns:
@@ -1458,7 +1460,7 @@ def run_cmd():
                 if name == col_unused:
                     unused_columns.remove(name)
 
-        formated_text = vDefinition.replace("\t", " XXX ")
+        formated_text = v_definition.replace("\t", " XXX ")
         formated_text = formated_text.replace("\r\n", " YYY ")
         formated_text = formated_text.replace("\n", " YYY ")
         formated_text = formated_text.replace("&&", " ZZZ ")
@@ -1561,19 +1563,19 @@ def run_cmd():
     # Create a tab per report page with visual info.
     for report_name in report_info["Page"].unique().tolist():
         save_report_name = report_name.replace("/", "_")
-        worksheetX = workbook.add_worksheet(save_report_name)
+        worksheet_x = workbook.add_worksheet(save_report_name)
 
-        worksheetX.set_column(0, 6, 30, def_format)
-        worksheetX.set_column(2, 2, 50, def_format)
-        worksheetX.set_column(3, 3, 60, def_format)
-        worksheetX.set_column(4, 4, 60, def_format)
+        worksheet_x.set_column(0, 6, 30, def_format)
+        worksheet_x.set_column(2, 2, 50, def_format)
+        worksheet_x.set_column(3, 3, 60, def_format)
+        worksheet_x.set_column(4, 4, 60, def_format)
 
         local_df = report_info[report_info["Page"] == report_name]
         visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
 
         local_df = local_df.sort_values(by=["Visual Type", "Type"])
 
-        dataX = {
+        data_x = {
             "Item Type": [],
             "Visual Type": [],
             "Type": [],
@@ -1585,44 +1587,21 @@ def run_cmd():
             "ID": [],
         }
 
-        dfX = pd.DataFrame(dataX)
+        df_x = pd.DataFrame(data_x)
 
         for visual in visual_ids:
             visual_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Visual Type"]
 
-            v_type = "Visual"
-            if visual_type == "tableEx":
-                s_type = "Table"
-            elif visual_type == "pivotTable":
-                s_type = "Matrix"
-            elif visual_type == "card":
-                s_type = "Card"
-            elif visual_type == "cardVisual":
-                s_type = "Card (new)"
-            elif visual_type == "gauge":
-                s_type = "Gauge"
-            elif visual_type == "slicer":
-                v_type = "Slicer"
-                s_type = "Slicer"
-            elif visual_type == "advancedSlicerVisual":
-                v_type = "Slicer"
-                s_type = "Slicer (new)"
-            elif visual_type in visual_type_list:
-                words = re.findall("[a-zA-Z][^A-Z]*", visual_type)
-                s_type = ""
-                for word in words:
-                    s_type += word.capitalize() + " "
-            elif visual_type in button_type_list:
-                v_type = "Button"
-                s_type = visual_type
-            elif visual_type in ["actionButton"]:
-                v_type = "Button"
-                s_type = "Button"
-            elif visual_type == "Group":
-                v_type = "Group"
-                s_type = "Panel"
-            else:
-                REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
+            # Get visual type info from YAML configuration
+            v_type, s_type = visual_mapper.get_visual_info(visual_type)
+
+            # Log warning if visual type not found in config
+            if (
+                not visual_mapper.is_special_visual(visual_type)
+                and visual_type not in visual_type_list
+            ):
+                if visual_type not in ["Group"] and not visual_mapper.is_button_type(visual_type):
+                    REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
 
             new_data = {
                 "Item Type": v_type,
@@ -1636,8 +1615,8 @@ def run_cmd():
                 "ID": visual,
             }
 
-            dfX.loc[-1] = new_data
-            dfX.index = dfX.index + 1
+            df_x.loc[-1] = new_data
+            df_x.index = df_x.index + 1
 
         for i_filter, filter in enumerate(report_filters_string):
             if filter[2] == "This Page" and filter[0] == report_name:
@@ -1653,8 +1632,8 @@ def run_cmd():
                     "ID": i_filter,
                 }
 
-                dfX.loc[-1] = new_data
-                dfX.index = dfX.index + 1
+                df_x.loc[-1] = new_data
+                df_x.index = df_x.index + 1
 
         for col_idx, name in enumerate(
             [
@@ -1667,11 +1646,11 @@ def run_cmd():
                 "Comment",
             ]
         ):
-            worksheetX.write(0, col_idx, name, formats["bi"])
+            worksheet_x.write(0, col_idx, name, formats["bi"])
 
         sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
-        dfX["Item Type"] = pd.Categorical(dfX["Item Type"], categories=sort_order, ordered=True)
-        df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
+        df_x["Item Type"] = pd.Categorical(df_x["Item Type"], categories=sort_order, ordered=True)
+        df_sorted = df_x.sort_values(by=["Item Type", "Visual Type"])
 
         row_num = 1
         for _, row in df_sorted.iterrows():
@@ -1701,12 +1680,12 @@ def run_cmd():
                             )
                         else:
                             description_parts.append(f"  {rrow['Table']}[{rrow['Name']}]")
-                worksheetX.write(row_num, 0, row["Item Type"])
-                worksheetX.write(row_num, 1, row["Visual Type"])
-                worksheetX.write(row_num, 2, row["ID"])
-                worksheetX.write(row_num, 3, "\n".join(description_parts))
+                worksheet_x.write(row_num, 0, row["Item Type"])
+                worksheet_x.write(row_num, 1, row["Visual Type"])
+                worksheet_x.write(row_num, 2, row["ID"])
+                worksheet_x.write(row_num, 3, "\n".join(description_parts))
                 if len(filter_array) != 0:
-                    write_to_excel(worksheetX, row_num, 4, filter_array)
+                    write_to_excel(worksheet_x, row_num, 4, filter_array)
                 row_num += 1
 
             elif row["Item Type"] in ["Button", "Group"]:
@@ -1716,21 +1695,21 @@ def run_cmd():
                     if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
                     else rrow["Name"]
                 )
-                worksheetX.write(row_num, 0, row["Item Type"])
-                worksheetX.write(row_num, 1, row["Visual Type"])
-                worksheetX.write(row_num, 2, row["ID"])
-                worksheetX.write(row_num, 3, display_name)
+                worksheet_x.write(row_num, 0, row["Item Type"])
+                worksheet_x.write(row_num, 1, row["Visual Type"])
+                worksheet_x.write(row_num, 2, row["ID"])
+                worksheet_x.write(row_num, 3, display_name)
                 if len(filter_array) != 0:
-                    write_to_excel(worksheetX, row_num, 4, filter_array)
+                    write_to_excel(worksheet_x, row_num, 4, filter_array)
                 row_num += 1
 
             elif row["Item Type"] == "Filter":
                 filter_field = report_filters_string[row["ID"]][3]
                 filter_details = report_filters_string[row["ID"]][4]
-                worksheetX.write(row_num, 0, row["Item Type"])
-                worksheetX.write(row_num, 1, row["Visual Type"])
-                worksheetX.write(row_num, 2, "")
-                worksheetX.write(row_num, 3, f"{filter_field} {filter_details}")
+                worksheet_x.write(row_num, 0, row["Item Type"])
+                worksheet_x.write(row_num, 1, row["Visual Type"])
+                worksheet_x.write(row_num, 2, "")
+                worksheet_x.write(row_num, 3, f"{filter_field} {filter_details}")
                 row_num += 1
 
             else:
@@ -1739,17 +1718,17 @@ def run_cmd():
                     continue
 
     # Create consolidated "Pages" tab with all pages combined
-    worksheetPages = workbook.add_worksheet("Pages")
-    worksheetPages.set_column(0, 9, 30, def_format)
-    worksheetPages.set_column(3, 3, 50, def_format)
-    worksheetPages.set_column(4, 4, 20, def_format)
-    worksheetPages.set_column(5, 5, 50, def_format)
-    worksheetPages.set_column(6, 6, 30, def_format)
-    worksheetPages.set_column(7, 7, 60, def_format)
+    worksheet_pages = workbook.add_worksheet("Pages")
+    worksheet_pages.set_column(0, 9, 30, def_format)
+    worksheet_pages.set_column(3, 3, 50, def_format)
+    worksheet_pages.set_column(4, 4, 20, def_format)
+    worksheet_pages.set_column(5, 5, 50, def_format)
+    worksheet_pages.set_column(6, 6, 30, def_format)
+    worksheet_pages.set_column(7, 7, 60, def_format)
 
     # Write header with "Page" column added at the beginning
     col = 0
-    worksheetPages.write(0, col, "Page", formats["bi"])
+    worksheet_pages.write(0, col, "Page", formats["bi"])
     col += 1
     for name in [
         "Item Type",
@@ -1762,7 +1741,7 @@ def run_cmd():
         "Interactivity",
         "Comment",
     ]:
-        worksheetPages.write(0, col, name, formats["bi"])
+        worksheet_pages.write(0, col, name, formats["bi"])
         col += 1
 
     row_num = 1
@@ -1772,7 +1751,7 @@ def run_cmd():
         visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
         local_df = local_df.sort_values(by=["Visual Type", "Type"])
 
-        dataX = {
+        data_x = {
             "Item Type": [],
             "Visual Type": [],
             "Type": [],
@@ -1784,44 +1763,21 @@ def run_cmd():
             "ID": [],
         }
 
-        dfX = pd.DataFrame(dataX)
+        df_x = pd.DataFrame(data_x)
 
         for visual in visual_ids:
             visual_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Visual Type"]
 
-            v_type = "Visual"
-            if visual_type == "tableEx":
-                s_type = "Table"
-            elif visual_type == "pivotTable":
-                s_type = "Matrix"
-            elif visual_type == "card":
-                s_type = "Card"
-            elif visual_type == "cardVisual":
-                s_type = "Card (new)"
-            elif visual_type == "gauge":
-                s_type = "Gauge"
-            elif visual_type == "slicer":
-                v_type = "Slicer"
-                s_type = "Slicer"
-            elif visual_type == "advancedSlicerVisual":
-                v_type = "Slicer"
-                s_type = "Slicer (new)"
-            elif visual_type in visual_type_list:
-                words = re.findall("[a-zA-Z][^A-Z]*", visual_type)
-                s_type = ""
-                for word in words:
-                    s_type += word.capitalize() + " "
-            elif visual_type in button_type_list:
-                v_type = "Button"
-                s_type = visual_type
-            elif visual_type in ["actionButton"]:
-                v_type = "Button"
-                s_type = "Button"
-            elif visual_type == "Group":
-                v_type = "Group"
-                s_type = "Panel"
-            else:
-                REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
+            # Get visual type info from YAML configuration
+            v_type, s_type = visual_mapper.get_visual_info(visual_type)
+
+            # Log warning if visual type not found in config
+            if (
+                not visual_mapper.is_special_visual(visual_type)
+                and visual_type not in visual_type_list
+            ):
+                if visual_type not in ["Group"] and not visual_mapper.is_button_type(visual_type):
+                    REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
 
             new_data = {
                 "Item Type": v_type,
@@ -1835,8 +1791,8 @@ def run_cmd():
                 "ID": visual,
             }
 
-            dfX.loc[-1] = new_data
-            dfX.index = dfX.index + 1
+            df_x.loc[-1] = new_data
+            df_x.index = df_x.index + 1
 
         for i_filter, filter in enumerate(report_filters_string):
             if filter[2] == "This Page" and filter[0] == report_name:
@@ -1852,12 +1808,12 @@ def run_cmd():
                     "ID": i_filter,
                 }
 
-                dfX.loc[-1] = new_data
-                dfX.index = dfX.index + 1
+                df_x.loc[-1] = new_data
+                df_x.index = df_x.index + 1
 
         sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
-        dfX["Item Type"] = pd.Categorical(dfX["Item Type"], categories=sort_order, ordered=True)
-        df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
+        df_x["Item Type"] = pd.Categorical(df_x["Item Type"], categories=sort_order, ordered=True)
+        df_sorted = df_x.sort_values(by=["Item Type", "Visual Type"])
 
         for _, row in df_sorted.iterrows():
             filter_array = []
@@ -1872,20 +1828,20 @@ def run_cmd():
                 # Create one row per field for visuals/slicers
                 r_data = local_df[local_df["Visual ID"] == row["ID"]]
                 for field_idx, rrow in enumerate(r_data.iloc()):
-                    worksheetPages.write(row_num, 0, report_name)
-                    worksheetPages.write(row_num, 1, row["Item Type"])
-                    worksheetPages.write(row_num, 2, row["Visual Type"])
-                    worksheetPages.write(row_num, 3, row["ID"])
-                    worksheetPages.write(row_num, 4, rrow["Type"])
-                    worksheetPages.write(row_num, 5, f"{rrow['Table']}[{rrow['Name']}]")
+                    worksheet_pages.write(row_num, 0, report_name)
+                    worksheet_pages.write(row_num, 1, row["Item Type"])
+                    worksheet_pages.write(row_num, 2, row["Visual Type"])
+                    worksheet_pages.write(row_num, 3, row["ID"])
+                    worksheet_pages.write(row_num, 4, rrow["Type"])
+                    worksheet_pages.write(row_num, 5, f"{rrow['Table']}[{rrow['Name']}]")
                     display_name = (
                         str(rrow["Display Name"])
                         if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
                         else rrow["Name"]
                     )
-                    worksheetPages.write(row_num, 6, display_name)
+                    worksheet_pages.write(row_num, 6, display_name)
                     if len(filter_array) != 0:
-                        write_to_excel(worksheetPages, row_num, 7, filter_array)
+                        write_to_excel(worksheet_pages, row_num, 7, filter_array)
                     row_num += 1
 
             elif row["Item Type"] in ["Button", "Group"]:
@@ -1895,14 +1851,14 @@ def run_cmd():
                     if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
                     else rrow["Name"]
                 )
-                worksheetPages.write(row_num, 0, report_name)
-                worksheetPages.write(row_num, 1, row["Item Type"])
-                worksheetPages.write(row_num, 2, row["Visual Type"])
-                worksheetPages.write(row_num, 3, row["ID"])
-                worksheetPages.write(row_num, 4, rrow["Type"])
-                worksheetPages.write(row_num, 5, display_name)
+                worksheet_pages.write(row_num, 0, report_name)
+                worksheet_pages.write(row_num, 1, row["Item Type"])
+                worksheet_pages.write(row_num, 2, row["Visual Type"])
+                worksheet_pages.write(row_num, 3, row["ID"])
+                worksheet_pages.write(row_num, 4, rrow["Type"])
+                worksheet_pages.write(row_num, 5, display_name)
                 if len(filter_array) != 0:
-                    write_to_excel(worksheetPages, row_num, 7, filter_array)
+                    write_to_excel(worksheet_pages, row_num, 7, filter_array)
                 row_num += 1
 
             else:
@@ -1911,14 +1867,14 @@ def run_cmd():
                     continue
 
                 # Filters
-                worksheetPages.write(row_num, 0, report_name)
-                worksheetPages.write(row_num, 1, row["Item Type"])
-                worksheetPages.write(row_num, 2, row["Visual Type"])
-                worksheetPages.write(row_num, 3, "")
+                worksheet_pages.write(row_num, 0, report_name)
+                worksheet_pages.write(row_num, 1, row["Item Type"])
+                worksheet_pages.write(row_num, 2, row["Visual Type"])
+                worksheet_pages.write(row_num, 3, "")
                 filter_field = report_filters_string[row["ID"]][3]
                 filter_details = report_filters_string[row["ID"]][4]
-                worksheetPages.write(row_num, 5, filter_field)
-                worksheetPages.write(row_num, 6, filter_details)
+                worksheet_pages.write(row_num, 5, filter_field)
+                worksheet_pages.write(row_num, 6, filter_details)
                 row_num += 1
 
     workbook.close()
@@ -1987,7 +1943,7 @@ def run_cmd():
         visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
         local_df = local_df.sort_values(by=["Visual Type", "Type"])
 
-        dataX = {
+        data_x = {
             "Item Type": [],
             "Visual Type": [],
             "Type": [],
@@ -2000,44 +1956,21 @@ def run_cmd():
             "Description": [],
         }
 
-        dfX = pd.DataFrame(dataX)
+        df_x = pd.DataFrame(data_x)
 
         for visual in visual_ids:
             visual_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Visual Type"]
 
-            v_type = "Visual"
-            if visual_type == "tableEx":
-                s_type = "Table"
-            elif visual_type == "pivotTable":
-                s_type = "Matrix"
-            elif visual_type == "card":
-                s_type = "Card"
-            elif visual_type == "cardVisual":
-                s_type = "Card (new)"
-            elif visual_type == "gauge":
-                s_type = "Gauge"
-            elif visual_type == "slicer":
-                v_type = "Slicer"
-                s_type = "Slicer"
-            elif visual_type == "advancedSlicerVisual":
-                v_type = "Slicer"
-                s_type = "Slicer (new)"
-            elif visual_type in visual_type_list:
-                words = re.findall("[a-zA-Z][^A-Z]*", visual_type)
-                s_type = ""
-                for word in words:
-                    s_type += word.capitalize() + " "
-            elif visual_type in button_type_list:
-                v_type = "Button"
-                s_type = visual_type
-            elif visual_type in ["actionButton"]:
-                v_type = "Button"
-                s_type = "Button"
-            elif visual_type == "Group":
-                v_type = "Group"
-                s_type = "Panel"
-            else:
-                REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
+            # Get visual type info from YAML configuration
+            v_type, s_type = visual_mapper.get_visual_info(visual_type)
+
+            # Log warning if visual type not found in config
+            if (
+                not visual_mapper.is_special_visual(visual_type)
+                and visual_type not in visual_type_list
+            ):
+                if visual_type not in ["Group"] and not visual_mapper.is_button_type(visual_type):
+                    REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
 
             new_data_visual = {
                 "Item Type": v_type,
@@ -2051,8 +1984,8 @@ def run_cmd():
                 "ID": visual,
             }
 
-            dfX.loc[-1] = new_data_visual
-            dfX.index = dfX.index + 1
+            df_x.loc[-1] = new_data_visual
+            df_x.index = df_x.index + 1
 
         for i_filter, filter in enumerate(report_filters_string):
             if filter[2] == "This Page" and filter[0] == report_name:
@@ -2069,12 +2002,12 @@ def run_cmd():
                     "Description": "",
                 }
 
-                dfX.loc[-1] = new_data_filter
-                dfX.index = dfX.index + 1
+                df_x.loc[-1] = new_data_filter
+                df_x.index = df_x.index + 1
 
         sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
-        dfX["Item Type"] = pd.Categorical(dfX["Item Type"], categories=sort_order, ordered=True)
-        df_sorted = dfX.sort_values(by=["Item Type", "Visual Type"])
+        df_x["Item Type"] = pd.Categorical(df_x["Item Type"], categories=sort_order, ordered=True)
+        df_sorted = df_x.sort_values(by=["Item Type", "Visual Type"])
 
         for _, row in df_sorted.iterrows():
             filter_array = []
@@ -2170,19 +2103,19 @@ def run_cmd():
 
     row_num = 1
     for _, row in df.iterrows():
-        vDefinition = row["Definition"]
+        v_definition = row["Definition"]
 
         if row["Type"] == "Column":
             continue
 
-        var_names = find_vars(vDefinition)
-        function_names = find_functions(vDefinition)
-        columns = find_columns(vDefinition)
+        var_names = find_vars(v_definition)
+        function_names = find_functions(v_definition)
+        columns = find_columns(v_definition)
         tables = [i for i, _ in columns]
         columns_clean = ["[" + i + "]" for _, i in columns]
-        measures = find_measures(vDefinition)
+        measures = find_measures(v_definition)
 
-        formated_text = vDefinition.replace("\t", " XXX ")
+        formated_text = v_definition.replace("\t", " XXX ")
         formated_text = formated_text.replace("\r\n", " YYY ")
         formated_text = formated_text.replace("\n", " YYY ")
         formated_text = formated_text.replace("&&", " ZZZ ")
@@ -2318,11 +2251,11 @@ def run_cmd():
         if row["Type"] == "Column":
             continue
 
-        vDefinition = row["Definition"]
+        v_definition = row["Definition"]
         measure_name = f"{row['Table']}[{row['Name']}]"
 
-        dep_columns = find_columns(vDefinition)
-        dep_measures = find_measures(vDefinition)
+        dep_columns = find_columns(v_definition)
+        dep_measures = find_measures(v_definition)
         columns_clean_local = ["[" + j + "]" for _, j in dep_columns]
         standalone = [m for m in dep_measures if m not in columns_clean_local]
 

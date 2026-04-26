@@ -149,6 +149,73 @@ visual_types:
   - slicer
   - advancedSlicerVisual
 
+# Visual type metadata for display names and categorization
+# This is used in Excel output generation to create friendly names
+visual_type_metadata:
+  # Standard visuals - auto-generate display names from camelCase
+  standard_visuals:
+    - lineClusteredColumnComboChart
+    - clusteredColumnChart
+    - clusteredBarChart
+    - donutChart
+    - azureMap
+    - barChart
+    - scatterChart
+    - columnChart
+    - hundredPercentStackedBarChart
+    - hundredPercentStackedColumnChart
+    - lineChart
+    - areaChart
+    - stackedAreaChart
+    - lineStackedColumnComboChart
+    - ribbonChart
+    - waterfallChart
+    - funnel
+    - pieChart
+    - treemap
+    - map
+    - filledMap
+    - multiRowCard
+    - kpi
+    - keyDriversVisual
+    - decompositionTreeVisual
+  
+  # Special visuals with custom display names
+  special_visuals:
+    tableEx:
+      display_name: "Table"
+      item_type: "Visual"
+    pivotTable:
+      display_name: "Matrix"
+      item_type: "Visual"
+    card:
+      display_name: "Card"
+      item_type: "Visual"
+    cardVisual:
+      display_name: "Card (new)"
+      item_type: "Visual"
+    gauge:
+      display_name: "Gauge"
+      item_type: "Visual"
+    slicer:
+      display_name: "Slicer"
+      item_type: "Slicer"
+    advancedSlicerVisual:
+      display_name: "Slicer (new)"
+      item_type: "Slicer"
+    actionButton:
+      display_name: "Button"
+      item_type: "Button"
+    Group:
+      display_name: "Panel"
+      item_type: "Group"
+  
+  # Button types (legacy - kept for compatibility)
+  button_types:
+    - Bookmark
+    - PageNavigation
+    - Button
+
 # Extraction configuration for automated visual parsing
 extraction_rules:
   # Default rule applies to all visual types unless overridden
