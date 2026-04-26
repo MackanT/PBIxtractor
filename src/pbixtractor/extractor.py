@@ -1,6 +1,7 @@
 import argparse
 import inspect
 import json
+import logging
 import os
 import re
 import shutil
@@ -21,9 +22,13 @@ from matplotlib import pyplot as plt
 
 matplotlib.use("agg")
 
+# Initialize logger
+from .logger import get_logger, setup_logger, wrap_long_message
+
+logger, log_capture = setup_logger("pbixtractor", level=logging.INFO, capture=True)
+
 
 LOG_DATA = True
-REPORT_LOG = ""
 SAVE_NAME = ""
 _PBIX_ = [None, None]
 _BIM_ = [None, None]
@@ -72,34 +77,36 @@ except Exception as e:
     sys.exit(1)
 
 
-def log_data(message: str, error: str, severity: int = 0):
-    e = str(severity)
+def log_message(message: str, data: str = "", severity: int = 0):
+    """
+    Log a message with specified severity level.
 
+    Args:
+        message: Main log message
+        data: Additional data/context
+        severity: -1=DEBUG, 0=INFO, 1=WARNING, 2=ERROR, 3+=CRITICAL
+    """
+    # Get caller line number for context
+    caller_line = inspect.currentframe().f_back.f_lineno
+
+    # Format the full message
+    full_message = f"{message} (line {caller_line})"
+    if data:
+        data_str = str(data)
+        wrapped_data = wrap_long_message(data_str, max_length=122)
+        full_message += f"\n{wrapped_data}"
+
+    # Log at appropriate level
     if severity == -1:
-        e += " Debug: "
+        logger.debug(full_message)
     elif severity == 0:
-        e += " Info: "
+        logger.info(full_message)
     elif severity == 1:
-        e += " Warning: "
+        logger.warning(full_message)
     elif severity == 2:
-        e += " Error: "
+        logger.error(full_message)
     else:
-        e += " Critical: "
-
-    line_len = 122
-    error = str(error)
-    error_clean = ""
-    error_lines = error.split("\n")
-    for line in error_lines:
-        msg_len = len(line)
-        stansas = int(msg_len / line_len) + 1
-        for i in range(stansas):
-            error_clean += line[(line_len) * i : (line_len) * (i + 1)] + "\n"
-
-    error_clean = error_clean[:-1]
-
-    e += message + f". Error on line {inspect.currentframe().f_back.f_lineno}.\n" + str(error_clean)
-    return e + "\n\n"
+        logger.critical(full_message)
 
 
 class ReportExtractor:
@@ -108,7 +115,7 @@ class ReportExtractor:
         self.name = name
         self.result = []
         self.filters = []
-        self.log = ""
+        self.logger = get_logger("pbixtractor")
 
         # Import modular extractors
         from .extractors import PageExtractor
@@ -118,11 +125,12 @@ class ReportExtractor:
             config=extraction_rules,
             visual_types=visual_type_list,
             data_types=data_type_list,
-            log_callback=self._log_data,
+            logger=self.logger,
         )
 
     def _log_data(self, message: str, error: str, severity: int = 0):
-        self.log += log_data(message, error, severity)
+        """Legacy log method for backward compatibility."""
+        log_message(message, error, severity)
 
     def add_item(
         self,
@@ -285,27 +293,31 @@ def run_ui():
                 )
 
     def update_log():
-        global REPORT_LOG
-
-        error_msg = REPORT_LOG.split("\n\n")
+        """Update log display with captured log messages."""
+        error_msg = log_capture.get_logs().split("\n")
         for msg in error_msg:
             if msg == "":
                 continue
 
-            error_level = msg[0]
-
-            if error_level == "-":
+            # Determine color based on log level
+            if "DEBUG:" in msg:
                 c = colors["W"]
-            if error_level == "0":
+            elif "INFO:" in msg:
                 c = colors["W"]
-            elif error_level == "1":
+            elif "WARNING:" in msg:
                 c = colors["Y"]
-            elif error_level == "2":
+            elif "ERROR:" in msg:
                 c = colors["O"]
             else:
                 c = colors["R"]
 
-            add_colored_text_at_top(container, msg[2:], c)
+            # Remove log level prefix for display
+            if ":" in msg:
+                display_msg = msg.split(":", 1)[1].strip()
+            else:
+                display_msg = msg
+
+            add_colored_text_at_top(container, display_msg, c)
 
     def disable_buttons():
         for tag in ["runPBIX", "genTSV"]:
@@ -939,7 +951,9 @@ def run_test_extraction():
     _BIM_ = [bim_path_obj.stem, str(bim_path_obj.parent)]
     SAVE_NAME = pbix_path_obj.stem + "_NEW"
     LOG_DATA = True
-    REPORT_LOG = ""
+
+    # Clear previous logs
+    log_capture.clear()
 
     print(f"PBIX: {test_pbix_path}")
     print(f"BIM:  {test_bim_path}")
@@ -949,17 +963,18 @@ def run_test_extraction():
     result = run_cmd()
 
     # Display log if there were issues
-    if REPORT_LOG:
+    captured_logs = log_capture.get_logs()
+    if captured_logs:
         print("\n" + "=" * 80)
         print("EXTRACTION LOG:")
         print("=" * 80)
-        print(REPORT_LOG)
+        print(captured_logs)
 
     return result if result else "Success"
 
 
 def run_cmd():
-    global SAVE_NAME, _BIM_, _PBIX_, LOG_DATA, REPORT_LOG
+    global SAVE_NAME, _BIM_, _PBIX_, LOG_DATA
 
     cwd = os.getcwd()
 
@@ -1011,8 +1026,6 @@ def run_cmd():
         ]
         for sublist in report_filters
     ]
-
-    REPORT_LOG = rep_ex.log
 
     def find_nth_occurence(substring: str, string: str, n: int) -> int:
         """
@@ -1601,7 +1614,7 @@ def run_cmd():
                 and visual_type not in visual_type_list
             ):
                 if visual_type not in ["Group"] and not visual_mapper.is_button_type(visual_type):
-                    REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
+                    logger.warning(f"New Visual type not yet supported: {visual_type}")
 
             new_data = {
                 "Item Type": v_type,
@@ -1714,7 +1727,7 @@ def run_cmd():
 
             else:
                 if isinstance(row["Item Type"], float):
-                    REPORT_LOG += log_data("NaN Item Type Encountered!", row, 2)
+                    logger.error(f"NaN Item Type Encountered: {row}")
                     continue
 
     # Create consolidated "Pages" tab with all pages combined
@@ -1777,7 +1790,7 @@ def run_cmd():
                 and visual_type not in visual_type_list
             ):
                 if visual_type not in ["Group"] and not visual_mapper.is_button_type(visual_type):
-                    REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
+                    logger.warning(f"New Visual type not yet supported: {visual_type}")
 
             new_data = {
                 "Item Type": v_type,
@@ -1863,7 +1876,7 @@ def run_cmd():
 
             else:
                 if isinstance(row["Item Type"], float):
-                    REPORT_LOG += log_data("NaN Item Type Encountered!", row, 2)
+                    logger.error(f"NaN Item Type Encountered: {row}")
                     continue
 
                 # Filters
@@ -1970,7 +1983,7 @@ def run_cmd():
                 and visual_type not in visual_type_list
             ):
                 if visual_type not in ["Group"] and not visual_mapper.is_button_type(visual_type):
-                    REPORT_LOG += log_data("New Visual type not yet supported!", visual_type, 1)
+                    logger.warning(f"New Visual type not yet supported: {visual_type}")
 
             new_data_visual = {
                 "Item Type": v_type,
@@ -2075,7 +2088,7 @@ def run_cmd():
 
             else:
                 if isinstance(row["Item Type"], float):
-                    REPORT_LOG += log_data("NaN Item Type Encountered!", row, 2)
+                    logger.error(f"NaN Item Type Encountered: {row}")
                     continue
 
                 worksheet_pages_data.write(row_num, 0, report_name)
@@ -2268,8 +2281,9 @@ def run_cmd():
 
     workbook_data.close()
 
-    ## Print Logging Info -- Needs more love
-    if REPORT_LOG and LOG_DATA:
+    ## Print Logging Info
+    captured_logs = log_capture.get_logs()
+    if captured_logs and LOG_DATA:
         t = time.localtime()
         current_time = time.strftime("%H_%M_%S", t)
         location_folder = os.path.join(cwd_save, "logs")
@@ -2279,7 +2293,7 @@ def run_cmd():
             os.makedirs(location_folder)
 
         with open(location, "w") as text_file:
-            text_file.write(REPORT_LOG)
+            text_file.write(captured_logs)
 
         return "Log"
 

@@ -13,7 +13,7 @@ def main():
     import argparse
 
     # Import from extractor module
-    from .extractor import run_ui, run_cmd
+    from .extractor import run_cmd, run_ui
 
     parser = argparse.ArgumentParser(
         description="PBIxtractor - Power BI Documentation Tool",
@@ -25,26 +25,20 @@ Examples:
   python -m pbixtractor --ui            # Alternative way to launch GUI
 
 Note: For --test mode, update test file paths in extractor.py -> run_test_extraction()
-        """
+        """,
     )
 
     parser.add_argument(
-        "--ui", 
-        action="store_true", 
-        help="Run with graphical user interface (DearPyGUI)"
+        "--ui", action="store_true", help="Run with graphical user interface (DearPyGUI)"
     )
 
     parser.add_argument(
         "--test",
         action="store_true",
-        help="Run test extraction with hardcoded test files (for development)"
+        help="Run test extraction with hardcoded test files (for development)",
     )
 
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"PBIxtractor {__version__}"
-    )
+    parser.add_argument("--version", action="version", version=f"PBIxtractor {__version__}")
 
     # Future CLI arguments (for phase 2)
     # parser.add_argument("--pbix", type=str, help="Path to .pbix file")
@@ -56,6 +50,7 @@ Note: For --test mode, update test file paths in extractor.py -> run_test_extrac
     if args.test:
         print("Running test extraction with hardcoded test files...")
         from .extractor import run_test_extraction
+
         result = run_test_extraction()
 
         if result == "Success":
