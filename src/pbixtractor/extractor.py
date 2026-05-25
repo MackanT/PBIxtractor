@@ -92,7 +92,7 @@ def find_columns(dax_code: str) -> list[tuple[str, str]]:
     Returns:
         List of (table, column) tuples
     """
-    pattern = re.compile(r"(\w+)\[(.*?)\]")
+    pattern = re.compile(r"(\w+)\[(.*?)\]") ## TODO are these re-compiles adding uneccessary overhead? Should we compile once and reuse?
     all_columns = re.findall(pattern, dax_code)
     return list(set(all_columns))
 
