@@ -1,6 +1,7 @@
 """Utility functions for PBI-Ixtractor."""
 
 import os
+import re
 
 import psutil
 
@@ -125,6 +126,31 @@ def is_excel_open_with_file(file_path: str) -> bool:
             continue
 
     return False
+
+
+def excel_sheet_name(name: str, used: set[str]) -> str:
+    """
+    Make a valid, unique Excel worksheet name.
+
+    Excel sheet names are max 31 characters, cannot contain []:*?/\\ and must be
+    unique (case-insensitive) within a workbook.
+
+    Args:
+        name: Desired sheet name
+        used: Lower-cased names already used in the workbook (updated in place)
+
+    Returns:
+        Valid sheet name
+    """
+    clean = re.sub(r"[\[\]:*?/\\]", "_", name).strip("'") or "Sheet"
+    candidate = clean[:31]
+    counter = 2
+    while candidate.lower() in used:
+        suffix = f" ({counter})"
+        candidate = clean[: 31 - len(suffix)] + suffix
+        counter += 1
+    used.add(candidate.lower())
+    return candidate
 
 
 def ensure_directory(path: str) -> None:
