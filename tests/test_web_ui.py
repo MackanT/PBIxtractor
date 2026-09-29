@@ -85,6 +85,25 @@ def test_run_shows_results_and_serves_lineage(sample):
     _simulate(scenario)
 
 
+def test_tabular_editor_folder_can_be_set(sample):
+    exe = sample / "TE2" / "TabularEditor.exe"
+    exe.parent.mkdir()
+    exe.write_bytes(b"")
+
+    async def scenario(user):
+        await user.open("/")
+        user.find(marker="te_folder").type(str(sample / "wrong"))
+        user.find("Save").click()
+        await user.should_see("No TabularEditor.exe in that folder.")
+
+        user.find(marker="te_folder").clear().type(str(exe.parent))
+        user.find("Save").click()
+        locations = sample / "Input" / "TabularEditorLocations.txt"
+        assert locations.read_text().splitlines() == [str(exe.parent)]
+
+    _simulate(scenario)
+
+
 def test_missing_report_warns(sample):
     async def scenario(user):
         await user.open("/")

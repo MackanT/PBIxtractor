@@ -30,7 +30,7 @@ from .pipeline import (
     report_name,
     run_extraction,
 )
-from .tabular_editor import find_tabular_editor
+from .tabular_editor import add_tabular_editor_location, find_tabular_editor
 
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
 _OUTPUT_DIRS: dict[str, Path] = {}
@@ -390,6 +390,21 @@ def index() -> None:
                             "Tabular Editor 2 not found - BPA, exact dependencies and live "
                             "statistics are unavailable"
                         ).classes("text-sm")
+                if not tabular_editor:
+
+                    def save_location() -> None:
+                        if add_tabular_editor_location(te_folder.value or ""):
+                            ui.navigate.reload()
+                        else:
+                            ui.notify("No TabularEditor.exe in that folder.", type="warning")
+
+                    with ui.row().classes("w-full items-center no-wrap"):
+                        te_folder = (
+                            ui.input("Tabular Editor 2 folder", placeholder=r"C:\Tools\TabularEditor")
+                            .classes("grow")
+                            .mark("te_folder")
+                        )
+                        ui.button("Save", on_click=save_location).props("flat dense no-caps")
                 desktop_box = ui.column().classes("gap-1")
 
                 def refresh_desktop() -> None:

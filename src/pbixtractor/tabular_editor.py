@@ -32,18 +32,22 @@ DEFAULT_SEARCH_DIRS = [Path(r"C:\Program Files"), Path(r"C:\Program Files (x86)"
 SEVERITIES = {1: "Low", 2: "Medium", 3: "High"}
 
 
+def _default_locations_file() -> Path:
+    return Path(os.getcwd()) / "Input" / "TabularEditorLocations.txt"
+
+
 def find_tabular_editor(locations_file: Optional[Path] = None) -> Optional[Path]:
     """
     Locate TabularEditor.exe (Tabular Editor 2).
 
     Args:
         locations_file: Text file with one folder per line to search in (default:
-            Input/TabularEditorLocations.txt in the working directory, as used by the UI)
+            Input/TabularEditorLocations.txt in the working directory)
 
     Returns:
         Path to TabularEditor.exe, or None if not found
     """
-    locations_file = locations_file or Path(os.getcwd()) / "Input" / "TabularEditorLocations.txt"
+    locations_file = locations_file or _default_locations_file()
     folders = list(DEFAULT_SEARCH_DIRS)
     if locations_file.is_file():
         listed = [Path(line.strip()) for line in locations_file.read_text().splitlines()]
@@ -57,6 +61,38 @@ def find_tabular_editor(locations_file: Optional[Path] = None) -> Optional[Path]
             if candidate.is_file():
                 return candidate
     return None
+
+
+def add_tabular_editor_location(
+    folder: str | Path, locations_file: Optional[Path] = None
+) -> Optional[Path]:
+    """
+    Remember a folder to search for TabularEditor.exe (first in the locations file).
+
+    Args:
+        folder: Folder containing TabularEditor.exe (or a "Tabular Editor" subfolder)
+        locations_file: Default Input/TabularEditorLocations.txt in the working directory
+
+    Returns:
+        TabularEditor.exe found in that folder, or None (then nothing is saved)
+    """
+    folder = Path(str(folder).strip().strip('"'))
+    found = next(
+        (
+            candidate
+            for candidate in (folder / "Tabular Editor" / "TabularEditor.exe", folder / "TabularEditor.exe")
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if found is None:
+        return None
+    locations_file = locations_file or _default_locations_file()
+    existing = locations_file.read_text().splitlines() if locations_file.is_file() else []
+    listed = [str(folder)] + [line for line in existing if line.strip() and line.strip() != str(folder)]
+    locations_file.parent.mkdir(parents=True, exist_ok=True)
+    locations_file.write_text("\n".join(listed) + "\n")
+    return found
 
 
 @dataclass

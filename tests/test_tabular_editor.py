@@ -7,6 +7,7 @@ import pytest
 from pbixtractor.model_sheets import bpa_summary_rows
 from pbixtractor.tabular_editor import (
     DEFAULT_BPA_RULES,
+    add_tabular_editor_location,
     drop_redundant_table_refs,
     export_dependencies,
     find_tabular_editor,
@@ -82,6 +83,21 @@ def test_find_tabular_editor_from_locations_file(tmp_path):
     exe.write_bytes(b"")
     locations = tmp_path / "TabularEditorLocations.txt"
     locations.write_text(f"{tmp_path / 'Tools'}\n")
+    assert find_tabular_editor(locations) == exe
+
+
+def test_add_tabular_editor_location(tmp_path):
+    exe = tmp_path / "TE2" / "TabularEditor.exe"
+    exe.parent.mkdir()
+    exe.write_bytes(b"")
+    locations = tmp_path / "Input" / "TabularEditorLocations.txt"
+
+    assert add_tabular_editor_location(tmp_path / "Nothing here", locations) is None
+    assert not locations.exists()  # nothing saved for a wrong folder
+
+    assert add_tabular_editor_location(f'"{exe.parent}"', locations) == exe  # quotes from Explorer
+    assert add_tabular_editor_location(exe.parent, locations) == exe  # no duplicates
+    assert locations.read_text().splitlines() == [str(exe.parent)]
     assert find_tabular_editor(locations) == exe
 
 
