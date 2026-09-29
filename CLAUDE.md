@@ -74,7 +74,10 @@ src/pbixtractor/
   documentation.py  Analysis stage, no file output: build_documentation() → Documentation
                     (report_info, filter_strings, pages: {page: [PageItem]}, model, objects
                     [OBJECT_COLUMNS], relations, unused_columns/measures, exact deps, BPA,
-                    live stats; depends_on(table, name)). Also parse_tsv_object_name,
+                    live stats, page_info, bookmarks (incl. used_by buttons), interactivity
+                    {(page, visual id): notes}; depends_on(table, name)). Needs the
+                    ReportDefinition (ReportExtractor.report) for page/bookmark details.
+                    Also parse_tsv_object_name,
                     button_target_and_label, field_description.
   dax.py            find_functions/find_measures/find_columns, text_dependencies() (fallback
                     when no exact deps), highlight_dax() → rich-text segments.
@@ -108,8 +111,12 @@ src/pbixtractor/
   readers.py        read_report(path): .pbix (legacy Report/Layout or PBIR Report/definition/),
                     .pbip, or <name>.Report folder → ReportDefinition → PageDefinition →
                     VisualDefinition (fields as FieldBinding(role, expr, query_ref,
-                    display_name), aliases, objects, container_objects, filters). All
-                    format-specific JSON knowledge lives here; zip files are read on demand.
+                    display_name), aliases, objects, container_objects, filters, sync_group,
+                    hidden). PageDefinition: hidden, page_type (Tooltip/Drillthrough, only
+                    from string names), interactions (VisualInteraction source/target/kind).
+                    ReportDefinition.bookmark_details: BookmarkDefinition (captures data/
+                    display/page, target_visuals, hidden_visuals, group). All format-specific
+                    JSON knowledge lives here; zip files are read on demand.
   extractors.py     Helpers: clean_literal, get_aliases/resolve_field (resolve fields via the
                     query's From aliases), iter_field_refs, ReportContext (page + bookmark
                     id → display name). BaseExtractor / VisualExtractor / FilterExtractor
@@ -139,6 +146,11 @@ src/pbixtractor/
    | filters | `filters` (string), field in `expression` | `filterConfig.filters`, field in `field` |
    | bookmarks | `config.bookmarks` (groups via `children`) | `definition/bookmarks/*.bookmark.json` + `bookmarks.json` |
    | report filters | top-level `filters` | `report.json` `filterConfig` |
+   | hidden page | section `config.visibility == 1` | page.json `visibility: HiddenInViewMode` |
+   | edit interactions | section `config.relationships` (type 1 Filter, 2 Highlight, 3 None) | page.json `visualInteractions` (DataFilter/HighlightFilter/NoFilter) |
+   | slicer sync | `singleVisual.syncGroup.groupName` | `visual.syncGroup.groupName` |
+   | hidden visual | `singleVisual.display.mode == hidden`, group `singleVisualGroup.isHidden` | visual.json `isHidden` |
+   | bookmark capture | `options.suppressData/suppressDisplay/suppressActiveSection`, `targetVisualNames`; hidden visuals in `explorationState.sections.*.visualContainers.*.singleVisual.display` / `visualContainerGroups.*.isHidden` | same structure in `*.bookmark.json` |
    PBIR buttons/groups/bookmarks are so far only tested with the hand-built fixture
    (`tests/sample_pbir.py`), not a real report.
 2. Item rows: `[Page, Visual Type, Visual ID, Table, Name, Display Name, Type]`
@@ -174,14 +186,19 @@ src/pbixtractor/
    dependencies [MeasureName, Dependent, Object Type, Dependent Type], model tables,
    model columns, model roles/parameters if any, model quality summary, model quality).
    Live stats fill Rows/Size/% columns and measure DataType; otherwise they stay empty.
+   Both workbooks also get "report pages", "bookmarks" (if any) and "report filters"
+   sheets; the Interactivity column holds hidden state, sync group and changed interactions.
+   Workbooks are created with strings_to_formulas=False (conditions like "= Grey" used to
+   become broken formulas).
 
 ## Known bugs / gotchas (open as of 2026-09-29)
 - Never trust the Select `Name`/queryRef string for table/field — it goes stale when
   measures are renamed or moved (e.g. `_Measures.Total Sales Budget` is really
   `SalesBudgets[Total Sales Budget OC]`). Always use `resolve_field()`. The queryRef is
   only for matching projection roles / columnProperties and hierarchy columns.
-- Report-level ("All Pages") filters, bookmark contents (captured state), drillthrough/
-  tooltip/hidden pages, visual interactions and slicer sync groups are not in the output.
+- Tooltip/drillthrough page detection is untested on real files (no sample uses them);
+  legacy numeric pageBinding types are ignored on purpose. Bookmark captured filter/slicer
+  state is not listed yet (only capture options and hidden visuals).
 - The "User Input" UI tab appends to `Input/*.csv`, which nothing reads any more (YAML config).
   The measures-table combo (`defMeasTable`) is hidden and its value unused.
 - Kept on purpose during the Step 2 refactor (output identical to before), candidates to fix:
@@ -213,7 +230,8 @@ src/pbixtractor/
   model extras (done 2026-09-29: unused measures, model sheets, BPA, exact dependencies,
   live statistics) → 2 modular handlers/writers (run_cmd split into documentation.py /
   excel_report.py / dax.py / relationship_graph.py, config.py + extract_types handler
-  registry, JSON writer done) →
+  registry, JSON writer done) → 3 report details (done 2026-09-29: page visibility/type,
+  interactions, sync groups, hidden visuals, bookmarks sheet, report filters sheet) →
   3 buttons/bookmarks/filters complete → 1b DevOps/Fabric readers → 4 HTML lineage graph →
   5 CLI + NiceGUI UI → 6 SQL/Fabric source lineage (sqlglot).
 
