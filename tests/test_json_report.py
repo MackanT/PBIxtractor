@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import pbixtractor.extractor as extractor
+import pbixtractor.report_extractor as extractor
 from pbixtractor.documentation import build_documentation
 from pbixtractor.json_report import SCHEMA_VERSION, documentation_to_dict, write_json
 from pbixtractor.semantic_model import model_to_dataset, parse_model

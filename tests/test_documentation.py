@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import pbixtractor.extractor as extractor
+import pbixtractor.report_extractor as extractor
 from pbixtractor.constants import REPORT_COLUMNS
 from pbixtractor.dax import highlight_dax, text_dependencies
 from pbixtractor.documentation import (
@@ -19,6 +19,7 @@ from pbixtractor.documentation import (
     parse_tsv_object_name,
     resolve_hierarchy_columns,
 )
+from pbixtractor.pipeline import ExtractionOptions, run_extraction
 from pbixtractor.semantic_model import model_to_dataset, parse_model
 from pbixtractor.tabular_editor import parse_dependencies
 
@@ -155,21 +156,23 @@ def test_page_items(model, report):
     assert button.first_row["Name"] == "Panel Open"
 
 
-def test_run_cmd_end_to_end(tmp_path, monkeypatch):
+def test_workbooks_end_to_end(tmp_path):
     """The whole pipeline on the sample report + model, without Tabular Editor."""
     write_sample_pbix(tmp_path / "Sample.pbix")
     (tmp_path / "Sample.bim").write_text(json.dumps(BIM), encoding="utf-8")
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(extractor, "_PBIX_", ["Sample", str(tmp_path)])
-    monkeypatch.setattr(extractor, "_BIM_", ["Sample", str(tmp_path)])
-    monkeypatch.setattr(extractor, "SAVE_NAME", "Sample")
-    monkeypatch.setattr(extractor, "RUN_TE_ANALYSIS", False)
-    monkeypatch.setattr(extractor, "LOG_DATA", False)
-
-    assert extractor.run_cmd() in ("Success", "Log")
-
     output = tmp_path / "output" / "Sample"
+    result = run_extraction(
+        ExtractionOptions(
+            report_path=tmp_path / "Sample.pbix",
+            model_path=tmp_path / "Sample.bim",
+            output_dir=output,
+            tabular_editor_analysis=False,
+            write_log_file=False,
+        )
+    )
+    assert result.ok, result.message
+
     assert (output / "Sample_Relationships.png").is_file()
     with zipfile.ZipFile(output / "Sample.xlsx") as main:
         workbook = main.read("xl/workbook.xml").decode()

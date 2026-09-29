@@ -5,8 +5,7 @@
     result.status   # "success" | "warnings" | "error"
     result.files    # {"workbook": Path, "data_workbook": ..., "json": ..., "lineage": ..., ...}
 
-Used by the command line (cli.py), the web UI (web_ui.py) and the legacy DearPyGUI UI
-(extractor.run_cmd).
+Used by the command line (cli.py) and the web UI (web_ui.py).
 """
 
 import subprocess

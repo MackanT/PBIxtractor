@@ -10,6 +10,6 @@ A tool for extracting and documenting Power BI reports with support for:
 
 __version__ = "0.2.0"
 
-from .extractor import ReportExtractor
+from .report_extractor import ReportExtractor  # noqa: E402
 
 __all__ = ["ReportExtractor", "__version__"]

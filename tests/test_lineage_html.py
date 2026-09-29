@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import pbixtractor.extractor as extractor
+import pbixtractor.report_extractor as extractor
 from pbixtractor.documentation import build_documentation
 from pbixtractor.json_report import documentation_to_dict
 from pbixtractor.lineage_html import build_viewer_data, render_lineage_html, write_lineage_html

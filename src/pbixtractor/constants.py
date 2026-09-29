@@ -1,6 +1,6 @@
 """Constants and configuration for PBI-Ixtractor."""
 
-# Default color scheme for syntax highlighting
+# Colours of the DAX syntax highlighting in the workbooks: [name, RGBA]
 DEFAULT_COLORS = [
     ["Functions", (49, 101, 187, 255)],
     ["Measures", (0, 16, 128, 255)],
@@ -10,15 +10,6 @@ DEFAULT_COLORS = [
     ["Quotes", (163, 21, 21, 255)],
     ["VarNames", (0, 15, 255, 255)],
 ]
-
-# UI color codes
-UI_COLORS = {
-    "W": (255, 255, 255),  # White
-    "G": (102, 204, 102),  # Green
-    "Y": (255, 255, 102),  # Yellow
-    "O": (255, 153, 51),   # Orange
-    "R": (255, 77, 77),    # Red
-}
 
 # Description tag delimiter
 DESCRIPT_TAG = "////"

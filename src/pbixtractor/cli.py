@@ -4,7 +4,6 @@
     pbixtractor                          # web UI (NiceGUI) in the browser
     pbixtractor web --port 8081          # same, with options
     pbixtractor extract Sales.pbix       # document a report from the command line
-    pbixtractor --ui                     # legacy desktop UI (DearPyGUI)
 """
 
 import argparse
@@ -19,7 +18,6 @@ Examples:
   pbixtractor extract C:/Reports/Sales.pbix       Document a report (model: Sales.bim next to it)
   pbixtractor extract Sales.pbix --model Model.bim -o out/Sales --no-tabular-editor
   pbixtractor extract C:/Reports/Sales.pbip       PBIP project (model from Sales.SemanticModel)
-  pbixtractor --ui                                Legacy desktop UI (DearPyGUI)
 """
 
 
@@ -31,10 +29,6 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=EXAMPLES,
     )
     parser.add_argument("--version", action="version", version=f"PBIxtractor {__version__}")
-    parser.add_argument("--ui", action="store_true", help="legacy desktop UI (DearPyGUI)")
-    parser.add_argument(
-        "--test", action="store_true", help="development run with the paths in run_test_extraction()"
-    )
     commands = parser.add_subparsers(dest="command")
 
     extract = commands.add_parser(
@@ -124,27 +118,6 @@ def run_extract(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> None:
     """Main entry point for the `pbixtractor` command."""
     args = build_parser().parse_args(argv)
-
-    if args.test:
-        print("Running test extraction with hardcoded test files...")
-        from .extractor import run_test_extraction
-
-        result = run_test_extraction()
-        if result == "Success":
-            print("\n[SUCCESS] Test extraction completed successfully!")
-        elif result == "Log":
-            print("\n[WARNING] Test extraction completed with warnings. Check logs for details.")
-        else:
-            print(f"\n[ERROR] Test extraction failed: {result}")
-            sys.exit(1)
-        return
-
-    if args.ui:
-        print("Starting the legacy PBIxtractor desktop UI...")
-        from .extractor import run_ui
-
-        run_ui()
-        return
 
     if args.command == "extract":
         sys.exit(run_extract(args))

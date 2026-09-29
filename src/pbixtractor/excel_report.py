@@ -55,8 +55,7 @@ PAGES_SHEET_HEADERS = [
 
 def create_formats(workbook: xlsxwriter.Workbook) -> dict:
     """
-    Cell and rich-text formats. DAX colours come from constants.DEFAULT_COLORS, which the UI
-    may change at runtime.
+    Cell and rich-text formats. DAX colours come from constants.DEFAULT_COLORS.
     """
 
     def color(index: int):
