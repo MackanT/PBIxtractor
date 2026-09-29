@@ -8,6 +8,7 @@ from typing import Any, Iterator, Optional
 
 from jsonpath_ng.ext import parse as jsonpath_ext_parse
 
+from .config import Config
 from .logger import get_logger
 from .models import ExtractedFilter, ExtractedItem
 from .readers import FieldBinding, PageDefinition, ReportDefinition, VisualDefinition
@@ -221,7 +222,7 @@ class ReportContext:
 class BaseExtractor(ABC):
     """Base class for all extractors."""
 
-    def __init__(self, config: dict, logger: logging.Logger = None):
+    def __init__(self, config: Optional[Config], logger: logging.Logger = None):
         """
         Initialize extractor.
 
@@ -290,22 +291,23 @@ class BaseExtractor(ABC):
 class VisualExtractor(BaseExtractor):
     """Extracts visual elements from Power BI pages."""
 
-    def __init__(
-        self, config: dict, visual_types: list, data_types: list, logger: logging.Logger = None
-    ):
+    def __init__(self, config: Config, logger: logging.Logger = None):
         """
         Initialize visual extractor.
 
         Args:
-            config: Extraction rules config
-            visual_types: List of supported visual types
-            data_types: List of [name, friendly_name] data type mappings
+            config: Configuration from data.yaml (supported types, roles, extract types)
             logger: Logger instance
         """
         super().__init__(config, logger)
-        self.visual_types = set(visual_types)
-        self.data_types = dict(data_types)
-        self.skip_types = config.get("default", {}).get("skip_types", [])
+        self.visual_types = config.supported_visual_types
+        self.data_types = config.data_types
+        # Extract type (data.yaml extract_types) -> handler(visual, page, visual_type, context).
+        # "skip" has no handler: those visuals are dropped unless they have an action.
+        self.handlers = {
+            "standard": self._extract_standard_visual,
+            "button": self._extract_button,
+        }
 
     def extract(
         self, visual: VisualDefinition, page_name: str, context: ReportContext = None
@@ -341,28 +343,29 @@ class VisualExtractor(BaseExtractor):
             self.logger.warning(f"Visual {visual.name} on {page_name} has no visualType")
             return []
 
-        if visual_type in self.skip_types:
+        extract_type = self.config.extract_type(visual_type)
+        if extract_type == "skip":
             # Shapes/images are decoration, unless they have an action (clickable shape)
             link = merge_object_properties(visual.container_objects.get("visualLink"))
             if "type" not in link:
                 return []
-            visual_type = "actionButton"
+            visual_type, extract_type = "actionButton", "button"
+        elif extract_type == "standard" and visual_type not in self.visual_types:
+            self.logger.warning(
+                f"Unknown visual type: {visual_type} on {page_name}. "
+                "Extracting fields generically - add it to data.yaml."
+            )
 
-        if visual_type == "actionButton":
-            items = self._extract_button(visual, page_name, context)
-        else:
-            if visual_type not in self.visual_types:
-                self.logger.warning(
-                    f"Unknown visual type: {visual_type} on {page_name}. "
-                    "Extracting fields generically - add it to data.yaml."
-                )
-            items = self._extract_standard_visual(visual, page_name, visual_type)
-
+        items = self.handlers[extract_type](visual, page_name, visual_type, context)
         items.extend(self._extract_formatting_refs(visual, page_name, visual_type, items))
         return items
 
     def _extract_standard_visual(
-        self, visual: VisualDefinition, page_name: str, visual_type: str
+        self,
+        visual: VisualDefinition,
+        page_name: str,
+        visual_type: str,
+        context: ReportContext = None,
     ) -> list[ExtractedItem]:
         """Extract the fields of a standard (query-based) visual."""
         items = []
@@ -424,7 +427,11 @@ class VisualExtractor(BaseExtractor):
         return self.data_types[binding.role]
 
     def _extract_button(
-        self, visual: VisualDefinition, page_name: str, context: ReportContext
+        self,
+        visual: VisualDefinition,
+        page_name: str,
+        visual_type: str,
+        context: ReportContext = None,
     ) -> list[ExtractedItem]:
         """
         Extract an action button: its action type, target and label.
@@ -464,7 +471,7 @@ class VisualExtractor(BaseExtractor):
         return [
             ExtractedItem(
                 page=page_name,
-                visual_type="actionButton",
+                visual_type=visual_type,
                 item_name=item_name,
                 table_name="",
                 val_name=target,
@@ -712,12 +719,18 @@ def _join(operator: str, value: str) -> str:
 class PageExtractor(BaseExtractor):
     """Orchestrates extraction of all elements from a page."""
 
-    def __init__(
-        self, config: dict, visual_types: list, data_types: list, logger: logging.Logger = None
-    ):
-        """Initialize page extractor."""
+    def __init__(self, config: Config, logger: logging.Logger = None, skip_template: bool = True):
+        """
+        Initialize page extractor.
+
+        Args:
+            config: Configuration from data.yaml
+            logger: Logger instance
+            skip_template: Ignore pages named "Template"
+        """
         super().__init__(config, logger)
-        self.visual_extractor = VisualExtractor(config, visual_types, data_types, logger)
+        self.skip_template = skip_template
+        self.visual_extractor = VisualExtractor(config, logger)
         self.filter_extractor = FilterExtractor(config, logger)
 
     def extract(
@@ -738,9 +751,8 @@ class PageExtractor(BaseExtractor):
 
         page_name = page.display_name or "Unknown"
 
-        if self.config.get("default", {}).get("skip_template", True):
-            if page_name == "Template":
-                return items, filters
+        if self.skip_template and page_name == "Template":
+            return items, filters
 
         for visual in page.visuals:
             items.extend(self.visual_extractor.extract(visual, page_name, context))

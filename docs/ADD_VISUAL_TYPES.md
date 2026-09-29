@@ -68,6 +68,23 @@ special_visuals:
 - `display_name`: The friendly name shown in output files
 - `item_type`: One of `"Visual"`, `"Slicer"`, `"Button"`, or `"Group"`
 
+### How a Visual Is Extracted (`extract_types`)
+
+Every visual type is extracted as `standard` unless listed under `extract_types`:
+
+```yaml
+extract_types:
+  actionButton: button   # action type, target (bookmark/page/URL) and label
+  shape: skip            # decoration, not documented
+  image: skip
+  textbox: skip
+```
+
+- `standard`: the fields in the visual's query and formatting (charts, tables, slicers, ...)
+- `button`: action type, target and label, like the built-in buttons
+- `skip`: not documented. Shapes/images **with an action** (clickable shapes) are still
+  documented as buttons.
+
 ## Examples
 
 ### Example 1: Adding a New Standard Visual
@@ -80,15 +97,18 @@ standard_visuals:
   - waterfallChart  # Displays as "Waterfall Chart"
 ```
 
-### Example 2: Adding a Custom Visual with Special Name
+### Example 2: Documenting Images Too
 
-**Power BI Visual Type:** `image`  
+**Power BI Visual Type:** `image` (skipped by default)
 **Desired Display Name:** "Image"
 
-**Configuration:**
+**Configuration:** give it a display name *and* remove it from the skip list:
 ```yaml
 special_visuals:
   image: {display_name: "Image", item_type: "Visual"}
+
+extract_types:
+  image: standard   # or delete the line
 ```
 
 ### Example 3: Adding a New Slicer Type
@@ -112,14 +132,22 @@ uv run pbixtractor --test
 
 If you see a warning like:
 ```
-New Visual type not yet supported! visualTypeName
+Unknown visual type: visualTypeName on <page>. Extracting fields generically - add it to data.yaml.
+New Visual type not yet supported: visualTypeName
 ```
 
-This means the visual type needs to be added to either `standard_visuals` or `special_visuals` in the YAML configuration.
+the visual's fields were still documented, but it has no display name yet: add it to
+`standard_visuals` or `special_visuals` (and to `extract_types` if it is not a normal
+query visual).
 
 ## Architecture Notes
 
-The visual type mapping is handled by the `VisualTypeMapper` class in `src/pbixtractor/visual_helpers.py`. The mapper:
+`src/pbixtractor/config.py` loads `data.yaml` once into a `Config`: supported visual types
+(everything in `standard_visuals` and `special_visuals`), projection role labels, extract types
+and DAX function names. `VisualExtractor` in `extractors.py` picks a handler per visual from
+`extract_types` (`standard` / `button`; `skip` has none).
+
+The display names are handled by the `VisualTypeMapper` class in `src/pbixtractor/visual_helpers.py`. The mapper:
 
 1. Loads configuration from `data.yaml`
 2. Checks `special_visuals` for custom mappings

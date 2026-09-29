@@ -13,8 +13,9 @@ import pandas as pd
 import yaml
 
 # Local imports
+from .config import load_config
 from .constants import DEFAULT_COLORS, DESCRIPT_TAG, UI_COLORS
-from .data import DATA_DIR
+from .data import DATA_DIR, YAML_FILE
 from .dax import find_columns, find_functions, find_measures  # noqa: F401 (re-exported)
 from .documentation import (  # noqa: F401 (re-exported)
     build_documentation,
@@ -51,34 +52,17 @@ _PBIX_ = [None, None]
 _BIM_ = [None, None]
 
 
-# Load configuration from YAML file
+# Load configuration from data/data.yaml
 try:
-    from .data import YAML_FILE
-except ImportError:
-    from pathlib import Path
-
-    YAML_FILE = Path(__file__).parent / "data" / "data.yaml"
-
-try:
-    with open(YAML_FILE, "r") as yaml_file:
-        config_data = yaml.safe_load(yaml_file)
-
-    visual_type_list = config_data.get("visual_types", [])
-    data_types_raw = config_data.get("data_types", [])
-    data_type_list = [[dt["name"], dt["friendly_name"]] for dt in data_types_raw]
-    known_functions = config_data.get("function_names", [])
-    extraction_rules = config_data.get("extraction_rules", {})
-    filter_rules = config_data.get("filter_rules", {})
-
-    # Create visual type mapper for display names
-    from .visual_helpers import create_visual_mapper
-
-    visual_mapper = create_visual_mapper(config_data)
-
-except Exception as e:
+    CONFIG = load_config()
+except (OSError, ValueError, KeyError, yaml.YAMLError) as e:
     print(f"Error loading YAML configuration file: {YAML_FILE}")
     print(f"Exception: {e}")
     sys.exit(1)
+
+visual_mapper = CONFIG.visual_mapper
+visual_type_list = sorted(CONFIG.supported_visual_types)
+known_functions = CONFIG.function_names
 
 
 class ReportExtractor:
@@ -101,13 +85,7 @@ class ReportExtractor:
         # Import modular extractors
         from .extractors import PageExtractor
 
-        # Initialize page extractor with config
-        self.page_extractor = PageExtractor(
-            config=extraction_rules,
-            visual_types=visual_type_list,
-            data_types=data_type_list,
-            logger=self.logger,
-        )
+        self.page_extractor = PageExtractor(config=CONFIG, logger=self.logger)
 
     def add_item(
         self,

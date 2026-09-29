@@ -1,8 +1,8 @@
 """Pydantic models for Power BI report structures."""
 
-from typing import Any, Optional
+from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class ExtractedItem(BaseModel):
@@ -51,49 +51,3 @@ class ExtractedFilter(BaseModel):
             self.operator,
             self.value,
         ]
-
-
-class VisualExtractionRule(BaseModel):
-    """Defines how to extract data for a specific visual type."""
-
-    visual_type: str
-    projections_path: str = "$..projections"
-    select_path: str = "$..Select"
-    names_path: str = "$..Name"
-    display_names_path: str = "$..NativeReferenceName"
-    enabled: bool = True
-    skip_types: list[str] = Field(default_factory=lambda: ["shape", "image", "textbox"])
-
-    class Config:
-        frozen = True  # Make immutable for safety
-
-
-class FilterExtractionRule(BaseModel):
-    """Defines how to extract filter data."""
-
-    filter_type: str
-    entity_path: str = "$..Entity"
-    property_path: str = "$..Property"
-    values_path: str = "$..Values"
-    enabled: bool = True
-
-    class Config:
-        frozen = True
-
-
-class ExtractionConfig(BaseModel):
-    """Complete configuration for extraction process."""
-
-    visual_rules: dict[str, VisualExtractionRule] = Field(default_factory=dict)
-    filter_rules: dict[str, FilterExtractionRule] = Field(default_factory=dict)
-    skip_template_page: bool = True
-    log_unknown_types: bool = True
-
-    def get_visual_rule(self, visual_type: str) -> Optional[VisualExtractionRule]:
-        """Get extraction rule for a specific visual type."""
-        return self.visual_rules.get(visual_type)
-
-    def is_visual_enabled(self, visual_type: str) -> bool:
-        """Check if visual type should be extracted."""
-        rule = self.get_visual_rule(visual_type)
-        return rule is not None and rule.enabled
