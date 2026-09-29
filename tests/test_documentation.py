@@ -103,8 +103,17 @@ def test_build_objects_description_tag_and_order(model):
 
     objects = build_objects(dataset, ["Sales", "Dates"], "Sample", "////")
     assert list(objects.columns) == OBJECT_COLUMNS
-    # Columns and measures only, in reverse model order (as the original implementation)
-    assert objects.iloc[0]["Name"] == "Dynamic" and objects.iloc[-1]["Name"] == "Date Key"
+    # Columns and measures only, in model order
+    expected = [
+        name
+        for name, obj in zip(dataset["Name"], dataset["Object"])
+        if ".C." in obj or ".M." in obj
+    ]
+    assert list(objects["Name"]) == expected and expected[0] == "Date Key"
+    types = dict(zip(objects["Name"], objects["Type"]))
+    assert types["Amount"] == "Column"
+    assert types["Is Big"] == "Calculated Column"
+    assert types["Total Amount"] == "Measure"
     total = objects[objects["Name"] == "Total Amount"].iloc[0]
     assert total["Description"] == "Sum of sales"
     assert total["Definition"] == "SUM ( Sales[Amount] )"
@@ -166,8 +175,13 @@ def test_run_cmd_end_to_end(tmp_path, monkeypatch):
         workbook = main.read("xl/workbook.xml").decode()
     for sheet in ("Sample Common", "Sales", "Pages", "model tables", "model columns"):
         assert f'name="{sheet}"' in workbook
-    assert 'name="Detail"' not in workbook  # pages without visuals get no sheet
+    assert 'name="Detail"' in workbook  # pages without visuals get a sheet too
     assert "model quality" not in workbook  # BPA not run
+    with zipfile.ZipFile(output / "Sample.xlsx") as main:
+        main_strings = main.read("xl/sharedStrings.xml").decode()
+    assert "Depends On" in main_strings and "Dependants" not in main_strings
+    assert "Calculated Column" in main_strings  # calculated columns are listed with their DAX
+    assert "(no visuals, buttons or page filters on this page)" in main_strings
 
     # openpyxl is not a dependency, so inspect the workbook XML directly
     with zipfile.ZipFile(output / "Sample_data.xlsx") as data_book:

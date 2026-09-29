@@ -31,7 +31,7 @@ OBJECT_COLUMNS = [
     "Description",
     "Definition",
     "Table",
-    "Dependants",
+    "Depends On",
     "Format",
     "Folder",
     "Comment",
@@ -215,6 +215,7 @@ def button_target_and_label(row: pd.Series) -> tuple[str, str]:
     if row["Type"] == "Group":
         return display_name, ""
     return row["Name"] or "", display_name
+
 
 
 def field_display_name(row: pd.Series) -> str:
@@ -404,6 +405,8 @@ def build_objects(
 
         format_string = line.get("FormatString", "")
         display_folder = line.get("DisplayFolder", "")
+        if object_type == "Column" and definition.strip():
+            object_type = "Calculated Column"
         rows.append(
             {
                 "Type": object_type,
@@ -415,16 +418,13 @@ def build_objects(
                 .replace("\r\n", "\n")
                 .replace("\r", "\n"),
                 "Table": table,
-                "Dependants": "",
+                "Depends On": "",
                 "Format": "" if pd.isna(format_string) else format_string,
                 "Folder": "" if pd.isna(display_folder) else display_folder,
                 "Comment": "",
                 "Report File": report_name,
             }
         )
-    # The original implementation prepended rows, so the sheets list objects in reverse
-    # model order; kept to avoid reshuffling existing documentation
-    rows.reverse()
     return pd.DataFrame(rows, columns=OBJECT_COLUMNS)
 
 
@@ -494,9 +494,9 @@ def find_unused(
     unused = [col for col in unused if col not in used_in_report]
 
     if exact_dependencies is None:
-        # Fallback: text matching of the DAX of measures (calculated columns are not scanned)
+        # Fallback: text matching of the DAX of measures and calculated columns
         for _, row in objects.iterrows():
-            if row["Type"] == "Column":
+            if row["Type"] == "Column":  # data column: no DAX
                 continue
             columns = find_columns(row["Definition"])
             referenced_names = {measure[1:-1] for measure in find_measures(row["Definition"])}

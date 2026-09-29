@@ -28,7 +28,7 @@ PARENTHESIS_COLORS = ["#0433fa", "#319331", "#7b3831"]
 WORKBOOK_OPTIONS = {"strings_to_formulas": False}
 
 DEFINITION_INDEX = OBJECT_COLUMNS.index("Definition")
-DEPENDANTS_INDEX = OBJECT_COLUMNS.index("Dependants")
+DEPENDS_ON_INDEX = OBJECT_COLUMNS.index("Depends On")
 
 PAGE_SHEET_HEADERS = [
     "Item Type",
@@ -122,20 +122,20 @@ def _set_object_columns(worksheet, formats: dict) -> None:
     worksheet.set_column(0, len(OBJECT_COLUMNS), 30, formats["wrap"])
     worksheet.set_column(DEFINITION_INDEX, DEFINITION_INDEX, 100, formats["top_wrap"])
     worksheet.set_column(DEFINITION_INDEX + 1, DEFINITION_INDEX + 1, 30, formats["wrap"])
-    worksheet.set_column(DEPENDANTS_INDEX, DEPENDANTS_INDEX, 50, formats["wrap"])
+    worksheet.set_column(DEPENDS_ON_INDEX, DEPENDS_ON_INDEX, 50, formats["wrap"])
 
 
 def _write_objects(
     worksheet, documentation: Documentation, formats: dict, row_num: int, known_functions
 ) -> int:
     """
-    Write measures (and other non-column objects) with highlighted DAX and dependencies.
+    Write measures and calculated columns with highlighted DAX and dependencies.
 
     Returns:
         Next free row
     """
     for _, row in documentation.objects.iterrows():
-        if row["Type"] == "Column":  # data and calculated columns are not listed here
+        if row["Type"] == "Column":  # data columns: see the "model columns" sheet
             continue
 
         definition = highlight_dax(row["Definition"], formats, known_functions)
@@ -150,7 +150,7 @@ def _write_objects(
         for col, value in enumerate(row):
             if col == DEFINITION_INDEX and definition:
                 write_to_excel(worksheet, row_num, col, definition)
-            elif col == DEPENDANTS_INDEX and parents_rich:
+            elif col == DEPENDS_ON_INDEX and parents_rich:
                 write_to_excel(worksheet, row_num, col, parents_rich)
             elif value != "":
                 worksheet.write(row_num, col, value)
@@ -168,6 +168,8 @@ def _write_page_sheet(
     worksheet.set_column(4, 4, 60, formats["top_wrap"])
     for col, name in enumerate(PAGE_SHEET_HEADERS):
         worksheet.write(0, col, name, formats["bi"])
+    if not items:
+        worksheet.write(1, 0, "(no visuals, buttons or page filters on this page)", formats["italic"])
 
     for row_num, item in enumerate(items, start=1):
         worksheet.write(row_num, 0, item.item_type)
@@ -396,9 +398,16 @@ def write_main_workbook(
             row_num += 1
         row_num += 1
 
-    for page, items in documentation.pages.items():
+    # Every report page gets a sheet, also pages without visuals
+    page_names = [p.name for p in documentation.page_info]
+    page_names += [page for page in documentation.pages if page not in page_names]
+    for page in page_names:
         _write_page_sheet(
-            workbook.add_worksheet(sheet_name(page)), page, items, documentation, formats
+            workbook.add_worksheet(sheet_name(page)),
+            page,
+            documentation.pages.get(page, []),
+            documentation,
+            formats,
         )
 
     _write_pages_sheet(
