@@ -1,17 +1,14 @@
 """Main extractor module for PBI-Ixtractor."""
 
 import argparse
-import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from zipfile import ZipFile
 
 import matplotlib
 import networkx as nx
@@ -19,14 +16,18 @@ import pandas as pd
 import xlsxwriter
 import yaml
 from matplotlib import pyplot as plt
+from xlsxwriter.utility import xl_rowcol_to_cell
 
 matplotlib.use("agg")
 
 # Local imports
 from .constants import DEFAULT_COLORS, DESCRIPT_TAG, REPORT_COLUMNS, UI_COLORS
+from .data import DATA_DIR
 from .logger import get_logger, setup_logger
+from .semantic_model import model_to_dataset, read_model
 from .utils import (
     ensure_directory,
+    excel_sheet_name,
     find_nth_occurrence,
     find_vars,
     is_excel_open_with_file,
@@ -39,6 +40,10 @@ logger, log_capture = setup_logger("pbixtractor", level=logging.INFO, capture=Tr
 
 # Global state variables
 LOG_DATA = True
+# False: read measures/columns straight from the .bim (no Tabular Editor needed).
+# True: use Tabular Editor's TSV export, which also formats DAX via daxformatter.com
+# (sends the DAX to an external web service).
+USE_TABULAR_EDITOR = False
 SAVE_NAME = ""
 _PBIX_ = [None, None]
 _BIM_ = [None, None]
@@ -136,6 +141,25 @@ def parse_tsv_object_name(object_name: str) -> tuple[str, str, str]:
             data_type = "Measure"
 
     return (data_type, table, column)
+
+
+def button_target_and_label(row: pd.Series) -> tuple[str, str]:
+    """
+    Get the target and label of a button or group row from the report DataFrame.
+
+    Args:
+        row: Report row (REPORT_COLUMNS) of a button or group
+
+    Returns:
+        (target, label). Buttons: (bookmark/page name, button text).
+        Groups: (group name, "").
+    """
+    display_name = row["Display Name"]
+    display_name = "" if pd.isna(display_name) or not display_name else str(display_name)
+
+    if row["Type"] == "Group":
+        return display_name, ""
+    return row["Name"] or "", display_name
 
 
 # Load configuration from YAML file
@@ -269,39 +293,26 @@ class ReportExtractor:
         Extract all data from the Power BI report.
 
         This method:
-        1. Extracts the .pbix file (ZIP archive)
-        2. Loads the report layout JSON
-        3. Parses visual containers and filters
-        4. Extracts items and filters using PageExtractor
-        5. Cleans up temporary files
+        1. Reads the report (legacy Layout or PBIR; .pbix, .pbip or .Report folder)
+           into a normalised ReportDefinition (see readers.py)
+        2. Extracts report-level filters and each page using PageExtractor
         """
-        # Prepare extraction folder
-        temp_folder = f"{self.path}/temp_{self.name[:-5]}"
-        try:
-            shutil.rmtree(temp_folder)
-        except FileNotFoundError:
-            self.logger.debug(f"Temporary folder {temp_folder} not present")
+        from .extractors import ReportContext
+        from .readers import read_report
 
-        # Extract .pbix file (it's a ZIP archive)
-        with ZipFile(f"{self.path}/{self.name}", "r") as zip_file:
-            zip_file.extractall(temp_folder)
+        report = read_report(os.path.join(self.path, self.name), self.logger)
+        self.logger.debug(f"Read {self.name} ({report.format} format)")
+        context = ReportContext.from_report(report)
 
-        # Load report layout JSON
-        layout_path = f"{temp_folder}/Report/Layout"
-        with open(layout_path, "r", encoding="utf-16 le") as layout_file:
-            report_layout = json.loads(layout_file.read())
-
-        # Parse nested JSON strings in the layout
-        report_layout["config"] = json.loads(report_layout["config"])
-        for section in report_layout["sections"]:
-            for visual_container in section["visualContainers"]:
-                for key in ["config", "filters", "query", "dataTransforms"]:
-                    if key in visual_container:
-                        visual_container[key] = json.loads(visual_container[key])
+        # Report-level filters (apply to all pages)
+        for filter_obj in self.page_extractor.filter_extractor.extract_filters(
+            report.filters, "", "All Pages"
+        ):
+            self.filters.append(filter_obj.to_list())
 
         # Extract data from each page using PageExtractor
-        for page in report_layout["sections"]:
-            items, filters = self.page_extractor.extract(page)
+        for page in report.pages:
+            items, filters = self.page_extractor.extract(page, context)
 
             # Convert Pydantic models to legacy list format
             for item in items:
@@ -309,9 +320,6 @@ class ReportExtractor:
 
             for filter_obj in filters:
                 self.filters.append(filter_obj.to_list())
-
-        # Clean up temporary folder
-        shutil.rmtree(temp_folder)
 
 
 def run_ui():
@@ -415,6 +423,12 @@ def run_ui():
                 show_and_hide(
                     "tsvTextExtra",
                     "Could Not Find Tabular Editor 2 on PC. Please add location in Input/TabularEditorLocations.txt",
+                    "R",
+                )
+            elif tsv_result == "TSVTimeout":
+                show_and_hide(
+                    "tsvTextExtra",
+                    "Tabular Editor did not generate the TSV file in time, please retry.",
                     "R",
                 )
             else:
@@ -527,6 +541,10 @@ def run_ui():
         global LOG_DATA
         LOG_DATA = dpg.get_value(sender)
 
+    def toggle_tabular_editor(sender, app_data, user_data):
+        global USE_TABULAR_EDITOR
+        USE_TABULAR_EDITOR = dpg.get_value(sender)
+
     def add_colored_text_at_top(container, text, color):
         new_text = dpg.add_text(text, parent=container, color=color)
         children = dpg.get_item_children(container)[1]
@@ -621,7 +639,7 @@ def run_ui():
     dpg.bind_theme(disabled_theme)
 
     with dpg.texture_registry(show=False):
-        width, height, channels, data = dpg.load_image("logo_large.png")
+        width, height, channels, data = dpg.load_image(str(DATA_DIR / "logo_large.png"))
         dpg.add_static_texture(width=width, height=height, default_value=data, tag="logo_texture")
 
     with dpg.window(label="PB-Ixtractor", width=1000, height=800):
@@ -694,7 +712,7 @@ def run_ui():
                 callback=run_extractor,
             )
             dpg.add_text(
-                "Generates the documentation files, will generate the .tsv file if it does not exist.",
+                "Generates the documentation files. Reads the .bim directly (Tabular Editor only if enabled under Additional Settings).",
                 tag="runText",
             )
             dpg.add_text(
@@ -712,6 +730,12 @@ def run_ui():
                 callback=toggle_log_toggle,
                 tag="log_toggle",
                 default_value=True,
+            )
+            dpg.add_checkbox(
+                label="Use Tabular Editor (formats DAX via daxformatter.com - sends DAX online)",
+                callback=toggle_tabular_editor,
+                tag="tabular_editor_toggle",
+                default_value=USE_TABULAR_EDITOR,
             )
             dpg.add_spacer(height=5)
 
@@ -826,7 +850,9 @@ def run_ui():
             )
 
     # Window
-    dpg.create_viewport(title="PB-Ixtractor", width=1000, height=800, large_icon="logo.ico")
+    dpg.create_viewport(
+        title="PB-Ixtractor", width=1000, height=800, large_icon=str(DATA_DIR / "logo.ico")
+    )
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.start_dearpygui()
@@ -936,7 +962,11 @@ def gen_tsv(force: bool = False):
                 raise TimeoutError(f"File {file_path} not found within the timeout period")
             time.sleep(0.1)
 
-    wait_for_file(file_path=f"{cwd}\\documentation.tsv", timeout=5)
+    try:
+        wait_for_file(file_path=f"{cwd}\\documentation.tsv", timeout=5)
+    except TimeoutError:
+        logger.error("Tabular Editor did not produce documentation.tsv within 5 seconds")
+        return "TSVTimeout"
 
 
 def run_test_extraction():
@@ -1010,6 +1040,9 @@ def run_cmd():
     # SECTION 1: SETUP AND INITIALIZATION
     # ========================================================================
 
+    # Only report logs from this run
+    log_capture.clear()
+
     # Setup output directories
     output_dir = os.path.join(os.getcwd(), "output")
     ensure_directory(output_dir)
@@ -1022,11 +1055,22 @@ def run_cmd():
     if is_excel_open_with_file(file_path):
         return f"Please Close File: {SAVE_NAME}.xlsx before proceeding!"
 
-    # Generate TSV file if it doesn't exist
+    # Read the semantic model directly from the .bim (always: relationships, sort-by and
+    # hierarchy columns come from here, even when Tabular Editor provides the TSV)
+    bim_path = os.path.join(_BIM_[1], f"{_BIM_[0]}.bim")
+    try:
+        model = read_model(bim_path)
+    except (OSError, ValueError, NotImplementedError) as e:
+        return f"Could not read the model file {bim_path}: {e}"
+
+    # Optionally use Tabular Editor's TSV export instead (formats DAX via daxformatter.com)
     tsv_path = Path(os.path.join(cwd_save, "documentation.tsv"))
-    if not tsv_path.is_file():
-        if gen_tsv() == "NoTabEd":
+    if USE_TABULAR_EDITOR and not tsv_path.is_file():
+        tsv_result = gen_tsv()
+        if tsv_result == "NoTabEd":
             return "NoTabEd"
+        if tsv_result == "TSVTimeout":
+            return "Tabular Editor did not generate documentation.tsv in time, please retry."
 
     excel_file = cwd_save + "\\" + SAVE_NAME + ".xlsx"
 
@@ -1044,7 +1088,13 @@ def run_cmd():
     [report_filters.append(sublist) for sublist in rep_ex.filters if sublist not in report_filters]
 
     report_filters_string = [
-        [sublist[0], sublist[1], sublist[2], f"{sublist[3]}[{sublist[4]}]", " ".join(sublist[5:])]
+        [
+            sublist[0],
+            sublist[1],
+            sublist[2],
+            f"{sublist[3]}[{sublist[4]}]",
+            " ".join(sublist[5:]).strip(),
+        ]
         for sublist in report_filters
     ]
 
@@ -1076,7 +1126,6 @@ def run_cmd():
     # Define lists for future calculations
     unused_columns = []
     all_tables = []
-    all_relationships = []
     all_hierarchies = []
     all_visuals = []
 
@@ -1096,29 +1145,15 @@ def run_cmd():
         unique_pages_index[page_index] += 1
 
     # ========================================================================
-    # SECTION 4: PROCESS TSV FILE FROM TABULAR EDITOR
+    # SECTION 4: PROCESS MODEL OBJECTS (from the .bim, or Tabular Editor's TSV)
     # ========================================================================
 
-    dataset = pd.read_csv(
-        f"{cwd_save}\\documentation.tsv",
-        sep="\t",
-        header=0,
-    )
-    excel_file = cwd_save + "\\" + SAVE_NAME + ".xlsx"
+    if USE_TABULAR_EDITOR:
+        dataset = pd.read_csv(tsv_path, sep="\t", header=0)
+    else:
+        dataset = model_to_dataset(model)
 
-    # Extract all Table names
-    tab_rel_pattern = (
-        r"^Relationship\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-    )
-    for i in range(len(dataset)):
-        data_type, table_name, column_name = parse_tsv_object_name(dataset.iloc[i]["Object"])
-        if data_type == "Table":
-            rel_pattern = re.match(tab_rel_pattern, table_name)
-            if rel_pattern is not None and rel_pattern not in all_relationships:
-                all_relationships.append(dataset.iloc[i]["Name"])
-
-            elif table_name not in all_tables and "Relationship." not in table_name:
-                all_tables.append(table_name)
+    all_tables = [table.name for table in model.tables]
 
     # Remove excess " ' " surrounding table names
     escape_pattern = r"'(?:\s*)(" + "|".join(map(re.escape, all_tables)) + r")(?:\s*)'"
@@ -1214,36 +1249,34 @@ def run_cmd():
     # SECTION 5: BUILD RELATIONSHIPS AND GENERATE GRAPH
     # ========================================================================
 
-    data = {
-        "Type": [],
-        "Child": [],
-        "Direction": [],
-        "Parent": [],
-    }
-
-    df_relations = pd.DataFrame(data)
-    for row in sorted(all_relationships):
-        i1 = row.find("]") + 1
-        i2 = row.find(">") + 2
-        t1 = row[:i1].replace("'", "")
-        t2 = row[i2:].replace("'", "")
-        rel = row[i1 + 1 : i2 - 1]
-
-        relation = "Unknown Type"
-        if rel == "-->":
-            relation = "One Way"
-        if rel == "<-->":
-            relation = "Two Way"
-
-        new_data_rel = {
-            "Type": "Relationship",
-            "Child": t1.split("[")[0],
-            "Direction": relation,
-            "Parent": t2.split("[")[0],
-        }
-        df_relations.loc[-1] = new_data_rel
-        df_relations.index = df_relations.index + 1
-    df_relations = df_relations.sort_index()
+    # Child = "from" (usually many) side, Parent = "to" (usually one) side
+    df_relations = pd.DataFrame(
+        [
+            {
+                "Type": "Relationship",
+                "Child": rel.from_table,
+                "Direction": rel.direction_label,
+                "Parent": rel.to_table,
+                "Child Column": rel.from_column,
+                "Parent Column": rel.to_column,
+                "Cardinality": rel.cardinality_label,
+                "Active": "Yes" if rel.is_active else "No",
+            }
+            for rel in sorted(model.relationships, key=lambda r: r.te_name)
+        ],
+        columns=[
+            "Type",
+            "Child",
+            "Direction",
+            "Parent",
+            "Child Column",
+            "Parent Column",
+            "Cardinality",
+            "Active",
+        ],
+    )
+    # Relationship graph goes to the right of the relationship columns
+    graph_cell = xl_rowcol_to_cell(0, len(df_relations.columns) + 1)
 
     def generate_graph(df_relations: pd.DataFrame, w: int, h: int):
         G = nx.DiGraph()
@@ -1315,6 +1348,10 @@ def run_cmd():
     # SECTION 6: IDENTIFY UNUSED COLUMNS
     # ========================================================================
 
+    # Relationship keys, sort-by and hierarchy level columns are used by the model itself
+    structurally_used = model.structurally_used_columns()
+    unused_columns = [col for col in unused_columns if col not in structurally_used]
+
     # Remove Cols/Measures from 'unused_columns' that are used in visuals
     for row in report_info.iloc():
         used_columns = (row["Table"], row["Name"])
@@ -1335,7 +1372,8 @@ def run_cmd():
         os.remove(excel_file)
 
     workbook = xlsxwriter.Workbook(excel_file)
-    worksheet = workbook.add_worksheet(f"{_PBIX_[0]} Common")
+    used_sheet_names = set()
+    worksheet = workbook.add_worksheet(excel_sheet_name(f"{_PBIX_[0]} Common", used_sheet_names))
 
     # Add column formatting.
     def_format = workbook.add_format({"align": "top", "text_wrap": True})
@@ -1368,7 +1406,7 @@ def run_cmd():
     row_num = 1
     if num_relations > 0:
         col = 0
-        for name, value in new_data_rel.items():
+        for name in df_relations.columns:
             worksheet.write(0, col, name, formats["bi"])
             col += 1
 
@@ -1376,7 +1414,7 @@ def run_cmd():
         for _, row in df_relations.iterrows():
             if print_graph:
                 worksheet.insert_image(
-                    "E1",
+                    graph_cell,
                     os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png"),
                     {"x_scale": 1, "y_scale": 1},
                 )
@@ -1415,16 +1453,13 @@ def run_cmd():
             if column in unused_columns:
                 unused_columns.remove(column)
 
-        for measure in measures:
-            for col_unused in unused_columns:
-                if measure[1:-1] == col_unused[1]:
-                    unused_columns.remove(col_unused)
+        # Rebuild instead of removing while iterating (which skipped elements)
+        referenced_names = {measure[1:-1] for measure in measures}
+        unused_columns[:] = [col for col in unused_columns if col[1] not in referenced_names]
 
         if row["Type"] == "Measure":
-            for col_unused in unused_columns:
-                name = (row["Table"], row["Name"])
-                if name == col_unused:
-                    unused_columns.remove(name)
+            name = (row["Table"], row["Name"])
+            unused_columns[:] = [col for col in unused_columns if col != name]
 
         formated_text = v_definition.replace("\t", " XXX ")
         formated_text = formated_text.replace("\r\n", " YYY ")
@@ -1532,8 +1567,7 @@ def run_cmd():
 
     # Create a tab per report page with visual info.
     for report_name in report_info["Page"].unique().tolist():
-        save_report_name = report_name.replace("/", "_")
-        worksheet_x = workbook.add_worksheet(save_report_name)
+        worksheet_x = workbook.add_worksheet(excel_sheet_name(report_name, used_sheet_names))
 
         worksheet_x.set_column(0, 6, 30, def_format)
         worksheet_x.set_column(2, 2, 50, def_format)
@@ -1660,15 +1694,17 @@ def run_cmd():
 
             elif row["Item Type"] in ["Button", "Group"]:
                 rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                display_name = (
-                    str(rrow["Display Name"])
-                    if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
-                    else rrow["Name"]
-                )
+                target, label = button_target_and_label(rrow)
                 worksheet_x.write(row_num, 0, row["Item Type"])
                 worksheet_x.write(row_num, 1, row["Visual Type"])
                 worksheet_x.write(row_num, 2, row["ID"])
-                worksheet_x.write(row_num, 3, display_name)
+                if row["Item Type"] == "Button":
+                    description = f"{rrow['Type']}: {target}" if target else rrow["Type"]
+                    if label:
+                        description += f" ({label})"
+                else:
+                    description = target
+                worksheet_x.write(row_num, 3, description)
                 if len(filter_array) != 0:
                     write_to_excel(worksheet_x, row_num, 4, filter_array)
                 row_num += 1
@@ -1688,7 +1724,7 @@ def run_cmd():
                     continue
 
     # Create consolidated "Pages" tab with all pages combined
-    worksheet_pages = workbook.add_worksheet("Pages")
+    worksheet_pages = workbook.add_worksheet(excel_sheet_name("Pages", used_sheet_names))
     worksheet_pages.set_column(0, 9, 30, def_format)
     worksheet_pages.set_column(3, 3, 50, def_format)
     worksheet_pages.set_column(4, 4, 20, def_format)
@@ -1816,17 +1852,14 @@ def run_cmd():
 
             elif row["Item Type"] in ["Button", "Group"]:
                 rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                display_name = (
-                    str(rrow["Display Name"])
-                    if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
-                    else rrow["Name"]
-                )
+                target, label = button_target_and_label(rrow)
                 worksheet_pages.write(row_num, 0, report_name)
                 worksheet_pages.write(row_num, 1, row["Item Type"])
                 worksheet_pages.write(row_num, 2, row["Visual Type"])
                 worksheet_pages.write(row_num, 3, row["ID"])
                 worksheet_pages.write(row_num, 4, rrow["Type"])
-                worksheet_pages.write(row_num, 5, display_name)
+                worksheet_pages.write(row_num, 5, target)
+                worksheet_pages.write(row_num, 6, label)
                 if len(filter_array) != 0:
                     write_to_excel(worksheet_pages, row_num, 7, filter_array)
                 row_num += 1
@@ -2032,17 +2065,14 @@ def run_cmd():
 
             elif row["Item Type"] in ["Button", "Group"]:
                 rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                display_name = (
-                    str(rrow["Display Name"])
-                    if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
-                    else rrow["Name"]
-                )
+                target, label = button_target_and_label(rrow)
                 worksheet_pages_data.write(row_num, 0, report_name)
                 worksheet_pages_data.write(row_num, 1, row["Item Type"])
                 worksheet_pages_data.write(row_num, 2, row["Visual Type"])
                 worksheet_pages_data.write(row_num, 3, row["ID"])
                 worksheet_pages_data.write(row_num, 4, rrow["Type"])
-                worksheet_pages_data.write(row_num, 5, display_name)
+                worksheet_pages_data.write(row_num, 5, target)
+                worksheet_pages_data.write(row_num, 6, label)
                 if len(filter_array) != 0:
                     write_to_excel(worksheet_pages_data, row_num, 7, filter_array)
                 row_num += 1
@@ -2179,11 +2209,11 @@ def run_cmd():
 
     # Tab 3: "relationships"
     worksheet_relationships = workbook_data.add_worksheet("relationships")
-    worksheet_relationships.set_column(0, 3, 30, wrap_format_data)
+    worksheet_relationships.set_column(0, len(df_relations.columns) - 1, 25, wrap_format_data)
 
     if num_relations > 0:
         col = 0
-        for name, value in new_data_rel.items():
+        for name in df_relations.columns:
             worksheet_relationships.write(0, col, name, formats_data["bi"])
             col += 1
 
@@ -2192,7 +2222,7 @@ def run_cmd():
         for _, row in df_relations.iterrows():
             if print_graph:
                 worksheet_relationships.insert_image(
-                    "E1",
+                    graph_cell,
                     os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png"),
                     {"x_scale": 1, "y_scale": 1},
                 )
