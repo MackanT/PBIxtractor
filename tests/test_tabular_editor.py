@@ -11,7 +11,7 @@ from pbixtractor.tabular_editor import (
     export_dependencies,
     find_tabular_editor,
     load_bpa_rules,
-    parse_bpa_output,
+    parse_bpa_results,
     parse_dependencies,
     run_best_practice_analyzer,
 )
@@ -21,19 +21,16 @@ from .test_semantic_model import BIM
 FLOAT_RULE = "[Performance] Do not use floating point data types"
 FK_RULE = "[Formatting] Hide foreign keys"
 
-TE_OUTPUT = f"""
-Tabular Editor 2.29.0 (build 2.29.9750.30716)
---------------------------------
-Loading model...
-Running Best Practice Analyzer...
-=================================
-Column 'Sales'[Amount] violates rule "{FLOAT_RULE}"
-Column 'Sales'[Date Key] violates rule "{FK_RULE}"
-Column 'Sales'[Region Key] violates rule "{FK_RULE}"
-Partition (M - Import) Sales-1234 violates rule "[Performance] Minimize Power Query transformations"
-Model violates rule "Some custom rule"
-=================================
-"""
+# TSV written by the BPA script (RuleName, ObjectType, ObjectName, Error)
+BPA_TSV = (
+    "RuleName\tObjectType\tObjectName\tError\n"
+    f"{FLOAT_RULE}\tColumn\t'Sales'[Amount]\t\n"
+    f"{FK_RULE}\tColumn\t'Sales'[Date Key]\t\n"
+    f"{FK_RULE}\tColumn\t'Sales'[Region Key]\t\n"
+    "[Performance] Minimize Power Query transformations\tPartition (M - Import)\tSales-1234\t\n"
+    "Some custom rule\tModel\tModel\t\n"
+    "Broken rule\t\t\tSyntax error in expression\n"
+)
 
 
 @pytest.fixture(scope="module")
@@ -47,9 +44,10 @@ def test_bundled_rules_load(rules):
     assert rules[FLOAT_RULE]["Category"] == "Performance"
 
 
-def test_parse_bpa_output(rules):
-    violations = parse_bpa_output(TE_OUTPUT, rules)
+def test_parse_bpa_results(rules):
+    violations, errors = parse_bpa_results(BPA_TSV, rules)
     assert len(violations) == 5
+    assert errors == ["Broken rule: Syntax error in expression"]
 
     by_object = {v.object_name: v for v in violations}
     amount = by_object["'Sales'[Amount]"]
@@ -59,14 +57,12 @@ def test_parse_bpa_output(rules):
         "Performance",
     )
     assert amount.severity in ("Low", "Medium", "High")
-
-    partition = by_object["Sales-1234"]
-    assert partition.object_type == "Partition (M - Import)"
+    assert by_object["Sales-1234"].object_type == "Partition (M - Import)"
 
     # Rules not in the rules file are kept, without category/severity, and sort last
     custom = violations[-1]
     assert (custom.object_type, custom.object_name, custom.rule) == (
-        "",
+        "Model",
         "Model",
         "Some custom rule",
     )
@@ -74,7 +70,7 @@ def test_parse_bpa_output(rules):
 
 
 def test_bpa_summary_counts_findings_per_rule(rules):
-    rows = bpa_summary_rows(parse_bpa_output(TE_OUTPUT, rules))
+    rows = bpa_summary_rows(parse_bpa_results(BPA_TSV, rules)[0])
     counts = {row[2]: row[3] for row in rows}
     assert counts[FK_RULE] == 2
     assert counts[FLOAT_RULE] == 1
@@ -95,7 +91,8 @@ def test_run_best_practice_analyzer_on_sample_model(tmp_path):
     bim = tmp_path / "Model.bim"
     bim.write_text(json.dumps({**BIM, "compatibilityLevel": 1604}), encoding="utf-8")
 
-    violations = run_best_practice_analyzer(find_tabular_editor(), bim)
+    violations, errors = run_best_practice_analyzer(find_tabular_editor(), bim)
+    assert errors == []
     found = {(v.object_type, v.object_name, v.rule) for v in violations}
 
     # The sample's decimal -> integer many-to-many relationship is deliberately bad
@@ -114,7 +111,7 @@ def test_run_best_practice_analyzer_reports_load_errors(tmp_path):
         pytest.skip("Tabular Editor 2 not installed")
     bim = tmp_path / "Broken.bim"
     bim.write_text("{not json", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="could not analyse"):
+    with pytest.raises(RuntimeError, match="script failed"):
         run_best_practice_analyzer(find_tabular_editor(), bim)
 
 

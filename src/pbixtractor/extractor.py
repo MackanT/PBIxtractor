@@ -907,7 +907,12 @@ def _tabular_editor_analysis(model, bim_path: str, report_path: str):
         return bpa_violations, exact_dependencies, live_statistics
 
     try:
-        bpa_violations = run_best_practice_analyzer(tabular_editor, bim_path)
+        bpa_violations, rule_errors = run_best_practice_analyzer(tabular_editor, bim_path)
+        if rule_errors:
+            logger.warning(
+                f"{len(rule_errors)} Best Practice Analyzer rule(s) could not be evaluated: "
+                + "; ".join(error[:150] for error in rule_errors[:5])
+            )
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
         logger.warning(f"Best Practice Analyzer failed: {e}")
     try:

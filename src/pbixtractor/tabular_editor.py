@@ -12,7 +12,6 @@ import ctypes
 import io
 import json
 import os
-import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -31,11 +30,6 @@ DEFAULT_SEARCH_DIRS = [Path(r"C:\Program Files"), Path(r"C:\Program Files (x86)"
 
 # Rule severity as used in the BPA rules file
 SEVERITIES = {1: "Low", 2: "Medium", 3: "High"}
-
-# "Column 'Sales'[Amount] violates rule "[Performance] Do not use floating point data types""
-_VIOLATION = re.compile(r'^(?P<object>.+?) violates rule "(?P<rule>.+)"\s*$')
-# Object type is the first word, optionally followed by "(...)", e.g. "Partition (M - Import)"
-_OBJECT = re.compile(r"^(?P<type>\w+(?: \([^)]*\))?) (?P<name>.+)$")
 
 
 def find_tabular_editor(locations_file: Optional[Path] = None) -> Optional[Path]:
@@ -91,38 +85,26 @@ def load_bpa_rules(rules_path: Path = DEFAULT_BPA_RULES) -> dict[str, dict]:
     return {rule["Name"]: rule for rule in rules}
 
 
-def parse_bpa_output(output: str, rules: dict[str, dict]) -> list[BpaViolation]:
-    """
-    Parse Tabular Editor's "-A" console output.
+# Tabular Editor C# script: run the Best Practice Analyzer and write every finding to a TSV.
+# (The "-A" console output is not used: it is truncated unpredictably for larger models.)
+_BPA_SCRIPT = r"""
+Func<string, string> clean = s => (s ?? "").Replace("\t", " ").Replace("\r", " ").Replace("\n", " ");
+var rules = Newtonsoft.Json.JsonConvert.DeserializeObject<List<TabularEditor.BestPracticeAnalyzer.BestPracticeRule>>(
+    System.IO.File.ReadAllText(@"%RULES%"));
+var analyzer = new TabularEditor.BestPracticeAnalyzer.Analyzer();
+analyzer.SetModel(Model, null);
 
-    Args:
-        output: Console output of TabularEditor.exe <model> -A <rules>
-        rules: Rule definitions from load_bpa_rules()
-
-    Returns:
-        List of violations, most severe first
-    """
-    violations = []
-    for line in output.splitlines():
-        match = _VIOLATION.match(line.strip())
-        if not match:
-            continue
-        obj = _OBJECT.match(match["object"])
-        object_type, object_name = (obj["type"], obj["name"]) if obj else ("", match["object"])
-        rule = rules.get(match["rule"], {})
-        violations.append(
-            BpaViolation(
-                object_type=object_type,
-                object_name=object_name,
-                rule=match["rule"],
-                category=rule.get("Category", ""),
-                severity=SEVERITIES.get(rule.get("Severity"), ""),
-                description=rule.get("Description", ""),
-            )
-        )
-
-    order = {"High": 0, "Medium": 1, "Low": 2}
-    return sorted(violations, key=lambda v: (order.get(v.severity, 3), v.category, v.rule))
+var sb = new System.Text.StringBuilder("RuleName\tObjectType\tObjectName\tError\n");
+foreach (var result in analyzer.Analyze(rules))
+{
+    if (result.Ignored) continue;
+    if (result.RuleHasError)
+        sb.AppendLine(clean(result.RuleName) + "\t\t\t" + clean(result.RuleError));
+    else if (result.Object != null)
+        sb.AppendLine(clean(result.RuleName) + "\t" + clean(result.ObjectType) + "\t" + clean(result.ObjectName) + "\t");
+}
+SaveFile(System.IO.Path.Combine(@"%FOLDER%", "bpa.tsv"), sb.ToString());
+"""
 
 
 def _console_encoding() -> str:
@@ -133,9 +115,76 @@ def _console_encoding() -> str:
         return "utf-8"
 
 
+def run_script(exe: Path, target: list[str], script: str, timeout: int = 300) -> dict[str, str]:
+    """
+    Run a Tabular Editor C# script and collect the files it writes.
+
+    Args:
+        exe: TabularEditor.exe
+        target: Model to load, e.g. ["Model.bim"] or ["localhost:53162", ""]
+        script: C# script; "%FOLDER%" is replaced by a temporary output folder
+        timeout: Seconds before giving up
+
+    Returns:
+        Output file stem -> content, for every file the script saved (.tsv/.txt/.error)
+
+    Raises:
+        RuntimeError: If the script produced no output (model failed to load, script error)
+        subprocess.TimeoutExpired: If it takes longer than timeout
+    """
+    with tempfile.TemporaryDirectory(prefix="pbixtractor_") as folder:
+        script_path = Path(folder) / "script.cs"
+        script_path.write_text(script.replace("%FOLDER%", folder), encoding="utf-8")
+        process = subprocess.run(
+            [str(exe), *target, "-S", str(script_path)], capture_output=True, timeout=timeout
+        )
+        outputs = {
+            path.name: path.read_bytes().decode("utf-8-sig", errors="replace")
+            for path in Path(folder).iterdir()
+            if path.name != "script.cs"
+        }
+        if not outputs:
+            log = (process.stdout + process.stderr).decode(_console_encoding(), errors="replace")
+            raise RuntimeError(f"Tabular Editor script failed on {target[0]}: {log.strip()[-500:]}")
+        return outputs
+
+
+def parse_bpa_results(tsv: str, rules: dict[str, dict]) -> tuple[list[BpaViolation], list[str]]:
+    """
+    Parse the TSV written by the BPA script.
+
+    Args:
+        tsv: Script output (RuleName, ObjectType, ObjectName, Error)
+        rules: Rule definitions from load_bpa_rules()
+
+    Returns:
+        (violations most severe first, messages for rules that could not be evaluated)
+    """
+    violations, errors = [], []
+    for row in csv.DictReader(io.StringIO(tsv), delimiter="\t", quoting=csv.QUOTE_NONE):
+        if row["Error"]:
+            errors.append(f"{row['RuleName']}: {row['Error']}")
+            continue
+        rule = rules.get(row["RuleName"], {})
+        violations.append(
+            BpaViolation(
+                object_type=row["ObjectType"],
+                object_name=row["ObjectName"],
+                rule=row["RuleName"],
+                category=rule.get("Category", ""),
+                severity=SEVERITIES.get(rule.get("Severity"), ""),
+                description=rule.get("Description", ""),
+            )
+        )
+
+    order = {"High": 0, "Medium": 1, "Low": 2}
+    violations.sort(key=lambda v: (order.get(v.severity, 3), v.category, v.rule))
+    return violations, errors
+
+
 def run_best_practice_analyzer(
     exe: Path, bim_path: str | Path, rules_path: Path = DEFAULT_BPA_RULES, timeout: int = 300
-) -> list[BpaViolation]:
+) -> tuple[list[BpaViolation], list[str]]:
     """
     Run Tabular Editor's Best Practice Analyzer on a .bim file.
 
@@ -146,23 +195,18 @@ def run_best_practice_analyzer(
         timeout: Seconds before giving up
 
     Returns:
-        List of violations, most severe first
+        (violations most severe first, messages for rules that could not be evaluated)
 
     Raises:
-        RuntimeError: If Tabular Editor fails to load the model
+        RuntimeError: If Tabular Editor fails to load the model or run the analysis
         subprocess.TimeoutExpired: If it takes longer than timeout
     """
-    # Exit code is non-zero whenever violations are found, so it is not an error signal
-    process = subprocess.run(
-        [str(exe), str(bim_path), "-A", str(rules_path)],
-        capture_output=True,
-        timeout=timeout,
+    outputs = run_script(
+        exe, [str(bim_path)], _BPA_SCRIPT.replace("%RULES%", str(rules_path)), timeout
     )
-    output = process.stdout.decode(_console_encoding(), errors="replace")
-    if "Running Best Practice Analyzer" not in output:
-        error = process.stderr.decode(_console_encoding(), errors="replace") or output
-        raise RuntimeError(f"Tabular Editor could not analyse {bim_path}: {error.strip()[-500:]}")
-    return parse_bpa_output(output, load_bpa_rules(rules_path))
+    if "bpa.tsv" not in outputs:
+        raise RuntimeError(f"Best Practice Analyzer produced no results for {bim_path}")
+    return parse_bpa_results(outputs["bpa.tsv"], load_bpa_rules(rules_path))
 
 
 # ============================================================================
@@ -198,7 +242,7 @@ foreach (var source in sources)
             target.ObjectType.ToString(), clean(tableOf(target)), clean(target.Name) }));
     }
 }
-SaveFile(@"%OUTPUT%", sb.ToString());
+SaveFile(System.IO.Path.Combine(@"%FOLDER%", "dependencies.tsv"), sb.ToString());
 """
 
 
@@ -266,23 +310,10 @@ def export_dependencies(exe: Path, bim_path: str | Path, timeout: int = 300) -> 
         RuntimeError: If Tabular Editor fails to load the model or run the script
         subprocess.TimeoutExpired: If it takes longer than timeout
     """
-    with tempfile.TemporaryDirectory(prefix="pbixtractor_") as folder:
-        output = Path(folder) / "dependencies.tsv"
-        script = Path(folder) / "dependencies.cs"
-        script.write_text(_DEPENDENCY_SCRIPT.replace("%OUTPUT%", str(output)), encoding="utf-8")
-
-        process = subprocess.run(
-            [str(exe), str(bim_path), "-S", str(script)],
-            capture_output=True,
-            timeout=timeout,
-        )
-        if not output.is_file():
-            log = (process.stdout + process.stderr).decode(_console_encoding(), errors="replace")
-            raise RuntimeError(
-                f"Tabular Editor could not export dependencies from {bim_path}: "
-                f"{log.strip()[-500:]}"
-            )
-        return parse_dependencies(output.read_bytes().decode("utf-8-sig"))
+    outputs = run_script(exe, [str(bim_path)], _DEPENDENCY_SCRIPT, timeout)
+    if "dependencies.tsv" not in outputs:
+        raise RuntimeError(f"Tabular Editor could not export dependencies from {bim_path}")
+    return parse_dependencies(outputs["dependencies.tsv"])
 
 
 def drop_redundant_table_refs(dependencies: list[Dependency]) -> list[Dependency]:
