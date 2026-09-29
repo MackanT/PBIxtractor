@@ -13,14 +13,14 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
 ## Stack
 - Python ≥3.11, packaged with `uv` (src-layout, setuptools backend), version in
   `pyproject.toml` **and** `src/pbixtractor/__init__.py` (keep in sync)
-- NiceGUI (>=2.24, 3.x installed) web UI on http://localhost:8081 (`web_ui.py`, default);
-  DearPyGUI (+ tkinter file dialogs) legacy desktop UI behind `--ui`
+- NiceGUI (>=2.24, 3.x installed) web UI on http://localhost:8081 (`web_ui.py`, default).
+  The DearPyGUI desktop UI (extractor.py, --ui/--test) was removed on 2026-09-29.
 - pandas, xlsxwriter (rich-text cells), networkx + matplotlib (relationship PNG)
 - jsonpath-ng (`jsonpath_ng.ext`) for layout JSON queries, pydantic for row models
 - Optional: Tabular Editor 2 CLI (Windows-only), called via `subprocess`:
-  - Tabular Editor analysis (default on; `--no-tabular-editor`, legacy `RUN_TE_ANALYSIS`): Best Practice Analyzer (`-A`), exact DAX
+  - Tabular Editor analysis (default on; `--no-tabular-editor`): Best Practice Analyzer (`-A`), exact DAX
     dependencies (`-S` script using `DependsOn`) and live statistics — all local/offline.
-  - TSV export (default off; `--tabular-editor-tsv`, legacy `USE_TABULAR_EDITOR`): old `documentation.tsv` export; runs FormatDax, which
+  - TSV export (default off; `--tabular-editor-tsv`): old `documentation.tsv` export; runs FormatDax, which
     sends DAX to daxformatter.com.
 - `psycopg` is declared but unused (reserved for a future SQL-source feature)
 
@@ -32,8 +32,6 @@ OneDrive broke uv hardlinks and git reflog writes).
 uv run --frozen pbixtractor             # web UI (NiceGUI) on :8081, opens the browser
 uv run --frozen pbixtractor web --port 8090 --no-browser
 uv run --frozen pbixtractor extract "C:\...\Sales.pbix" [--model X.bim] [-o out] [--no-tabular-editor]
-uv run --frozen pbixtractor --ui        # legacy DearPyGUI UI
-uv run --frozen pbixtractor --test      # dev run; paths hardcoded in extractor.run_test_extraction()
 uv run --frozen --extra dev pytest -q   # tests (`--with pytest` does NOT work here: å in path)
 
 # Optional smoke test against a real report kept outside the repo (never commit client data)
@@ -50,9 +48,10 @@ Real test reports (local only, never commit):
 - `C:\Users\MarcusToftås\Downloads\Adventure Works DW 2020.pbix` + `Model.bim` (owner's dummy
   report, **PBIR format**; model has no measures; no buttons/bookmarks/groups yet).
   Full pipeline for it: `pbixtractor extract "...\Adventure Works DW 2020.pbix" --model
-  "...\Downloads\Model.bim"` (~12 s with Tabular Editor) — `--test` only knows the Invoices paths.
+  "...\Downloads\Model.bim"` (~12 s with Tabular Editor).
 Tabular Editor 2 is installed at `C:\Program Files (x86)\Tabular Editor\`
-(`tabular_editor.find_tabular_editor()`; extra folders in `Input/TabularEditorLocations.txt`).
+(`tabular_editor.find_tabular_editor()`; extra folders in `Input/TabularEditorLocations.txt`,
+written by `add_tabular_editor_location()` / the web UI's "Tabular Editor 2 folder" field).
 Power BI Desktop is the Microsoft Store version: workspaces under
 `%USERPROFILE%\Microsoft\Power BI Desktop Store App\AnalysisServicesWorkspaces`.
 
@@ -65,7 +64,7 @@ src/pbixtractor/
   cli.py            argparse: no command → web UI; `web [--port] [--no-browser]`;
                     `extract report [--model] [-o] [--name] [--no-tabular-editor]
                     [--tabular-editor-tsv] [--description-tag] [--no-log-file] [-q]`
-                    (exit 0 ok/warnings, 1 error, 2 no model); flags --ui (legacy), --test.
+                    (exit 0 ok/warnings, 1 error, 2 no model).
   pipeline.py       The orchestration, no globals: run_extraction(ExtractionOptions,
                     progress(step, fraction), on_log(level, msg)) → ExtractionResult(status
                     success|warnings|error, message, files {workbook, data_workbook, json,
@@ -86,11 +85,6 @@ src/pbixtractor/
                     Model quality (BPA per rule), Unused, Bookmarks, Log. start() =
                     register_routes() + ui.run(index, reload=False). Local tool: binds
                     127.0.0.1, no auth. Unmatched URLs get the root page (HTTP 200).
-  extractor.py      Legacy: DearPyGUI run_ui() + its globals (SAVE_NAME, _PBIX_=[stem, dir],
-                    _BIM_, LOG_DATA, USE_TABULAR_EDITOR, RUN_TE_ANALYSIS); run_cmd() maps them
-                    to ExtractionOptions and returns "Success"/"Log"/message; gen_tsv()
-                    (tabular_editor.export_documentation_tsv), run_test_extraction().
-                    Re-exports CONFIG/ReportExtractor/... for old imports.
   config.py         load_config() → Config(visual_mapper, supported_visual_types (derived:
                     standard_visuals + special_visuals), data_types, extract_types,
                     function_names). extract_type(visual_type): standard | button | skip.
@@ -161,7 +155,7 @@ src/pbixtractor/
   data/data.yaml    data_types (projection role → label), function_names (DAX highlight
                     list), visual_type_metadata (standard_visuals, special_visuals,
                     button_types), extract_types (visual type → standard/button/skip).
-  constants.py      DEFAULT_COLORS (mutated at runtime by the UI), UI_COLORS, REPORT_COLUMNS.
+  constants.py      DEFAULT_COLORS (DAX highlight colours), DESCRIPT_TAG, REPORT_COLUMNS.
   logger.py         setup_logger(capture=True) → LogCapture buffer; capture_logs(callback)
                     context manager (per run, used by the pipeline) + CallbackHandler.
   utils/__init__.py write_to_excel (rich strings), is_excel_open_with_file (psutil), etc.
@@ -239,16 +233,14 @@ src/pbixtractor/
 - Tooltip/drillthrough page detection is untested on real files (no sample uses them);
   legacy numeric pageBinding types are ignored on purpose. Bookmark captured filter/slicer
   state is not listed yet (only capture options and hidden visuals).
-- The "User Input" UI tab appends to `Input/*.csv`, which nothing reads any more (YAML config).
-  The measures-table combo (`defMeasTable`) is hidden and its value unused.
+- Old `Input/*.csv` files (from the removed DearPyGUI "User Input" tab) are not read; only
+  `Input/TabularEditorLocations.txt` is.
 - Text-matching dependency fallback order is set-based (not stable across runs). The data
   workbook's "dependencies" sheet headers (MeasureName, Dependent, ...) are unchanged on purpose
   (possible downstream consumers).
 - Windows-only: backslash path joins, PowerShell launch of TE2, Excel-open check.
 - Editing tip: shell heredocs/sed mangle backslash escapes (\t, \n) in Python/C# code —
   write patch scripts with the file tool instead. Files may have CRLF endings (autocrlf).
-- `extractor.py` is not black-formatted and has pre-existing ruff warnings; don't mass-reformat
-  it in a feature change (keeps diffs reviewable).
 
 ## Direction (agreed with owner, 2026-09-29)
 - Must support **both** report formats: classic `.pbix` (`Report/Layout`) and PBIP/PBIR
@@ -271,7 +263,7 @@ src/pbixtractor/
   registry, JSON writer done) → 3 report details (done 2026-09-29: page visibility/type,
   interactions, sync groups, hidden visuals, bookmarks sheet, report filters sheet) →
   4 HTML lineage viewer (done 2026-09-29; Excel cannot show it inline) → 5 pipeline + CLI +
-  NiceGUI web UI with the viewer embedded (done 2026-09-29; DearPyGUI kept behind --ui) →
+  NiceGUI web UI with the viewer embedded (done 2026-09-29; DearPyGUI removed) →
   1b DevOps/Fabric readers → 6 SQL/Fabric source lineage (sqlglot).
 
 ## Checking the HTML viewer
@@ -289,7 +281,7 @@ Output is deterministic (except the graph PNG layout; baseline refreshed 2026-09
 common-sheet fixes). Before a refactor, copy
 `output/Invoices_NEW/*.xlsx` and `output/AdventureWorks/*.xlsx` somewhere, re-run, and compare
 workbooks cell by cell incl. rich-text runs and resolved styles (a small zip/XML comparer was
-used for Step 2; `tests/test_documentation.py::test_run_cmd_end_to_end` and
+used for Step 2; `tests/test_documentation.py::test_workbooks_end_to_end` and
 `tests/test_pipeline.py` cover the pipeline and CLI on the sample data).
 
 ## Conventions

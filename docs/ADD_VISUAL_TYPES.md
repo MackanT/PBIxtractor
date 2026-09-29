@@ -127,7 +127,7 @@ special_visuals:
 After modifying `data.yaml`, run the extraction:
 
 ```powershell
-uv run pbixtractor --test
+uv run pbixtractor extract "C:\Reports\MyReport.pbix"
 ```
 
 If you see a warning like:

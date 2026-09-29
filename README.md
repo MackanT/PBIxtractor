@@ -69,8 +69,6 @@ pbixtractor extract --help
 Output (default `output\<report name>\`): `<name>.xlsx`, `<name>_data.xlsx`, `<name>.json`,
 `<name>_lineage.html` (offline lineage viewer) and `<name>_Relationships.png`.
 
-The old desktop UI is still available with `pbixtractor --ui`.
-
 ### From Python
 
 ```python
@@ -89,8 +87,9 @@ print(result.status, result.files)  # "success" | "warnings" | "error", {"workbo
 ## Requirements
 
 - **Python 3.11+**
-- **Tabular Editor 2** - Required for DAX extraction ([Download here](https://tabulareditor.com/))
-- Windows OS (for Tabular Editor integration)
+- Optional: **Tabular Editor 2** ([download](https://github.com/TabularEditor/TabularEditor/releases))
+  for the Best Practice Analyzer, exact DAX dependencies and live statistics (Windows). Found in
+  Program Files automatically; otherwise set its folder in the web UI.
 
 ## Project Structure
 
@@ -99,9 +98,12 @@ pbixtractor/
 ├── src/
 │   └── pbixtractor/          # Main package
 │       ├── __init__.py       # Package initialization
-│       ├── cli.py            # Command-line interface
-│       ├── extractor.py      # Core extraction logic
-│       └── data/             # Configuration CSV files
+│       ├── cli.py            # Command line (extract, web)
+│       ├── web_ui.py         # Web UI (NiceGUI)
+│       ├── pipeline.py       # run_extraction(): the whole documentation run
+│       ├── readers.py        # .pbix / PBIR / PBIP report readers
+│       ├── semantic_model.py # .bim model reader
+│       └── data/             # data.yaml (visual types, DAX functions), BPA rules
 ├── tests/                    # Test suite
 ├── docs/                     # Documentation
 ├── output/                   # Generated reports (gitignored)
@@ -110,11 +112,9 @@ pbixtractor/
 
 ## Configuration
 
-The tool uses CSV files in `src/pbixtractor/data/` for configuration:
-
-- **VisualTypes.csv** - Supported visual types
-- **DataTypes.csv** - Field type mappings (X-axis, Y-axis, etc.)
-- **FunctionNames.csv** - DAX functions for syntax highlighting
+Configuration lives in `src/pbixtractor/data/data.yaml`: supported visual types and how
+they are extracted, field role labels (X-axis, Values, ...) and the DAX function names used for
+syntax highlighting. See `docs/ADD_VISUAL_TYPES.md`.
 
 ## Development
 
@@ -176,10 +176,10 @@ Contributions welcome! Please:
 
 ## Support
 
-For issues and questions, please use the [GitHub Issues](https://github.com/yourusername/pbixtractor/issues) page.
+For issues and questions, please use the [GitHub Issues](https://github.com/MackanT/PBIxtractor/issues) page.
 
 ## Credits
 
 Created by Marcus Toftås
 
-Built with: pandas, xlsxwriter, matplotlib, networkx, DearPyGUI
+Built with: pandas, xlsxwriter, matplotlib, networkx, NiceGUI
