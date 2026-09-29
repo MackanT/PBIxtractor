@@ -6,15 +6,18 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import pbixtractor.extractor as extractor
+from pbixtractor.constants import REPORT_COLUMNS
 from pbixtractor.dax import highlight_dax, text_dependencies
 from pbixtractor.documentation import (
     OBJECT_COLUMNS,
     build_documentation,
     build_objects,
     parse_tsv_object_name,
+    resolve_hierarchy_columns,
 )
 from pbixtractor.semantic_model import model_to_dataset, parse_model
 from pbixtractor.tabular_editor import parse_dependencies
@@ -173,3 +176,18 @@ def test_run_cmd_end_to_end(tmp_path, monkeypatch):
         assert f'name="{sheet}"' in names
     assert "Sales[Dynamic]" in strings  # unused measure listed
     assert "Panel Open" in strings  # bookmark button target
+
+
+def test_resolve_hierarchy_columns(model):
+    report_info = pd.DataFrame(
+        [
+            # Level "Year" is backed by column "Year Number"; the report only knows the level
+            ["P", "slicer", "v1", "Dates", "Year", "Date Hierarchy: Year", "Hierarchy"],
+            ["P", "slicer", "v1", "Dates", "Month", "Date Hierarchy: Month", "Hierarchy"],
+            ["P", "tableEx", "v2", "Dates", "Year", None, "Values"],  # not a hierarchy row
+            ["P", "slicer", "v3", "Dates", "Week", "Unknown Hierarchy: Week", "Hierarchy"],
+        ],
+        columns=REPORT_COLUMNS,
+    )
+    resolved = resolve_hierarchy_columns(report_info, model)
+    assert list(resolved["Name"]) == ["Year Number", "Month", "Year", "Week"]

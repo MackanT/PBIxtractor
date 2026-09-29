@@ -474,6 +474,37 @@ def find_unused(
     )
 
 
+def resolve_hierarchy_columns(report_info: pd.DataFrame, model: SemanticModel) -> pd.DataFrame:
+    """
+    Replace hierarchy level names with the model column behind each level.
+
+    The report only knows the level (Display Name "Date Hierarchy: Year"); its queryRef is not
+    reliable either (sometimes the column, sometimes the level name). The model has the exact
+    level -> column mapping (e.g. level "Year" -> column "Year Number").
+
+    Args:
+        report_info: REPORT_COLUMNS rows; Hierarchy rows have Display Name "<hierarchy>: <level>"
+        model: Semantic model
+
+    Returns:
+        report_info with the Name of resolvable hierarchy rows set to the level's column
+    """
+    levels = {
+        (hierarchy.table, hierarchy.name, level.name): level.column
+        for hierarchy in model.all_hierarchies
+        for level in hierarchy.levels
+    }
+    for index, row in report_info.iterrows():
+        display_name = row["Display Name"]
+        if row["Type"] != "Hierarchy" or not isinstance(display_name, str):
+            continue
+        hierarchy, _, level = display_name.partition(": ")
+        column = levels.get((row["Table"], hierarchy, level))
+        if column:
+            report_info.at[index, "Name"] = column
+    return report_info
+
+
 def build_documentation(
     report_items: list[list],
     report_filters: list[list],
@@ -508,7 +539,9 @@ def build_documentation(
     Returns:
         Documentation
     """
-    report_info = pd.DataFrame(report_items, columns=REPORT_COLUMNS)
+    report_info = resolve_hierarchy_columns(
+        pd.DataFrame(report_items, columns=REPORT_COLUMNS), model
+    )
     unique, filter_strings = unique_filters(report_filters)
     objects = build_objects(dataset, [t.name for t in model.tables], report_name, description_tag)
     unused_columns, unused_measures = find_unused(
