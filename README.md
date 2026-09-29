@@ -43,33 +43,47 @@ pip install -e .
 
 ## Usage
 
-### Graphical Interface
+### Web interface
 
 ```powershell
-# Run the GUI
-pbixtractor --ui
+# Start the web UI on http://localhost:8081 (opens a browser tab)
+pbixtractor
 
-# Or using Python module syntax
-python -m pbixtractor --ui
+# Other port / no browser
+pbixtractor web --port 8090 --no-browser
 ```
+
+Pick a report (`.pbix`, `.pbip` or a `.Report` folder). The model (`<name>.bim` or the PBIP
+`<name>.SemanticModel`) is found automatically when it sits next to the report. After a run the
+page shows the lineage viewer inline, the Best Practice Analyzer findings, unused objects,
+bookmarks and download links for all output files. Everything runs locally.
+
+### Command line
+
+```powershell
+pbixtractor extract C:\Reports\Sales.pbix                  # model: Sales.bim next to it
+pbixtractor extract Sales.pbix --model Model.bim -o out\Sales --no-tabular-editor
+pbixtractor extract --help
+```
+
+Output (default `output\<report name>\`): `<name>.xlsx`, `<name>_data.xlsx`, `<name>.json`,
+`<name>_lineage.html` (offline lineage viewer) and `<name>_Relationships.png`.
+
+The old desktop UI is still available with `pbixtractor --ui`.
 
 ### From Python
 
 ```python
-from pbixtractor import ReportExtractor
+from pbixtractor.pipeline import ExtractionOptions, run_extraction
 
-# Create extractor instance
-extractor = ReportExtractor(
-    path="path/to/your/report",
-    name="MyReport.pbix"
+result = run_extraction(
+    ExtractionOptions(
+        report_path="C:/Reports/Sales.pbix",
+        model_path="C:/Reports/Sales.bim",
+        output_dir="output/Sales",
+    )
 )
-
-# Extract report metadata
-extractor.extract()
-
-# Access results
-print(extractor.result)  # Visual inventory
-print(extractor.filters)  # Filter definitions
+print(result.status, result.files)  # "success" | "warnings" | "error", {"workbook": Path, ...}
 ```
 
 ## Requirements

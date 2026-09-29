@@ -13,13 +13,14 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
 ## Stack
 - Python ≥3.11, packaged with `uv` (src-layout, setuptools backend), version in
   `pyproject.toml` **and** `src/pbixtractor/__init__.py` (keep in sync)
-- DearPyGUI (+ tkinter file dialogs) for the desktop UI
+- NiceGUI (>=2.24, 3.x installed) web UI on http://localhost:8081 (`web_ui.py`, default);
+  DearPyGUI (+ tkinter file dialogs) legacy desktop UI behind `--ui`
 - pandas, xlsxwriter (rich-text cells), networkx + matplotlib (relationship PNG)
 - jsonpath-ng (`jsonpath_ng.ext`) for layout JSON queries, pydantic for row models
 - Optional: Tabular Editor 2 CLI (Windows-only), called via `subprocess`:
-  - `RUN_TE_ANALYSIS` (default on, UI checkbox): Best Practice Analyzer (`-A`), exact DAX
+  - Tabular Editor analysis (default on; `--no-tabular-editor`, legacy `RUN_TE_ANALYSIS`): Best Practice Analyzer (`-A`), exact DAX
     dependencies (`-S` script using `DependsOn`) and live statistics — all local/offline.
-  - `USE_TABULAR_EDITOR` (default off): old `documentation.tsv` export; runs FormatDax, which
+  - TSV export (default off; `--tabular-editor-tsv`, legacy `USE_TABULAR_EDITOR`): old `documentation.tsv` export; runs FormatDax, which
     sends DAX to daxformatter.com.
 - `psycopg` is declared but unused (reserved for a future SQL-source feature)
 
@@ -28,22 +29,28 @@ Working clone: `C:\Users\MarcusToftås\Documents\PBIxtractor` (moved off OneDriv
 the old copy under `OneDrive…\Dokument\Other\PBI-Ixtractor\PBIxtractor` is no longer worked in —
 OneDrive broke uv hardlinks and git reflog writes).
 ```powershell
-uv run --frozen pbixtractor --ui        # GUI (default when no args)
+uv run --frozen pbixtractor             # web UI (NiceGUI) on :8081, opens the browser
+uv run --frozen pbixtractor web --port 8090 --no-browser
+uv run --frozen pbixtractor extract "C:\...\Sales.pbix" [--model X.bim] [-o out] [--no-tabular-editor]
+uv run --frozen pbixtractor --ui        # legacy DearPyGUI UI
 uv run --frozen pbixtractor --test      # dev run; paths hardcoded in extractor.run_test_extraction()
 uv run --frozen --extra dev pytest -q   # tests (`--with pytest` does NOT work here: å in path)
 
 # Optional smoke test against a real report kept outside the repo (never commit client data)
 $env:PBIXTRACTOR_SAMPLE_PBIX = "C:\...\Reports V1\Invoices.pbix"
 ```
-Output goes to `./output/<SAVE_NAME>/` (CWD-relative, gitignored). By default the model is read
+Output goes to `./output/<report name>/` (CWD-relative, gitignored) unless `-o` / the UI's output
+folder says otherwise. The model is auto-found next to the report (`find_model_for_report`:
+`<name>.bim`, `<name>.SemanticModel/model.bim`, `<name>.Dataset/model.bim`); `extract` exits 2
+when there is none. By default the model is read
 from the `.bim` on every run; a `documentation.tsv` is only used with `USE_TABULAR_EDITOR`.
 Real test reports (local only, never commit):
 - `…/_Arbete/Rowico/…/Reports V1/` (client data): `Invoices.pbix` + `Invoices.bim` (legacy
   Layout format; only one with a .bim) and 8 other legacy `.pbix` files.
 - `C:\Users\MarcusToftås\Downloads\Adventure Works DW 2020.pbix` + `Model.bim` (owner's dummy
   report, **PBIR format**; model has no measures; no buttons/bookmarks/groups yet).
-  Full pipeline for it: set `extractor._PBIX_`, `_BIM_` (`["Model", downloads]`), `SAVE_NAME`
-  and call `run_cmd()` — `--test` only knows the Invoices paths.
+  Full pipeline for it: `pbixtractor extract "...\Adventure Works DW 2020.pbix" --model
+  "...\Downloads\Model.bim"` (~12 s with Tabular Editor) — `--test` only knows the Invoices paths.
 Tabular Editor 2 is installed at `C:\Program Files (x86)\Tabular Editor\`
 (`tabular_editor.find_tabular_editor()`; extra folders in `Input/TabularEditorLocations.txt`).
 Power BI Desktop is the Microsoft Store version: workspaces under
@@ -55,22 +62,48 @@ reviews and commits everything. Compare against baselines by copying output else
 ## Architecture
 ```
 src/pbixtractor/
-  cli.py            argparse entry (--ui / --test / --version). No real headless mode yet.
-  extractor.py      ~1100 lines. CONFIG = config.load_config() (sys.exit on failure) →
-                    visual_mapper, visual_type_list, known_functions; globals (SAVE_NAME, _PBIX_=[stem, dir],
-                    _BIM_, LOG_DATA, DESCRIPT_TAG, USE_TABULAR_EDITOR, RUN_TE_ANALYSIS),
-                    ReportExtractor (readers.read_report → ReportContext + PageExtractor),
-                    run_ui() (DearPyGUI), gen_tsv() (TE2 TSV export), run_test_extraction(),
-                    _tabular_editor_analysis(), run_cmd() (~100-line orchestration:
-                    model → TE analysis → dataset → ReportExtractor → build_documentation →
-                    graph → write_main_workbook / write_data_workbook / write_json → logs).
+  cli.py            argparse: no command → web UI; `web [--port] [--no-browser]`;
+                    `extract report [--model] [-o] [--name] [--no-tabular-editor]
+                    [--tabular-editor-tsv] [--description-tag] [--no-log-file] [-q]`
+                    (exit 0 ok/warnings, 1 error, 2 no model); flags --ui (legacy), --test.
+  pipeline.py       The orchestration, no globals: run_extraction(ExtractionOptions,
+                    progress(step, fraction), on_log(level, msg)) → ExtractionResult(status
+                    success|warnings|error, message, files {workbook, data_workbook, json,
+                    lineage, graph[, tsv, log]}, logs, documentation, report_json, seconds).
+                    Steps: model → TE analysis (BPA, deps, live stats) → dataset →
+                    ReportExtractor → build_documentation → graph → workbooks → JSON + lineage.
+                    One run at a time (_RUN_LOCK: shared logger/TE/Excel); any captured log
+                    record → "warnings" (+ logs/log_data_*.txt). report_name(),
+                    find_model_for_report().
+  report_extractor.py CONFIG = config.load_config() (sys.exit on failure) → visual_mapper,
+                    visual_type_list, known_functions; ReportExtractor (readers.read_report →
+                    ReportContext + PageExtractor).
+  web_ui.py         NiceGUI app: index() root page (report/model/output inputs, server-side
+                    PathPicker dialog, options, TE/Desktop status) → run_extraction in
+                    run.io_bound; progress/log via a queue drained by ui.timer. Results:
+                    stat cards, download buttons, tabs Lineage (iframe of <name>_lineage.html
+                    served by /files/{token}/{name}; token → output folder, 404 outside it),
+                    Model quality (BPA per rule), Unused, Bookmarks, Log. start() =
+                    register_routes() + ui.run(index, reload=False). Local tool: binds
+                    127.0.0.1, no auth. Unmatched URLs get the root page (HTTP 200).
+  extractor.py      Legacy: DearPyGUI run_ui() + its globals (SAVE_NAME, _PBIX_=[stem, dir],
+                    _BIM_, LOG_DATA, USE_TABULAR_EDITOR, RUN_TE_ANALYSIS); run_cmd() maps them
+                    to ExtractionOptions and returns "Success"/"Log"/message; gen_tsv()
+                    (tabular_editor.export_documentation_tsv), run_test_extraction().
+                    Re-exports CONFIG/ReportExtractor/... for old imports.
   config.py         load_config() → Config(visual_mapper, supported_visual_types (derived:
                     standard_visuals + special_visuals), data_types, extract_types,
                     function_names). extract_type(visual_type): standard | button | skip.
   json_report.py    write_json() → <name>.json: report, model (incl. live stats), dependencies,
                     unused, quality, lineage {nodes, edges} (ids page:/visual:/table:/column:/
                     measure:/source:, edge types contains/uses/filters/depends_on/
-                    relationship/loads_from). Base for the Step 4 HTML graph.
+                    relationship/loads_from). Every page gets a node (also empty ones).
+  lineage_html.py   write_lineage_html(path, documentation_to_dict(...)) → <name>_lineage.html:
+                    one self-contained offline page (vanilla JS + SVG, data embedded as JSON,
+                    "</" escaped). Edges re-oriented to flow data → report (source → table →
+                    column → measure → visual → page); relationships left out. Layer per
+                    node (measures by dependency depth); in-browser layered layout with
+                    barycenter ordering; select → upstream/downstream; details panel.
   documentation.py  Analysis stage, no file output: build_documentation() → Documentation
                     (report_info, filter_strings, pages: {page: [PageItem]}, model, objects
                     [OBJECT_COLUMNS], relations, unused_columns/measures, exact deps, BPA,
@@ -99,6 +132,7 @@ src/pbixtractor/
                     export_dependencies() runs a C# script (DependsOn) →
                     Dependency rows (measures, calc columns/tables, RLS TablePermission);
                     drop_redundant_table_refs() removes 'T' when T[col] is also referenced.
+                    export_documentation_tsv() = the old TabularScript.cs TSV export.
   live_model.py     find_local_instances() (psutil: msmdsrv listening port + parent
                     PBIDesktop cmdline = .pbix path); collect_live_statistics() picks the
                     instance for the report (path match, else table-name Jaccard ≥ 0.8) and
@@ -128,8 +162,8 @@ src/pbixtractor/
                     list), visual_type_metadata (standard_visuals, special_visuals,
                     button_types), extract_types (visual type → standard/button/skip).
   constants.py      DEFAULT_COLORS (mutated at runtime by the UI), UI_COLORS, REPORT_COLUMNS.
-  logger.py         setup_logger(capture=True) → LogCapture buffer; any captured log line
-                    makes run_cmd() return "Log" instead of "Success".
+  logger.py         setup_logger(capture=True) → LogCapture buffer; capture_logs(callback)
+                    context manager (per run, used by the pipeline) + CallbackHandler.
   utils/__init__.py write_to_excel (rich strings), is_excel_open_with_file (psutil), etc.
 ```
 
@@ -169,7 +203,7 @@ src/pbixtractor/
    Hierarchy levels: the layout only has the level name (queryRef is unreliable: sometimes
    column, sometimes level). documentation.resolve_hierarchy_columns() maps level → column
    from the model (level "Year" → column "Year Number").
-3. `run_cmd()` always reads the model with `read_model(_BIM_)`. The measures/columns
+3. `run_extraction()` always reads the model with `read_model(model_path)`. The measures/columns
    dataset comes from `model_to_dataset(model)`, or from `documentation.tsv` when
    `USE_TABULAR_EDITOR` (columns: Object, Name, Description, SourceColumn, Expression,
    FormatString, DataType, DisplayFolder; Object names `Model.T.<Table>`, `.C.<Col>`, `.M.`,
@@ -232,15 +266,26 @@ src/pbixtractor/
   excel_report.py / dax.py / relationship_graph.py, config.py + extract_types handler
   registry, JSON writer done) → 3 report details (done 2026-09-29: page visibility/type,
   interactions, sync groups, hidden visuals, bookmarks sheet, report filters sheet) →
-  3 buttons/bookmarks/filters complete → 1b DevOps/Fabric readers → 4 HTML lineage graph →
-  5 CLI + NiceGUI UI → 6 SQL/Fabric source lineage (sqlglot).
+  4 HTML lineage viewer (done 2026-09-29; Excel cannot show it inline) → 5 pipeline + CLI +
+  NiceGUI web UI with the viewer embedded (done 2026-09-29; DearPyGUI kept behind --ui) →
+  1b DevOps/Fabric readers → 6 SQL/Fabric source lineage (sqlglot).
+
+## Checking the HTML viewer
+No Node.js here, but headless Edge works (run from PowerShell; bash paths fail):
+`msedge.exe --headless=new --disable-gpu --user-data-dir=<tmp> --window-size=1600,900
+--virtual-time-budget=5000 --screenshot=<png> file:///<html>` — then view the PNG.
+The web UI can be shot the same way at `http://127.0.0.1:<port>/` (start it with
+`pbixtractor web --no-browser`); a "Connection lost" toast in the shot is headless virtual time,
+not a bug. Clicking is not possible there: result views were checked with a scratch script that
+calls `web_ui._render_result()` from a root page. Automated UI tests use NiceGUI's
+`user_simulation(web_ui.index)` inside `asyncio.run` (tests/test_web_ui.py; no pytest-asyncio).
 
 ## Refactoring safety net
 Output is deterministic (except the graph PNG layout). Before a refactor, copy
 `output/Invoices_NEW/*.xlsx` and `output/AdventureWorks/*.xlsx` somewhere, re-run, and compare
 workbooks cell by cell incl. rich-text runs and resolved styles (a small zip/XML comparer was
-used for Step 2; `tests/test_documentation.py::test_run_cmd_end_to_end` covers the pipeline on
-the sample data).
+used for Step 2; `tests/test_documentation.py::test_run_cmd_end_to_end` and
+`tests/test_pipeline.py` cover the pipeline and CLI on the sample data).
 
 ## Conventions
 - black/ruff, line length 100, py311 target. Google-style docstrings with Args/Returns.
