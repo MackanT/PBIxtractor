@@ -1,41 +1,38 @@
-"""Main extractor module for PBI-Ixtractor."""
+"""Legacy DearPyGUI UI and the global-state wrappers around the pipeline.
 
-import argparse
+The documentation logic lives in pipeline.py (run_extraction) and report_extractor.py.
+run_cmd() and run_test_extraction() keep the old global-variable interface for the
+DearPyGUI UI and `pbixtractor --test`.
+"""
+
 import logging
 import os
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
 # Local imports
-from .config import load_config
 from .constants import DEFAULT_COLORS, DESCRIPT_TAG, UI_COLORS
-from .data import DATA_DIR, YAML_FILE
+from .data import DATA_DIR
 from .dax import find_columns, find_functions, find_measures  # noqa: F401 (re-exported)
 from .documentation import (  # noqa: F401 (re-exported)
     build_documentation,
     button_target_and_label,
     parse_tsv_object_name,
 )
-from .excel_report import write_data_workbook, write_main_workbook
-from .json_report import documentation_to_dict, write_json_data
-from .lineage_html import write_lineage_html
-from .live_model import collect_live_statistics
-from .logger import get_logger, setup_logger
-from .relationship_graph import save_relationship_graph
-from .semantic_model import model_to_dataset, read_model
-from .tabular_editor import (
-    drop_redundant_table_refs,
-    export_dependencies,
-    find_tabular_editor,
-    run_best_practice_analyzer,
+from .logger import setup_logger
+from .pipeline import ExtractionOptions, run_extraction
+from .report_extractor import (  # noqa: F401 (re-exported)
+    CONFIG,
+    ReportExtractor,
+    known_functions,
+    visual_mapper,
+    visual_type_list,
 )
-from .utils import ensure_directory, is_excel_open_with_file
+from .tabular_editor import export_documentation_tsv, find_tabular_editor
 
 # Initialize logger
 logger, log_capture = setup_logger("pbixtractor", level=logging.INFO, capture=True)
@@ -52,144 +49,6 @@ RUN_TE_ANALYSIS = True
 SAVE_NAME = ""
 _PBIX_ = [None, None]
 _BIM_ = [None, None]
-
-
-# Load configuration from data/data.yaml
-try:
-    CONFIG = load_config()
-except (OSError, ValueError, KeyError, yaml.YAMLError) as e:
-    print(f"Error loading YAML configuration file: {YAML_FILE}")
-    print(f"Exception: {e}")
-    sys.exit(1)
-
-visual_mapper = CONFIG.visual_mapper
-visual_type_list = sorted(CONFIG.supported_visual_types)
-known_functions = CONFIG.function_names
-
-
-class ReportExtractor:
-    """Extracts visual and filter data from Power BI .pbix files."""
-
-    def __init__(self, path: str, name: str):
-        """
-        Initialize report extractor.
-
-        Args:
-            path: Directory path containing the .pbix file
-            name: Name of the .pbix file
-        """
-        self.path = path
-        self.name = name
-        self.result = []
-        self.filters = []
-        self.report = None  # readers.ReportDefinition after extract()
-        self.logger = get_logger("pbixtractor")
-
-        # Import modular extractors
-        from .extractors import PageExtractor
-
-        self.page_extractor = PageExtractor(config=CONFIG, logger=self.logger)
-
-    def add_item(
-        self,
-        page: str,
-        visual_type: str,
-        item_name: str,
-        table_name: str,
-        val_name: str,
-        disp_name: str,
-        data_type: str,
-    ) -> None:
-        """
-        Store extracted item data.
-
-        Args:
-            page: Page name
-            visual_type: Type of visual element
-            item_name: Visual item identifier
-            table_name: Table name
-            val_name: Value/field name
-            disp_name: Display name
-            data_type: Data type
-        """
-        self.result.append(
-            [
-                page,
-                visual_type,
-                item_name,
-                table_name,
-                val_name,
-                disp_name,
-                data_type,
-            ]
-        )
-
-    def add_filter(
-        self,
-        page: str,
-        item_name: str,
-        filter_type: str,
-        table_name: str,
-        val_name: str,
-        operator: str,
-        value: str,
-    ) -> None:
-        """
-        Store extracted filter data.
-
-        Args:
-            page: Page name
-            item_name: Visual item identifier
-            filter_type: Type of filter
-            table_name: Table name
-            val_name: Field name
-            operator: Filter operator
-            value: Filter value
-        """
-        self.filters.append(
-            [
-                page,
-                item_name,
-                filter_type,
-                table_name,
-                val_name,
-                operator,
-                value,
-            ]
-        )
-
-    def extract(self) -> None:
-        """
-        Extract all data from the Power BI report.
-
-        This method:
-        1. Reads the report (legacy Layout or PBIR; .pbix, .pbip or .Report folder)
-           into a normalised ReportDefinition (see readers.py)
-        2. Extracts report-level filters and each page using PageExtractor
-        """
-        from .extractors import ReportContext
-        from .readers import read_report
-
-        report = self.report = read_report(os.path.join(self.path, self.name), self.logger)
-        self.logger.debug(f"Read {self.name} ({report.format} format)")
-        context = ReportContext.from_report(report)
-
-        # Report-level filters (apply to all pages)
-        for filter_obj in self.page_extractor.filter_extractor.extract_filters(
-            report.filters, "", "All Pages"
-        ):
-            self.filters.append(filter_obj.to_list())
-
-        # Extract data from each page using PageExtractor
-        for page in report.pages:
-            items, filters = self.page_extractor.extract(page, context)
-
-            # Convert Pydantic models to legacy list format
-            for item in items:
-                self.result.append(item.to_list())
-
-            for filter_obj in filters:
-                self.filters.append(filter_obj.to_list())
 
 
 def run_ui():
@@ -295,10 +154,10 @@ def run_ui():
                     "Could Not Find Tabular Editor 2 on PC. Please add location in Input/TabularEditorLocations.txt",
                     "R",
                 )
-            elif tsv_result == "TSVTimeout":
+            elif tsv_result == "TSVFailed":
                 show_and_hide(
                     "tsvTextExtra",
-                    "Tabular Editor did not generate the TSV file in time, please retry.",
+                    "Tabular Editor could not generate the TSV file, see the Logs section.",
                     "R",
                 )
             else:
@@ -741,78 +600,27 @@ def run_ui():
 
 
 def gen_tsv(force: bool = False):
-    # Use output directory instead of current directory
-    output_dir = os.path.join(os.getcwd(), "output")
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    cwd = os.path.join(output_dir, SAVE_NAME)
-
-    if not os.path.exists(cwd):
-        os.makedirs(cwd)
-
-    tab_edit_exe = find_tabular_editor()
-    if tab_edit_exe is None:
-        return "NoTabEd"
-    tab_edit_path = f'"{tab_edit_exe}"'
-
-    if force and os.path.exists(f"{cwd}\\TabularScript.cs"):
-        os.remove(f"{cwd}\\TabularScript.cs")
-
-    ## If file not present, create it!
-    if not os.path.isfile(f"{cwd}\\TabularScript.cs"):
-        cwd_parsed = cwd.replace("\\", "//")
-
-        c_code = f"""
-    // Auto Formatting
-    Model.AllMeasures.FormatDax();
-
-    // Construct a list of objects:
-    var objects = new List<TabularNamedObject>();
-    objects.AddRange(Model.Tables);
-    objects.AddRange(Model.AllColumns);
-    objects.AddRange(Model.AllHierarchies);
-    objects.AddRange(Model.AllLevels);
-    objects.AddRange(Model.AllMeasures);
-    objects.AddRange(Model.Relationships);
-    objects.AddRange(Model.AllPartitions);
-
-
-    // Get their properties in TSV format (tabulator-separated):
-    var tsv = ExportProperties(objects,"Name,Description,SourceColumn,Expression,FormatString,DataType,DisplayFolder"); // Updated to include FormatString + DisplayFolder
-    //var tsv = ExportProperties(objects);
-
-    // Save the TSV to a file:
-    SaveFile("{cwd_parsed}//documentation.tsv", tsv);
     """
-        with open(f"{cwd}\\TabularScript.cs", "w", encoding="utf-8") as file:
-            file.write(c_code)
+    Export output/<SAVE_NAME>/documentation.tsv with Tabular Editor (UI "Regenerate tsv").
 
-    tsv_path = Path(f"{cwd}\\documentation.tsv")
+    Formats DAX via daxformatter.com first, as the original TabularScript.cs did.
 
-    if os.path.exists(tsv_path):
-        os.remove(tsv_path)
-
-    command = f'& {tab_edit_path} "{_BIM_[1]}/{_BIM_[0]}.bim" -S "{cwd}\\TabularScript.cs"'
-    process = subprocess.Popen(["powershell", "-Command", command])
-    process.wait()
-
-    ## Wait for file gen -
-    def wait_for_file(file_path: str, timeout: int = None):
-        """
-        Waits for maximum timeout seconds or until file_path has been created
-        """
-        start_time = time.time()
-        while not os.path.exists(file_path):
-            if timeout is not None and time.time() - start_time > timeout:
-                raise TimeoutError(f"File {file_path} not found within the timeout period")
-            time.sleep(0.1)
-
+    Returns:
+        "NoTabEd" if Tabular Editor 2 is not installed, "TSVFailed" on errors, else None
+    """
+    tabular_editor = find_tabular_editor()
+    if tabular_editor is None:
+        return "NoTabEd"
     try:
-        wait_for_file(file_path=f"{cwd}\\documentation.tsv", timeout=5)
-    except TimeoutError:
-        logger.error("Tabular Editor did not produce documentation.tsv within 5 seconds")
-        return "TSVTimeout"
+        export_documentation_tsv(
+            tabular_editor,
+            os.path.join(_BIM_[1], f"{_BIM_[0]}.bim"),
+            Path(os.getcwd()) / "output" / SAVE_NAME / "documentation.tsv",
+        )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        logger.error(f"Tabular Editor TSV export failed: {e}")
+        return "TSVFailed"
+    return None
 
 
 def run_test_extraction():
@@ -866,231 +674,26 @@ def run_test_extraction():
     return result if result else "Success"
 
 
-def _tabular_editor_analysis(model, bim_path: str, report_path: str):
-    """
-    Run the optional Tabular Editor analysis (locally): Best Practice Analyzer and exact DAX
-    dependencies on the .bim, plus live statistics if the report is open in Power BI Desktop.
-
-    Returns:
-        (bpa_violations, exact_dependencies, live_statistics); each None when unavailable
-        (dependencies then fall back to DAX text matching)
-    """
-    bpa_violations = exact_dependencies = live_statistics = None
-    if not RUN_TE_ANALYSIS:
-        return bpa_violations, exact_dependencies, live_statistics
-
-    tabular_editor = find_tabular_editor()
-    if tabular_editor is None:
-        logger.warning(
-            "Tabular Editor analysis skipped: Tabular Editor 2 not found. Add its folder to "
-            "Input/TabularEditorLocations.txt or disable it under Additional Settings."
-        )
-        return bpa_violations, exact_dependencies, live_statistics
-
-    try:
-        bpa_violations, rule_errors = run_best_practice_analyzer(tabular_editor, bim_path)
-        if rule_errors:
-            logger.warning(
-                f"{len(rule_errors)} Best Practice Analyzer rule(s) could not be evaluated: "
-                + "; ".join(error[:150] for error in rule_errors[:5])
-            )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"Best Practice Analyzer failed: {e}")
-    try:
-        exact_dependencies = drop_redundant_table_refs(
-            export_dependencies(tabular_editor, bim_path)
-        )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"Exact dependency export failed, using DAX text matching: {e}")
-    try:
-        live_statistics, live_note = collect_live_statistics(
-            tabular_editor, report_path, {table.name for table in model.tables}
-        )
-        # Debug only: not having the report open in Desktop is the normal case
-        logger.debug(f"Live statistics: {live_note}")
-        if live_statistics and live_statistics.errors:
-            logger.warning(
-                "Some live statistics are missing (Power BI Desktop too old?): "
-                + "; ".join(f"{k}: {v[:150]}" for k, v in live_statistics.errors.items())
-            )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"Reading live statistics from Power BI Desktop failed: {e}")
-
-    return bpa_violations, exact_dependencies, live_statistics
-
-
 def run_cmd():
     """
-    Main command to extract and document Power BI report.
-
-    Steps:
-    1. Read the semantic model (.bim) and run the optional Tabular Editor analysis
-    2. Extract the report (visuals, buttons, filters) from the .pbix
-    3. Analyse: objects, relationships, unused columns/measures (documentation.py)
-    4. Write the relationship graph, both Excel workbooks (excel_report.py), the JSON
-       documentation (json_report.py) and the lineage viewer (lineage_html.py)
-    5. Save captured logs
+    Document the report selected in the legacy UI (global SAVE_NAME, _PBIX_, _BIM_, ...).
 
     Returns:
-        Status string: "Success", "Log", or error message
+        "Success", "Log" (finished with warnings) or an error message
     """
-    # Only report logs from this run
+    # The legacy UI shows log_capture's content; only this run's messages
     log_capture.clear()
-
-    output_dir = os.path.join(os.getcwd(), "output")
-    cwd_save = os.path.join(output_dir, SAVE_NAME)
-    ensure_directory(cwd_save)
-
-    excel_file = os.path.join(cwd_save, f"{SAVE_NAME}.xlsx")
-    if is_excel_open_with_file(excel_file):
-        return f"Please Close File: {SAVE_NAME}.xlsx before proceeding!"
-
-    report_path = os.path.join(_PBIX_[1], f"{_PBIX_[0]}.pbix")
-    bim_path = os.path.join(_BIM_[1], f"{_BIM_[0]}.bim")
-
-    # 1. Model: always read from the .bim (relationships, sort-by and hierarchy columns come
-    #    from here, even when Tabular Editor provides the TSV)
-    try:
-        model = read_model(bim_path)
-    except (OSError, ValueError, NotImplementedError) as e:
-        return f"Could not read the model file {bim_path}: {e}"
-
-    bpa_violations, exact_dependencies, live_statistics = _tabular_editor_analysis(
-        model, bim_path, report_path
-    )
-
-    # Measure data types are only known by a live model (the .bim usually lacks them)
-    if live_statistics:
-        for measure in model.all_measures:
-            measure.data_type = live_statistics.measure_types.get(
-                (measure.table, measure.name), measure.data_type
-            )
-
-    # Optionally use Tabular Editor's TSV export instead (formats DAX via daxformatter.com)
-    if USE_TABULAR_EDITOR:
-        tsv_path = Path(cwd_save) / "documentation.tsv"
-        if not tsv_path.is_file():
-            tsv_result = gen_tsv()
-            if tsv_result == "NoTabEd":
-                return "NoTabEd"
-            if tsv_result == "TSVTimeout":
-                return "Tabular Editor did not generate documentation.tsv in time, please retry."
-        dataset = pd.read_csv(tsv_path, sep="\t", header=0)
-    else:
-        dataset = model_to_dataset(model)
-
-    # 2. Report
-    rep_ex = ReportExtractor(_PBIX_[1], f"{_PBIX_[0]}.pbix")
-    rep_ex.extract()
-
-    # 3. Analysis
-    documentation = build_documentation(
-        report_items=rep_ex.result,
-        report_filters=rep_ex.filters,
-        model=model,
-        dataset=dataset,
-        report_name=_PBIX_[0],
+    options = ExtractionOptions(
+        report_path=Path(_PBIX_[1]) / f"{_PBIX_[0]}.pbix",
+        model_path=Path(_BIM_[1]) / f"{_BIM_[0]}.bim",
+        output_dir=Path(os.getcwd()) / "output" / SAVE_NAME,
+        name=SAVE_NAME,
         description_tag=DESCRIPT_TAG,
-        visual_mapper=visual_mapper,
-        visual_types=visual_type_list,
-        logger=logger,
-        exact_dependencies=exact_dependencies,
-        bpa_violations=bpa_violations,
-        live_statistics=live_statistics,
-        report=rep_ex.report,
+        tabular_editor_analysis=RUN_TE_ANALYSIS,
+        tabular_editor_tsv=USE_TABULAR_EDITOR,
+        write_log_file=LOG_DATA,
     )
-
-    # 4. Output
-    graph_path = os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png")
-    save_relationship_graph(documentation.relations, graph_path)
-    write_main_workbook(excel_file, documentation, graph_path, known_functions)
-    write_data_workbook(
-        os.path.join(cwd_save, f"{SAVE_NAME}_data.xlsx"),
-        documentation,
-        graph_path,
-        known_functions,
-    )
-    report_json = documentation_to_dict(documentation)
-    write_json_data(os.path.join(cwd_save, f"{SAVE_NAME}.json"), report_json)
-    write_lineage_html(os.path.join(cwd_save, f"{SAVE_NAME}_lineage.html"), report_json)
-
-    # 5. Logs
-    captured_logs = log_capture.get_logs()
-    if captured_logs and LOG_DATA:
-        location_folder = os.path.join(cwd_save, "logs")
-        ensure_directory(location_folder)
-        current_time = time.strftime("%H_%M_%S", time.localtime())
-        with open(os.path.join(location_folder, f"log_data_{current_time}.txt"), "w") as file:
-            file.write(captured_logs)
-        return "Log"
-
-    return "Success"
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="PBIXtractor automatically generates Documentation material for a given PBIX-file."
-    )
-
-    # Define the command-line arguments
-    parser.add_argument("-i", dest="file", type=str, help="Name of PBIX-File")
-    parser.add_argument("-o", dest="output", type=str, help="Name of output-File")
-    parser.add_argument(
-        "--ui",
-        default=True,
-        action="store_true",
-        help="Runs in UI mode with additional options",
-    )
-    parser.add_argument(
-        "--yes_man", dest="yes_man", action="store_true", help="Remove Input Protection"
-    )
-
-    # Parse the command-line arguments
-    args = parser.parse_args()
-
-    if args.ui:
-        run_ui()
-    else:
-        if args.file:
-            _file_ = args.file
-            if args.output:
-                SAVE_NAME = args.output
-            else:
-                SAVE_NAME = _file_
-            yes_man = args.yes_man
-        else:
-            _file_ = "SemanticModell"
-            yes_man = False
-            SAVE_NAME = _file_
-
-        _PBIX_ = [
-            _file_,
-            "C:\\Users\\Reports",
-        ]
-        _BIM_ = [
-            _file_,
-            "C:\\Users\\Reports",
-        ]
-
-        result = run_cmd()
-        # result = run_ui()
-        print(result)
-
-# Maybe includes additional info to extract? https://www.linkedin.com/pulse/streamlining-model-documentation-tabular-editor-power-jarom-gleed
-
-
-## Possibilities:
-#
-# extract conditional formatting of text
-# number of decimals
-# selection naming - title
-#
-# hierarchies
-#
-## Less valuable
-# Font size, show blanks as, padding, label position
-#
-# BUGS:
-# File Name måste vara under 31 filer
-# Script att ladda ner paket automatiskt
-# ÅÄÖ i filnamen
+    result = run_extraction(options)
+    if result.status == "error":
+        return result.message
+    return "Log" if result.status == "warnings" else "Success"

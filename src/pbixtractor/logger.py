@@ -2,8 +2,9 @@
 
 import logging
 import sys
+from contextlib import contextmanager
 from io import StringIO
-from typing import Optional
+from typing import Callable, Iterator, Optional
 
 
 class LogCapture:
@@ -111,3 +112,49 @@ def wrap_long_message(message: str, max_length: int = 122) -> str:
                 line = line[max_length:]
 
     return "\n".join(lines)
+
+
+class CallbackHandler(logging.Handler):
+    """Forward formatted log records to a function, e.g. to show them live in a UI."""
+
+    def __init__(self, callback: Callable[[str, str], None], level: int = logging.INFO):
+        super().__init__(level)
+        self.callback = callback
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.callback(record.levelname, record.getMessage())
+        except Exception:  # never let a UI problem break the extraction
+            self.handleError(record)
+
+
+@contextmanager
+def capture_logs(
+    name: str = "pbixtractor",
+    level: int = logging.INFO,
+    callback: Optional[Callable[[str, str], None]] = None,
+) -> Iterator["LogCapture"]:
+    """
+    Capture the log messages of one run (and optionally forward them live).
+
+    Args:
+        name: Logger name
+        level: Minimum level captured
+        callback: Called with (level name, message) for every record
+
+    Yields:
+        LogCapture holding this run's messages
+    """
+    logger = logging.getLogger(name)
+    capture = LogCapture()
+    capture.handler.setLevel(level)
+    handlers = [capture.handler]
+    if callback:
+        handlers.append(CallbackHandler(callback, level))
+    for handler in handlers:
+        logger.addHandler(handler)
+    try:
+        yield capture
+    finally:
+        for handler in handlers:
+            logger.removeHandler(handler)
