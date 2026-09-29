@@ -191,7 +191,9 @@ src/pbixtractor/
    (`REPORT_COLUMNS`). Type is the projection role label, `"Hierarchy"`, `"Formatting"`
    (field used only in formatting objects), or for buttons the action type.
    Buttons (and shapes/images with an action): Visual Type `actionButton`, Name = target
-   display name (or `(missing bookmark: <id>)`), Display Name = button label.
+   display name (or `(missing bookmark: <id>)` / `(missing page: <id>)` when deleted —
+   `documentation.is_missing_target()`; counted as PageInfo.broken_buttons, JSON item
+   `"broken": true`, "⚠" in the viewer label), Display Name = button label.
    Groups: Visual Type `Group`, Visual ID = group name, Display Name = group display name.
    Filter rows: `[page, item_name, filter_type, table, field, operator, value]`,
    filter_type `"Visual"`, `"This Page"` or `"All Pages"` (report level; used for
@@ -211,11 +213,12 @@ src/pbixtractor/
    Parent, Child Column, Parent Column, Cardinality, Active) and the table list always come
    from the model. Unused detection first drops `structurally_used_columns()`, then (with
    exact dependencies) everything any DAX references by (table, name); without Tabular Editor
-   it falls back to DAX text matching (misses unqualified refs, matches text in comments,
-   ignores calculated columns). Measures stay "unused" unless a visual, filter or other DAX
+   it falls back to DAX text matching of measures and calculated columns (misses unqualified
+   refs, matches text in comments). Measures stay "unused" unless a visual, filter or other DAX
    uses them — listed separately as "Measures not used in this report".
    The TSV path garbles format strings starting with `"` (CSV quoting) — the .bim path doesn't.
-4. Writes `<name>.xlsx` (Common + one tab per page + Pages + model sheets) and
+4. Writes `<name>.xlsx` (Common + one tab per report page, also empty pages + Pages + model
+   sheets) and
    `<name>_data.xlsx` (pages, common, relationships, unused measures [Type column],
    dependencies [MeasureName, Dependent, Object Type, Dependent Type], model tables,
    model columns, model roles/parameters if any, model quality summary, model quality).
@@ -224,6 +227,9 @@ src/pbixtractor/
    sheets; the Interactivity column holds hidden state, sync group and changed interactions.
    Workbooks are created with strings_to_formulas=False (conditions like "= Grey" used to
    become broken formulas).
+   Common sheets (OBJECT_COLUMNS) list measures and calculated columns (Type "Calculated
+   Column" = a column with DAX; data columns are only on "model columns") in model order,
+   with "Depends On" (what the object references; was "Dependants" before 2026-09-29).
 
 ## Known bugs / gotchas (open as of 2026-09-29)
 - Never trust the Select `Name`/queryRef string for table/field — it goes stale when
@@ -235,11 +241,9 @@ src/pbixtractor/
   state is not listed yet (only capture options and hidden visuals).
 - The "User Input" UI tab appends to `Input/*.csv`, which nothing reads any more (YAML config).
   The measures-table combo (`defMeasTable`) is hidden and its value unused.
-- Kept on purpose during the Step 2 refactor (output identical to before), candidates to fix:
-  common sheets skip all `Type == "Column"` rows, so calculated columns (and their DAX) are
-  never listed; report pages without visuals get no page sheet; the "Dependants" column lists
-  what an object *depends on*; objects are listed in reverse model order (the old code
-  prepended rows); text-matching fallback order is set-based (not stable across runs).
+- Text-matching dependency fallback order is set-based (not stable across runs). The data
+  workbook's "dependencies" sheet headers (MeasureName, Dependent, ...) are unchanged on purpose
+  (possible downstream consumers).
 - Windows-only: backslash path joins, PowerShell launch of TE2, Excel-open check.
 - Editing tip: shell heredocs/sed mangle backslash escapes (\t, \n) in Python/C# code —
   write patch scripts with the file tool instead. Files may have CRLF endings (autocrlf).
@@ -281,7 +285,8 @@ calls `web_ui._render_result()` from a root page. Automated UI tests use NiceGUI
 `user_simulation(web_ui.index)` inside `asyncio.run` (tests/test_web_ui.py; no pytest-asyncio).
 
 ## Refactoring safety net
-Output is deterministic (except the graph PNG layout). Before a refactor, copy
+Output is deterministic (except the graph PNG layout; baseline refreshed 2026-09-29 after the
+common-sheet fixes). Before a refactor, copy
 `output/Invoices_NEW/*.xlsx` and `output/AdventureWorks/*.xlsx` somewhere, re-run, and compare
 workbooks cell by cell incl. rich-text runs and resolved styles (a small zip/XML comparer was
 used for Step 2; `tests/test_documentation.py::test_run_cmd_end_to_end` and
