@@ -24,7 +24,15 @@ matplotlib.use("agg")
 from .constants import DEFAULT_COLORS, DESCRIPT_TAG, REPORT_COLUMNS, UI_COLORS
 from .data import DATA_DIR
 from .logger import get_logger, setup_logger
+from .live_model import collect_live_statistics
+from .model_sheets import add_bpa_sheets, add_model_sheets
 from .semantic_model import model_to_dataset, read_model
+from .tabular_editor import (
+    drop_redundant_table_refs,
+    export_dependencies,
+    find_tabular_editor,
+    run_best_practice_analyzer,
+)
 from .utils import (
     ensure_directory,
     excel_sheet_name,
@@ -44,6 +52,9 @@ LOG_DATA = True
 # True: use Tabular Editor's TSV export, which also formats DAX via daxformatter.com
 # (sends the DAX to an external web service).
 USE_TABULAR_EDITOR = False
+# Tabular Editor analysis (local, offline, if installed): Best Practice Analyzer and exact DAX
+# dependencies. Falls back to text matching of DAX for dependencies when unavailable.
+RUN_TE_ANALYSIS = True
 SAVE_NAME = ""
 _PBIX_ = [None, None]
 _BIM_ = [None, None]
@@ -545,6 +556,10 @@ def run_ui():
         global USE_TABULAR_EDITOR
         USE_TABULAR_EDITOR = dpg.get_value(sender)
 
+    def toggle_te_analysis(sender, app_data, user_data):
+        global RUN_TE_ANALYSIS
+        RUN_TE_ANALYSIS = dpg.get_value(sender)
+
     def add_colored_text_at_top(container, text, color):
         new_text = dpg.add_text(text, parent=container, color=color)
         children = dpg.get_item_children(container)[1]
@@ -737,6 +752,13 @@ def run_ui():
                 tag="tabular_editor_toggle",
                 default_value=USE_TABULAR_EDITOR,
             )
+            dpg.add_checkbox(
+                label="Tabular Editor analysis (local): Best Practice Analyzer, exact DAX dependencies,"
+                " and row counts/sizes/measure types when the report is open in Power BI Desktop",
+                callback=toggle_te_analysis,
+                tag="te_analysis_toggle",
+                default_value=RUN_TE_ANALYSIS,
+            )
             dpg.add_spacer(height=5)
 
             with dpg.group(horizontal=True):
@@ -870,45 +892,10 @@ def gen_tsv(force: bool = False):
     if not os.path.exists(cwd):
         os.makedirs(cwd)
 
-    def find_tabular_editor_path() -> str:
-        target_exe = Path("TabularEditor.exe")
-
-        input_dir = os.getcwd() + "\\Input\\TabularEditorLocations.txt"
-
-        # Ensure Input directory exists
-        input_folder = os.path.dirname(input_dir)
-        if not os.path.exists(input_folder):
-            os.makedirs(input_folder)
-
-        # Default directories to search
-        if not os.path.exists(input_dir):
-            common_directories = [
-                Path("C:\\Program Files"),
-                Path("C:\\Program Files (x86)"),
-            ]
-            with open(input_dir, "w") as file:
-                for directory in common_directories:
-                    file.write(str(directory) + "\n")
-        else:
-            with open(input_dir, "r") as file:
-                common_directories = file.readlines()
-
-            for i, row in enumerate(common_directories):
-                common_directories[i] = Path(row.strip())
-
-        for directory in common_directories:
-            target_path = directory / "Tabular Editor" / target_exe
-            if target_path.exists():
-                result = str(target_path)
-                result = '"' + result + '"'
-                return result
-
-        # Return None if the executable file is not found
-        return None
-
-    tab_edit_path = find_tabular_editor_path()
-    if tab_edit_path is None:
+    tab_edit_exe = find_tabular_editor()
+    if tab_edit_exe is None:
         return "NoTabEd"
+    tab_edit_path = f'"{tab_edit_exe}"'
 
     if force and os.path.exists(f"{cwd}\\TabularScript.cs"):
         os.remove(f"{cwd}\\TabularScript.cs")
@@ -1062,6 +1049,60 @@ def run_cmd():
         model = read_model(bim_path)
     except (OSError, ValueError, NotImplementedError) as e:
         return f"Could not read the model file {bim_path}: {e}"
+
+    # Tabular Editor analysis (runs locally): Best Practice Analyzer and exact DAX dependencies
+    # on the .bim, plus live statistics if the report is open in Power BI Desktop.
+    # None = not available; dependencies then fall back to DAX text matching.
+    bpa_violations = None
+    exact_dependencies = None
+    live_statistics = None
+    if RUN_TE_ANALYSIS:
+        tabular_editor = find_tabular_editor()
+        if tabular_editor is None:
+            logger.warning(
+                "Tabular Editor analysis skipped: Tabular Editor 2 not found. Add its folder to "
+                "Input/TabularEditorLocations.txt or disable it under Additional Settings."
+            )
+        else:
+            try:
+                bpa_violations = run_best_practice_analyzer(tabular_editor, bim_path)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+                logger.warning(f"Best Practice Analyzer failed: {e}")
+            try:
+                exact_dependencies = drop_redundant_table_refs(
+                    export_dependencies(tabular_editor, bim_path)
+                )
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+                logger.warning(f"Exact dependency export failed, using DAX text matching: {e}")
+            try:
+                live_statistics, live_note = collect_live_statistics(
+                    tabular_editor,
+                    os.path.join(_PBIX_[1], f"{_PBIX_[0]}.pbix"),
+                    {table.name for table in model.tables},
+                )
+                # Debug only: not having the report open in Desktop is the normal case
+                logger.debug(f"Live statistics: {live_note}")
+                if live_statistics and live_statistics.errors:
+                    logger.warning(
+                        "Some live statistics are missing (Power BI Desktop too old?): "
+                        + "; ".join(f"{k}: {v[:150]}" for k, v in live_statistics.errors.items())
+                    )
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+                logger.warning(f"Reading live statistics from Power BI Desktop failed: {e}")
+
+    # Measure data types are only known by a live model (the .bim usually lacks them)
+    if live_statistics:
+        for measure in model.all_measures:
+            measure.data_type = live_statistics.measure_types.get(
+                (measure.table, measure.name), measure.data_type
+            )
+
+    # Exact dependencies grouped per source object: (table, name) -> ["Table[Col]", ...]
+    depends_on = {}
+    for dependency in exact_dependencies or []:
+        depends_on.setdefault((dependency.source_table, dependency.source_name), []).append(
+            dependency.target_ref
+        )
 
     # Optionally use Tabular Editor's TSV export instead (formats DAX via daxformatter.com)
     tsv_path = Path(os.path.join(cwd_save, "documentation.tsv"))
@@ -1352,6 +1393,16 @@ def run_cmd():
     structurally_used = model.structurally_used_columns()
     unused_columns = [col for col in unused_columns if col not in structurally_used]
 
+    # Objects referenced by any DAX (measures, calculated columns/tables, RLS), when exact
+    # dependencies are available; otherwise DAX text matching below handles this
+    if exact_dependencies is not None:
+        referenced = {
+            (dependency.target_table, dependency.target_name)
+            for dependency in exact_dependencies
+            if dependency.target_type in ("Column", "Measure")
+        }
+        unused_columns = [col for col in unused_columns if col not in referenced]
+
     # Remove Cols/Measures from 'unused_columns' that are used in visuals
     for row in report_info.iloc():
         used_columns = (row["Table"], row["Name"])
@@ -1449,17 +1500,15 @@ def run_cmd():
         columns_clean = ["[" + i + "]" for _, i in columns]
         measures = find_measures(v_definition)
 
-        for column in columns:
-            if column in unused_columns:
-                unused_columns.remove(column)
+        # Fallback when exact dependencies are unavailable: text matching of the DAX
+        if exact_dependencies is None:
+            for column in columns:
+                if column in unused_columns:
+                    unused_columns.remove(column)
 
-        # Rebuild instead of removing while iterating (which skipped elements)
-        referenced_names = {measure[1:-1] for measure in measures}
-        unused_columns[:] = [col for col in unused_columns if col[1] not in referenced_names]
-
-        if row["Type"] == "Measure":
-            name = (row["Table"], row["Name"])
-            unused_columns[:] = [col for col in unused_columns if col != name]
+            # Rebuild instead of removing while iterating (which skipped elements)
+            referenced_names = {measure[1:-1] for measure in measures}
+            unused_columns[:] = [col for col in unused_columns if col[1] not in referenced_names]
 
         formated_text = v_definition.replace("\t", " XXX ")
         formated_text = formated_text.replace("\r\n", " YYY ")
@@ -1478,8 +1527,11 @@ def run_cmd():
         quote_counter = 0
 
         # Store away all parents used in func. Columns get table name as prefix, standalone measures as [Name]
-        standalone_measures = [m for m in measures if m not in columns_clean]
-        all_parents = [i + "[" + j + "]" for i, j in columns] + standalone_measures
+        if exact_dependencies is not None:
+            all_parents = depends_on.get((row["Table"], row["Name"]), [])
+        else:
+            standalone_measures = [m for m in measures if m not in columns_clean]
+            all_parents = [i + "[" + j + "]" for i, j in columns] + standalone_measures
         for token in all_parents:
             parents_array.append(token)
             parents_array.append("\n")
@@ -1556,9 +1608,21 @@ def run_cmd():
                 worksheet.write(row_num, col, value)
         row_num += 1
 
+    # Split unused objects: columns vs measures not used by any visual, filter or DAX
+    measure_keys = {(measure.table, measure.name) for measure in model.all_measures}
+    unused_measures = [col for col in unused_columns if col in measure_keys]
+    unused_columns = [col for col in unused_columns if col not in measure_keys]
+
     row_num += 6
-    for col_pair in unused_columns:
-        worksheet.write(row_num, 0, col_pair[0] + "[" + col_pair[1] + "]")
+    for title, objects in (
+        ("Unused Columns", unused_columns),
+        ("Measures not used in this report", unused_measures),
+    ):
+        worksheet.write(row_num, 0, f"{title} ({len(objects)})", formats["bi"])
+        row_num += 1
+        for table_name, field_name in objects:
+            worksheet.write(row_num, 0, f"{table_name}[{field_name}]")
+            row_num += 1
         row_num += 1
 
     # ========================================================================
@@ -1880,6 +1944,21 @@ def run_cmd():
                 worksheet_pages.write(row_num, 6, filter_details)
                 row_num += 1
 
+    add_model_sheets(
+        workbook,
+        model,
+        formats["bi"],
+        lambda name: excel_sheet_name(name, used_sheet_names),
+        live_statistics,
+    )
+    if bpa_violations is not None:
+        add_bpa_sheets(
+            workbook,
+            bpa_violations,
+            formats["bi"],
+            lambda name: excel_sheet_name(name, used_sheet_names),
+        )
+
     workbook.close()
 
     # ========================================================================
@@ -2134,8 +2213,11 @@ def run_cmd():
         is_whole_line_comment = False
         quote_counter = 0
 
-        standalone_measures = [m for m in measures if m not in columns_clean]
-        all_parents = [i + "[" + j + "]" for i, j in columns] + standalone_measures
+        if exact_dependencies is not None:
+            all_parents = depends_on.get((row["Table"], row["Name"]), [])
+        else:
+            standalone_measures = [m for m in measures if m not in columns_clean]
+            all_parents = [i + "[" + j + "]" for i, j in columns] + standalone_measures
         for token in all_parents:
             parents_array.append(token)
             parents_array.append("\n")
@@ -2234,24 +2316,38 @@ def run_cmd():
 
     # Tab 4: "unused measures"
     worksheet_unused = workbook_data.add_worksheet("unused measures")
-    worksheet_unused.set_column(0, 0, 50, wrap_format_data)
+    worksheet_unused.set_column(0, 0, 60, wrap_format_data)
+    worksheet_unused.set_column(1, 1, 15, wrap_format_data)
 
     worksheet_unused.write(0, 0, "Unused Columns and Measures", formats_data["bi"])
+    worksheet_unused.write(0, 1, "Type", formats_data["bi"])
     row_num = 1
-    for col_pair in unused_columns:
-        worksheet_unused.write(row_num, 0, col_pair[0] + "[" + col_pair[1] + "]")
-        row_num += 1
+    for object_type, objects in (("Column", unused_columns), ("Measure", unused_measures)):
+        for table_name, field_name in objects:
+            worksheet_unused.write(row_num, 0, f"{table_name}[{field_name}]")
+            worksheet_unused.write(row_num, 1, object_type)
+            row_num += 1
 
     # Tab 5: "dependencies" - one row per measure+dependent pair
     worksheet_deps = workbook_data.add_worksheet("dependencies")
     worksheet_deps.set_column(0, 0, 50, wrap_format_data)
     worksheet_deps.set_column(1, 1, 50, wrap_format_data)
+    worksheet_deps.set_column(2, 3, 16, wrap_format_data)
 
-    worksheet_deps.write(0, 0, "MeasureName", formats_data["bi"])
-    worksheet_deps.write(0, 1, "Dependent", formats_data["bi"])
+    for col, title in enumerate(["MeasureName", "Dependent", "Object Type", "Dependent Type"]):
+        worksheet_deps.write(0, col, title, formats_data["bi"])
 
     row_num = 1
-    for _, row in df.iterrows():
+    if exact_dependencies is not None:
+        # Exact (Tabular Editor): measures, calculated columns/tables and RLS filters
+        for dependency in exact_dependencies:
+            worksheet_deps.write(row_num, 0, dependency.source_ref)
+            worksheet_deps.write(row_num, 1, dependency.target_ref)
+            worksheet_deps.write(row_num, 2, dependency.source_type)
+            worksheet_deps.write(row_num, 3, dependency.target_type)
+            row_num += 1
+
+    for _, row in df.iterrows() if exact_dependencies is None else []:
         if row["Type"] == "Column":
             continue
 
@@ -2263,12 +2359,21 @@ def run_cmd():
         columns_clean_local = ["[" + j + "]" for _, j in dep_columns]
         standalone = [m for m in dep_measures if m not in columns_clean_local]
 
-        all_deps = [i + "[" + j + "]" for i, j in dep_columns] + standalone
+        # Text matching cannot tell columns from measures for unqualified [Name] references
+        all_deps = [(i + "[" + j + "]", "Column") for i, j in dep_columns] + [
+            (m, "Measure/Column") for m in standalone
+        ]
 
-        for dep in all_deps:
+        for dep, dep_type in all_deps:
             worksheet_deps.write(row_num, 0, measure_name)
             worksheet_deps.write(row_num, 1, dep)
+            worksheet_deps.write(row_num, 2, row["Type"])
+            worksheet_deps.write(row_num, 3, dep_type)
             row_num += 1
+
+    add_model_sheets(workbook_data, model, formats_data["bi"], stats=live_statistics)
+    if bpa_violations is not None:
+        add_bpa_sheets(workbook_data, bpa_violations, formats_data["bi"])
 
     workbook_data.close()
 
