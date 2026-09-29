@@ -23,6 +23,10 @@ from .utils import excel_sheet_name, rgba_tuple_to_hex, write_to_excel
 # Colours for nested brackets in DAX (cycled by nesting depth)
 PARENTHESIS_COLORS = ["#0433fa", "#319331", "#7b3831"]
 
+# Everything we write is text: without this, values such as the filter condition "= Grey"
+# would be written as (broken) Excel formulas
+WORKBOOK_OPTIONS = {"strings_to_formulas": False}
+
 DEFINITION_INDEX = OBJECT_COLUMNS.index("Definition")
 DEPENDANTS_INDEX = OBJECT_COLUMNS.index("Dependants")
 
@@ -268,7 +272,7 @@ def write_main_workbook(
         graph_path: Relationship PNG to embed
         known_functions: DAX function names to highlight
     """
-    workbook = xlsxwriter.Workbook(path)
+    workbook = xlsxwriter.Workbook(path, WORKBOOK_OPTIONS)
     used_names = set()
 
     def sheet_name(name: str) -> str:
@@ -324,7 +328,7 @@ def write_data_workbook(
         graph_path: Relationship PNG to embed
         known_functions: DAX function names to highlight
     """
-    workbook = xlsxwriter.Workbook(path)
+    workbook = xlsxwriter.Workbook(path, WORKBOOK_OPTIONS)
     formats = create_formats(workbook)
 
     _write_pages_sheet(
