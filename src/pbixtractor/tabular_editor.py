@@ -342,3 +342,55 @@ def drop_redundant_table_refs(dependencies: list[Dependency]) -> list[Dependency
             and (d.source_type, d.source_table, d.source_name, d.target_name) in tables_with_columns
         )
     ]
+
+
+# ============================================================================
+# documentation.tsv export (optional "Use Tabular Editor" mode)
+# ============================================================================
+
+# Same export as the original TabularScript.cs. FormatDax() sends DAX to daxformatter.com.
+_TSV_SCRIPT = r"""
+%FORMAT_DAX%
+var objects = new List<TabularNamedObject>();
+objects.AddRange(Model.Tables);
+objects.AddRange(Model.AllColumns);
+objects.AddRange(Model.AllHierarchies);
+objects.AddRange(Model.AllLevels);
+objects.AddRange(Model.AllMeasures);
+objects.AddRange(Model.Relationships);
+objects.AddRange(Model.AllPartitions);
+var tsv = ExportProperties(objects, "Name,Description,SourceColumn,Expression,FormatString,DataType,DisplayFolder");
+SaveFile(System.IO.Path.Combine(@"%FOLDER%", "documentation.tsv"), tsv);
+"""
+
+
+def export_documentation_tsv(
+    exe: Path, bim_path: str | Path, output_path: str | Path, format_dax: bool = True, timeout: int = 300
+) -> Path:
+    """
+    Export model objects to documentation.tsv with Tabular Editor.
+
+    Args:
+        exe: TabularEditor.exe
+        bim_path: Model file
+        output_path: TSV file to write
+        format_dax: Format measures first (sends the DAX to daxformatter.com)
+        timeout: Seconds before giving up
+
+    Returns:
+        output_path
+
+    Raises:
+        RuntimeError: If Tabular Editor fails
+        subprocess.TimeoutExpired: If it takes longer than timeout
+    """
+    script = _TSV_SCRIPT.replace(
+        "%FORMAT_DAX%", "Model.AllMeasures.FormatDax();" if format_dax else ""
+    )
+    outputs = run_script(exe, [str(bim_path)], script, timeout)
+    if "documentation.tsv" not in outputs:
+        raise RuntimeError(f"Tabular Editor did not export documentation.tsv from {bim_path}")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(outputs["documentation.tsv"].encode("utf-8"))
+    return output_path
