@@ -3,29 +3,28 @@
 import argparse
 import logging
 import os
-import re
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
-import matplotlib
-import networkx as nx
 import pandas as pd
-import xlsxwriter
 import yaml
-from matplotlib import pyplot as plt
-from xlsxwriter.utility import xl_rowcol_to_cell
-
-matplotlib.use("agg")
 
 # Local imports
-from .constants import DEFAULT_COLORS, DESCRIPT_TAG, REPORT_COLUMNS, UI_COLORS
+from .constants import DEFAULT_COLORS, DESCRIPT_TAG, UI_COLORS
 from .data import DATA_DIR
-from .logger import get_logger, setup_logger
+from .dax import find_columns, find_functions, find_measures  # noqa: F401 (re-exported)
+from .documentation import (  # noqa: F401 (re-exported)
+    build_documentation,
+    button_target_and_label,
+    parse_tsv_object_name,
+)
+from .excel_report import write_data_workbook, write_main_workbook
 from .live_model import collect_live_statistics
-from .model_sheets import add_bpa_sheets, add_model_sheets
+from .logger import get_logger, setup_logger
+from .relationship_graph import save_relationship_graph
 from .semantic_model import model_to_dataset, read_model
 from .tabular_editor import (
     drop_redundant_table_refs,
@@ -33,15 +32,7 @@ from .tabular_editor import (
     find_tabular_editor,
     run_best_practice_analyzer,
 )
-from .utils import (
-    ensure_directory,
-    excel_sheet_name,
-    find_nth_occurrence,
-    find_vars,
-    is_excel_open_with_file,
-    rgba_tuple_to_hex,
-    write_to_excel,
-)
+from .utils import ensure_directory, is_excel_open_with_file
 
 # Initialize logger
 logger, log_capture = setup_logger("pbixtractor", level=logging.INFO, capture=True)
@@ -58,119 +49,6 @@ RUN_TE_ANALYSIS = True
 SAVE_NAME = ""
 _PBIX_ = [None, None]
 _BIM_ = [None, None]
-
-
-# ============================================================================
-# DAX Analysis Helper Functions
-# ============================================================================
-
-
-def find_functions(dax_code: str, known_functions: list) -> list[str]:
-    """
-    Find all known DAX functions used in code.
-
-    Args:
-        dax_code: DAX code string
-        known_functions: List of known function names
-
-    Returns:
-        List of functions found in the code
-    """
-    used_functions = [] 
-    for func in known_functions:
-        if func in dax_code:
-            used_functions.append(func)
-    return used_functions
-
-
-def find_measures(dax_code: str) -> list[str]:
-    """
-    Extract measure references from DAX code.
-
-    Args:
-        dax_code: DAX code string
-
-    Returns:
-        List of unique measure references (e.g., "[Measure Name]")
-    """
-    pattern = r"\[.*?\]"
-    all_measures = re.findall(pattern, dax_code)
-    return list(set(all_measures))
-
-
-def find_columns(dax_code: str) -> list[tuple[str, str]]:
-    """
-    Extract column references from DAX code.
-
-    Args:
-        dax_code: DAX code string
-
-    Returns:
-        List of (table, column) tuples
-    """
-    pattern = re.compile(r"(\w+)\[(.*?)\]") ## TODO are these re-compiles adding uneccessary overhead? Should we compile once and reuse?
-    all_columns = re.findall(pattern, dax_code)
-    return list(set(all_columns))
-
-
-def parse_tsv_object_name(object_name: str) -> tuple[str, str, str]:
-    """
-    Parse TSV object name to extract type, table, and column.
-
-    Args:
-        object_name: Object name from TSV (e.g., "Model.Table.C.[Column]")
-
-    Returns:
-        Tuple of (type, table, column) where type is Table/Column/Hierarchy/Measure
-    """
-    data_type = "Table"
-    start_pos = find_nth_occurrence(".", object_name, 2) + 1
-    end_pos = find_nth_occurrence(".", object_name, 3)
-
-    if end_pos == -1:
-        table = object_name[start_pos:]
-    else:
-        table = object_name[start_pos:end_pos]
-
-    column = ""
-    if any(substring in object_name for substring in [".C.", ".H.", ".M."]):
-        start_pos = find_nth_occurrence(".", object_name, 4) + 1
-        end_pos = find_nth_occurrence(".", object_name, 5)
-
-        if end_pos == -1 or end_pos < len(object_name):
-            column = object_name[start_pos:]
-        else:
-            column = object_name[start_pos:end_pos]
-
-        column = column.strip("[]")
-
-        if ".C." in object_name:
-            data_type = "Column"
-        elif ".H." in object_name:
-            data_type = "Hierarchy"
-        elif ".M." in object_name:
-            data_type = "Measure"
-
-    return (data_type, table, column)
-
-
-def button_target_and_label(row: pd.Series) -> tuple[str, str]:
-    """
-    Get the target and label of a button or group row from the report DataFrame.
-
-    Args:
-        row: Report row (REPORT_COLUMNS) of a button or group
-
-    Returns:
-        (target, label). Buttons: (bookmark/page name, button text).
-        Groups: (group name, "").
-    """
-    display_name = row["Display Name"]
-    display_name = "" if pd.isna(display_name) or not display_name else str(display_name)
-
-    if row["Type"] == "Group":
-        return display_name, ""
-    return row["Name"] or "", display_name
 
 
 # Load configuration from YAML file
@@ -1007,88 +885,92 @@ def run_test_extraction():
     return result if result else "Success"
 
 
+def _tabular_editor_analysis(model, bim_path: str, report_path: str):
+    """
+    Run the optional Tabular Editor analysis (locally): Best Practice Analyzer and exact DAX
+    dependencies on the .bim, plus live statistics if the report is open in Power BI Desktop.
+
+    Returns:
+        (bpa_violations, exact_dependencies, live_statistics); each None when unavailable
+        (dependencies then fall back to DAX text matching)
+    """
+    bpa_violations = exact_dependencies = live_statistics = None
+    if not RUN_TE_ANALYSIS:
+        return bpa_violations, exact_dependencies, live_statistics
+
+    tabular_editor = find_tabular_editor()
+    if tabular_editor is None:
+        logger.warning(
+            "Tabular Editor analysis skipped: Tabular Editor 2 not found. Add its folder to "
+            "Input/TabularEditorLocations.txt or disable it under Additional Settings."
+        )
+        return bpa_violations, exact_dependencies, live_statistics
+
+    try:
+        bpa_violations = run_best_practice_analyzer(tabular_editor, bim_path)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"Best Practice Analyzer failed: {e}")
+    try:
+        exact_dependencies = drop_redundant_table_refs(
+            export_dependencies(tabular_editor, bim_path)
+        )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"Exact dependency export failed, using DAX text matching: {e}")
+    try:
+        live_statistics, live_note = collect_live_statistics(
+            tabular_editor, report_path, {table.name for table in model.tables}
+        )
+        # Debug only: not having the report open in Desktop is the normal case
+        logger.debug(f"Live statistics: {live_note}")
+        if live_statistics and live_statistics.errors:
+            logger.warning(
+                "Some live statistics are missing (Power BI Desktop too old?): "
+                + "; ".join(f"{k}: {v[:150]}" for k, v in live_statistics.errors.items())
+            )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"Reading live statistics from Power BI Desktop failed: {e}")
+
+    return bpa_violations, exact_dependencies, live_statistics
+
+
 def run_cmd():
     """
     Main command to extract and document Power BI report.
 
-    This function orchestrates the entire documentation generation process:
-    1. Setup output directories and validate files
-    2. Extract data from PBIX using ReportExtractor
-    3. Process TSV file from Tabular Editor
-    4. Build relationships and generate graph
-    5. Create Excel documentation workbooks
+    Steps:
+    1. Read the semantic model (.bim) and run the optional Tabular Editor analysis
+    2. Extract the report (visuals, buttons, filters) from the .pbix
+    3. Analyse: objects, relationships, unused columns/measures (documentation.py)
+    4. Write the relationship graph and both Excel workbooks (excel_report.py)
+    5. Save captured logs
 
     Returns:
         Status string: "Success", "Log", or error message
     """
-    global SAVE_NAME, _BIM_, _PBIX_, LOG_DATA
-
-    # ========================================================================
-    # SECTION 1: SETUP AND INITIALIZATION
-    # ========================================================================
-
     # Only report logs from this run
     log_capture.clear()
 
-    # Setup output directories
     output_dir = os.path.join(os.getcwd(), "output")
-    ensure_directory(output_dir)
-
     cwd_save = os.path.join(output_dir, SAVE_NAME)
     ensure_directory(cwd_save)
 
-    # Check if Excel file is already open
-    file_path = os.path.join(cwd_save, f"{SAVE_NAME}.xlsx")
-    if is_excel_open_with_file(file_path):
+    excel_file = os.path.join(cwd_save, f"{SAVE_NAME}.xlsx")
+    if is_excel_open_with_file(excel_file):
         return f"Please Close File: {SAVE_NAME}.xlsx before proceeding!"
 
-    # Read the semantic model directly from the .bim (always: relationships, sort-by and
-    # hierarchy columns come from here, even when Tabular Editor provides the TSV)
+    report_path = os.path.join(_PBIX_[1], f"{_PBIX_[0]}.pbix")
     bim_path = os.path.join(_BIM_[1], f"{_BIM_[0]}.bim")
+
+    # 1. Model: always read from the .bim (relationships, sort-by and hierarchy columns come
+    #    from here, even when Tabular Editor provides the TSV)
     try:
         model = read_model(bim_path)
     except (OSError, ValueError, NotImplementedError) as e:
         return f"Could not read the model file {bim_path}: {e}"
 
-    # Tabular Editor analysis (runs locally): Best Practice Analyzer and exact DAX dependencies
-    # on the .bim, plus live statistics if the report is open in Power BI Desktop.
-    # None = not available; dependencies then fall back to DAX text matching.
-    bpa_violations = None
-    exact_dependencies = None
-    live_statistics = None
-    if RUN_TE_ANALYSIS:
-        tabular_editor = find_tabular_editor()
-        if tabular_editor is None:
-            logger.warning(
-                "Tabular Editor analysis skipped: Tabular Editor 2 not found. Add its folder to "
-                "Input/TabularEditorLocations.txt or disable it under Additional Settings."
-            )
-        else:
-            try:
-                bpa_violations = run_best_practice_analyzer(tabular_editor, bim_path)
-            except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-                logger.warning(f"Best Practice Analyzer failed: {e}")
-            try:
-                exact_dependencies = drop_redundant_table_refs(
-                    export_dependencies(tabular_editor, bim_path)
-                )
-            except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-                logger.warning(f"Exact dependency export failed, using DAX text matching: {e}")
-            try:
-                live_statistics, live_note = collect_live_statistics(
-                    tabular_editor,
-                    os.path.join(_PBIX_[1], f"{_PBIX_[0]}.pbix"),
-                    {table.name for table in model.tables},
-                )
-                # Debug only: not having the report open in Desktop is the normal case
-                logger.debug(f"Live statistics: {live_note}")
-                if live_statistics and live_statistics.errors:
-                    logger.warning(
-                        "Some live statistics are missing (Power BI Desktop too old?): "
-                        + "; ".join(f"{k}: {v[:150]}" for k, v in live_statistics.errors.items())
-                    )
-            except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-                logger.warning(f"Reading live statistics from Power BI Desktop failed: {e}")
+    bpa_violations, exact_dependencies, live_statistics = _tabular_editor_analysis(
+        model, bim_path, report_path
+    )
 
     # Measure data types are only known by a live model (the .bim usually lacks them)
     if live_statistics:
@@ -1097,1304 +979,58 @@ def run_cmd():
                 (measure.table, measure.name), measure.data_type
             )
 
-    # Exact dependencies grouped per source object: (table, name) -> ["Table[Col]", ...]
-    depends_on = {}
-    for dependency in exact_dependencies or []:
-        depends_on.setdefault((dependency.source_table, dependency.source_name), []).append(
-            dependency.target_ref
-        )
-
     # Optionally use Tabular Editor's TSV export instead (formats DAX via daxformatter.com)
-    tsv_path = Path(os.path.join(cwd_save, "documentation.tsv"))
-    if USE_TABULAR_EDITOR and not tsv_path.is_file():
-        tsv_result = gen_tsv()
-        if tsv_result == "NoTabEd":
-            return "NoTabEd"
-        if tsv_result == "TSVTimeout":
-            return "Tabular Editor did not generate documentation.tsv in time, please retry."
-
-    excel_file = cwd_save + "\\" + SAVE_NAME + ".xlsx"
-
-    # ========================================================================
-    # SECTION 2: EXTRACT REPORT DATA FROM PBIX
-    # ========================================================================
-
-    rep_ex = ReportExtractor(_PBIX_[1], f"{_PBIX_[0]}.pbix")
-    rep_ex.extract()
-
-    report_info = pd.DataFrame(rep_ex.result, columns=REPORT_COLUMNS)
-
-    # Process filters - remove duplicates and format
-    report_filters = []
-    [report_filters.append(sublist) for sublist in rep_ex.filters if sublist not in report_filters]
-
-    report_filters_string = [
-        [
-            sublist[0],
-            sublist[1],
-            sublist[2],
-            f"{sublist[3]}[{sublist[4]}]",
-            " ".join(sublist[5:]).strip(),
-        ]
-        for sublist in report_filters
-    ]
-
-    # ========================================================================
-    # SECTION 3: INITIALIZE DATA STRUCTURES
-    # ========================================================================
-
-    # Create the DataFrame
-    data = {
-        "Type": [],
-        "Name": [],
-        "DataType": [],
-        "Description": [],
-        "Definition": [],
-        "Table": [],
-        "Dependants": [],
-        "Format": [],
-        "Folder": [],
-        "Comment": [],
-        "Report File": [],
-    }
-
-    df = pd.DataFrame(data)
-
-    # Define indexes of special columns
-    definition_index = list(data.keys()).index("Definition")
-    parent_index = list(data.keys()).index("Dependants")
-
-    # Define lists for future calculations
-    unused_columns = []
-    all_tables = []
-    all_hierarchies = []
-    all_visuals = []
-
-    # Determine which items are used in which visual and on which page
-    for visual_id, cols in report_info.groupby("Visual ID"):
-        temp_visuals = [cols.iloc()[0]["Page"], 0]
-        for _, row in cols.iterrows():
-            temp_visuals.append((row["Table"], row["Name"]))
-        all_visuals.append(temp_visuals)
-
-    unique_pages = list(set(item[0] for item in all_visuals))
-    unique_pages_index = [0 for i in range(len(unique_pages))]
-
-    for ind, visual in enumerate(all_visuals):
-        page_index = unique_pages.index(visual[0])
-        all_visuals[ind][1] = unique_pages_index[page_index]
-        unique_pages_index[page_index] += 1
-
-    # ========================================================================
-    # SECTION 4: PROCESS MODEL OBJECTS (from the .bim, or Tabular Editor's TSV)
-    # ========================================================================
-
     if USE_TABULAR_EDITOR:
+        tsv_path = Path(cwd_save) / "documentation.tsv"
+        if not tsv_path.is_file():
+            tsv_result = gen_tsv()
+            if tsv_result == "NoTabEd":
+                return "NoTabEd"
+            if tsv_result == "TSVTimeout":
+                return "Tabular Editor did not generate documentation.tsv in time, please retry."
         dataset = pd.read_csv(tsv_path, sep="\t", header=0)
     else:
         dataset = model_to_dataset(model)
 
-    all_tables = [table.name for table in model.tables]
+    # 2. Report
+    rep_ex = ReportExtractor(_PBIX_[1], f"{_PBIX_[0]}.pbix")
+    rep_ex.extract()
 
-    # Remove excess " ' " surrounding table names
-    escape_pattern = r"'(?:\s*)(" + "|".join(map(re.escape, all_tables)) + r")(?:\s*)'"
-    for i, row in enumerate(dataset.iloc()):
-        exp = row["Expression"]
-        if pd.isna(exp):
-            continue
-
-        exp = exp.replace("\\t", "    ")
-
-        match = re.search(escape_pattern, exp)
-        if match:
-            dataset.at[i, "Expression"] = exp.replace(match.group(0), match.group(1))
-
-    # Read .tsv file and convert to usable dataframe
-    for i in range(len(dataset)):
-        line_data = dataset.iloc[i]
-
-        df_type, df_table, df_column = parse_tsv_object_name(line_data["Object"])
-
-        # Currently don't need to do anything with all tables or hierarchies
-        if df_type == "Table":
-            continue
-
-        elif df_type == "Hierarchy":
-            all_hierarchies.append((df_table, df_column))
-            continue
-
-        elif df_type == "Column" or df_type == "Measure":
-            unused_columns.append((df_table, df_column))
-
-        if not isinstance(line_data["Expression"], float):
-            definition = line_data["Expression"]
-            definition = definition.replace("    ", "\t")
-            definition = definition.replace("\\n", "\n")
-        else:
-            definition = ""
-
-        # Extract description if embedded in definition
-        if definition.find(DESCRIPT_TAG) != -1:
-            comment_start = find_nth_occurrence(DESCRIPT_TAG, definition, 1) + 5
-            comment_end = find_nth_occurrence(DESCRIPT_TAG, definition, 2) - 1
-            definition_start = comment_end + 6
-        else:
-            comment_start = 0
-            comment_end = comment_start
-            definition_start = comment_start
-
-        df_name = line_data["Name"]
-        df_data_type = line_data["DataType"]
-        if pd.isna(line_data["Description"]):
-            df_description = definition[comment_start:comment_end].strip()
-            df_description = df_description.replace("\\n", "\\r\\n")
-        else:
-            df_description = line_data["Description"]
-        df_definition = definition[definition_start:].strip()
-        df_definition = df_definition.replace("\r\n", "\n")
-        df_definition = df_definition.replace("\r", "\n")
-        df_format = (
-            "" if pd.isna(line_data.get("FormatString", "")) else line_data.get("FormatString", "")
-        )
-        df_display = (
-            ""
-            if pd.isna(line_data.get("DisplayFolder", ""))
-            else line_data.get("DisplayFolder", "")
-        )
-
-        # Find which page the measures/calculations are on
-        df_report_pages = []
-        for i, row in enumerate(report_info["Name"]):
-            if row == df_name:
-                df_report_pages.append(report_info["Page"][i])
-
-        new_data = {
-            "Type": df_type,
-            "Name": df_name,
-            "DataType": df_data_type,
-            "Description": df_description,
-            "Definition": df_definition,
-            "Table": df_table,
-            "Dependants": "",
-            "Format": df_format,
-            "Folder": df_display,
-            "Comment": "",
-            "Report File": _PBIX_[0],
-        }
-
-        df.loc[-1] = new_data
-        df.index = df.index + 1
-    df = df.sort_index()
-
-    # ========================================================================
-    # SECTION 5: BUILD RELATIONSHIPS AND GENERATE GRAPH
-    # ========================================================================
-
-    # Child = "from" (usually many) side, Parent = "to" (usually one) side
-    df_relations = pd.DataFrame(
-        [
-            {
-                "Type": "Relationship",
-                "Child": rel.from_table,
-                "Direction": rel.direction_label,
-                "Parent": rel.to_table,
-                "Child Column": rel.from_column,
-                "Parent Column": rel.to_column,
-                "Cardinality": rel.cardinality_label,
-                "Active": "Yes" if rel.is_active else "No",
-            }
-            for rel in sorted(model.relationships, key=lambda r: r.te_name)
-        ],
-        columns=[
-            "Type",
-            "Child",
-            "Direction",
-            "Parent",
-            "Child Column",
-            "Parent Column",
-            "Cardinality",
-            "Active",
-        ],
+    # 3. Analysis
+    documentation = build_documentation(
+        report_items=rep_ex.result,
+        report_filters=rep_ex.filters,
+        model=model,
+        dataset=dataset,
+        report_name=_PBIX_[0],
+        description_tag=DESCRIPT_TAG,
+        visual_mapper=visual_mapper,
+        visual_types=visual_type_list,
+        logger=logger,
+        exact_dependencies=exact_dependencies,
+        bpa_violations=bpa_violations,
+        live_statistics=live_statistics,
     )
-    # Relationship graph goes to the right of the relationship columns
-    graph_cell = xl_rowcol_to_cell(0, len(df_relations.columns) + 1)
 
-    def generate_graph(df_relations: pd.DataFrame, w: int, h: int):
-        G = nx.DiGraph()
-
-        for _, row in df_relations.iterrows():
-            task_id = row["Child"]
-            parent_task = row["Parent"]
-
-            G.add_node(task_id)
-            if not pd.isnull(parent_task):
-                G.add_edge(str(parent_task), task_id)
-
-        def split_label(label):
-            return re.sub(r"([a-z])([A-Z])", r"\1\n\2", label)
-
-        child_nodes = set(df_relations["Parent"].dropna().unique())
-        parent_nodes = set(G.nodes) - child_nodes
-
-        colors = plt.cm.tab20.colors
-        color_map = {}
-        for i, node in enumerate(child_nodes):
-            color_map[node] = colors[i % len(colors)]
-
-        node_colors = [color_map[node] if node in child_nodes else "lightgreen" for node in G.nodes]
-
-        labels = {node: split_label(node) for node in parent_nodes}
-
-        plt.figure(figsize=(w, h))
-
-        pos = nx.spring_layout(G, k=2.5, iterations=500, scale=10)
-        nx.draw(
-            G,
-            pos,
-            with_labels=True,
-            labels=labels,
-            node_color=node_colors,
-            font_weight="bold",
-            node_size=300,
-            arrowsize=10,
-        )
-
-        legend_handles = [
-            plt.Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor=color_map[node],
-                markersize=10,
-                label=node,
-            )
-            for node in child_nodes
-        ]
-        plt.legend(
-            handles=legend_handles,
-            title="Dimensions",
-            bbox_to_anchor=(1.05, 1),
-            loc="upper left",
-        )
-
-        # Save to output directory
-        output_path = os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png")
-        plt.savefig(output_path, bbox_inches="tight")
-        plt.close()
-
-    generate_graph(df_relations, 12, (len(df_relations) + 1) * 14.4 / 72)
-
-    # ========================================================================
-    # SECTION 6: IDENTIFY UNUSED COLUMNS
-    # ========================================================================
-
-    # Relationship keys, sort-by and hierarchy level columns are used by the model itself
-    structurally_used = model.structurally_used_columns()
-    unused_columns = [col for col in unused_columns if col not in structurally_used]
-
-    # Objects referenced by any DAX (measures, calculated columns/tables, RLS), when exact
-    # dependencies are available; otherwise DAX text matching below handles this
-    if exact_dependencies is not None:
-        referenced = {
-            (dependency.target_table, dependency.target_name)
-            for dependency in exact_dependencies
-            if dependency.target_type in ("Column", "Measure")
-        }
-        unused_columns = [col for col in unused_columns if col not in referenced]
-
-    # Remove Cols/Measures from 'unused_columns' that are used in visuals
-    for row in report_info.iloc():
-        used_columns = (row["Table"], row["Name"])
-        if used_columns in unused_columns:
-            unused_columns.remove(used_columns)
-
-    for filter in report_filters:
-        temp_col = (filter[3], filter[4])
-        if temp_col in unused_columns:
-            unused_columns.remove(temp_col)
-
-    # ========================================================================
-    # SECTION 7: CREATE MAIN EXCEL WORKBOOK
-    # ========================================================================
-
-    # Delete old data
-    if os.path.exists(excel_file):
-        os.remove(excel_file)
-
-    workbook = xlsxwriter.Workbook(excel_file)
-    used_sheet_names = set()
-    worksheet = workbook.add_worksheet(excel_sheet_name(f"{_PBIX_[0]} Common", used_sheet_names))
-
-    # Add column formatting.
-    def_format = workbook.add_format({"align": "top", "text_wrap": True})
-    wrap_format = workbook.add_format({"text_wrap": True})
-    worksheet.set_column(0, len(new_data), 30, wrap_format)
-    worksheet.set_column(definition_index, definition_index, 100, def_format)
-    worksheet.set_column(definition_index + 1, definition_index + 1, 30, wrap_format)
-    worksheet.set_column(parent_index, parent_index, 50, wrap_format)
-
-    def get_workbook_format(index: int):
-        return workbook.add_format({"color": rgba_tuple_to_hex(DEFAULT_COLORS[index][1])})
-
-    paranthesis_color = ["#0433fa", "#319331", "#7b3831"]
-    formats = {
-        "function": get_workbook_format(0),
-        "measure": get_workbook_format(1),
-        "return": get_workbook_format(2),
-        "varname": get_workbook_format(3),
-        "comment": get_workbook_format(4),
-        "quote": get_workbook_format(5),
-        "var": get_workbook_format(6),
-        "bold": workbook.add_format({"bold": True}),
-        "italic": workbook.add_format({"italic": True}),
-        "bi": workbook.add_format({"bold": True, "italic": True}),
-        "para": [workbook.add_format({"color": color}) for color in paranthesis_color * 5],
-    }
-
-    ## Print Relation Section
-    num_relations = len(df_relations)
-    row_num = 1
-    if num_relations > 0:
-        col = 0
-        for name in df_relations.columns:
-            worksheet.write(0, col, name, formats["bi"])
-            col += 1
-
-        print_graph = True
-        for _, row in df_relations.iterrows():
-            if print_graph:
-                worksheet.insert_image(
-                    graph_cell,
-                    os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png"),
-                    {"x_scale": 1, "y_scale": 1},
-                )
-                print_graph = False
-
-            for col, value in enumerate(row):
-                worksheet.write(row_num, col, value)
-            row_num += 1
-
-    row_num += 2
-    col = 0
-    for name, value in new_data.items():
-        worksheet.write(row_num, col, name, formats["bi"])
-        col += 1
-
-    def ls_app(*args):
-        format_array.extend(args)
-
-    row_num += 1
-    for _, row in df.iterrows():
-        v_definition = row["Definition"]
-
-        # Skip traditional columns for now
-        if row["Type"] == "Column":
-            continue
-
-        # Find Vars and measures
-        var_names = find_vars(v_definition)
-        function_names = find_functions(v_definition, known_functions)
-        columns = find_columns(v_definition)
-        tables = [i for i, _ in columns]
-        columns_clean = ["[" + i + "]" for _, i in columns]
-        measures = find_measures(v_definition)
-
-        # Fallback when exact dependencies are unavailable: text matching of the DAX
-        if exact_dependencies is None:
-            for column in columns:
-                if column in unused_columns:
-                    unused_columns.remove(column)
-
-            # Rebuild instead of removing while iterating (which skipped elements)
-            referenced_names = {measure[1:-1] for measure in measures}
-            unused_columns[:] = [col for col in unused_columns if col[1] not in referenced_names]
-
-        formated_text = v_definition.replace("\t", " XXX ")
-        formated_text = formated_text.replace("\r\n", " YYY ")
-        formated_text = formated_text.replace("\n", " YYY ")
-        formated_text = formated_text.replace("&&", " ZZZ ")
-        formated_text = formated_text.replace("||", " AAA ")
-
-        # Split the text into rows
-        pattern = re.compile(r"(\(|\)|\[.*?\]|,|//|\d+\.\d+|\w+|(?<!\d)\.(?!\d)|\W)")
-        tokens = [token for token in re.findall(pattern, formated_text) if token.strip()]
-
-        format_array = []
-        parents_array = []
-        parenthesis_count = -1
-        is_whole_line_comment = False
-        quote_counter = 0
-
-        # Store away all parents used in func. Columns get table name as prefix, standalone measures as [Name]
-        if exact_dependencies is not None:
-            all_parents = depends_on.get((row["Table"], row["Name"]), [])
-        else:
-            standalone_measures = [m for m in measures if m not in columns_clean]
-            all_parents = [i + "[" + j + "]" for i, j in columns] + standalone_measures
-        for token in all_parents:
-            parents_array.append(token)
-            parents_array.append("\n")
-        if parents_array:
-            parents_array.pop(-1)
-
-        # Iternate through the segments and add a format before the corresponding tokens.
-        for token in tokens:
-            if token == "//":
-                is_whole_line_comment = True
-            elif token == "YYY":
-                is_whole_line_comment = False
-
-            if token == '"' and not is_whole_line_comment:
-                quote_counter += 1
-
-            if is_whole_line_comment:
-                ls_app(formats["comment"], token + " ")
-            elif quote_counter > 0:
-                ls_app(formats["quote"])
-                if quote_counter == 2:
-                    ls_app(token + " ")
-                    quote_counter = 0
-                else:
-                    ls_app(token)
-            elif token == "XXX":
-                ls_app("\t")
-            elif token == "YYY":
-                ls_app("\n")
-            elif token == "ZZZ":
-                ls_app("&& ")
-            elif token == "AAA":
-                ls_app("|| ")
-            elif token == "(":
-                parenthesis_count += 1
-                safe_count = max(0, min(parenthesis_count, 14))
-                ls_app(formats["para"][safe_count], token + " ")
-            elif token == ")":
-                safe_count = max(0, min(parenthesis_count, 14))
-                ls_app(formats["para"][safe_count], token + " ")
-                parenthesis_count -= 1
-            elif token == "VAR":
-                ls_app(formats["var"], token + " ")
-            elif token in var_names:
-                ls_app(formats["varname"], token + " ")
-            elif token in measures:
-                ls_app(
-                    formats["para"][parenthesis_count + 1],
-                    token[0],
-                    formats["measure"],
-                    token[1:-1],
-                    formats["para"][parenthesis_count + 1],
-                    token[-1] + " ",
-                )
-            elif token in tables or token in columns_clean:
-                ls_app(formats["measure"], token)
-            elif token in function_names:
-                ls_app(formats["function"], token + " ")
-            elif token == "RETURN":
-                ls_app(formats["return"], token + " ")
-            else:
-                ls_app(token, " ")
-
-        for col, value in enumerate(row):
-            if col == definition_index and len(format_array) != 0:
-                write_to_excel(worksheet, row_num, col, format_array)
-                if len(format_array) == 1:
-                    1
-            elif col == parent_index and len(parents_array) != 0:
-                write_to_excel(worksheet, row_num, col, parents_array)
-                if len(parents_array) == 1:
-                    1
-            elif value != "":
-                worksheet.write(row_num, col, value)
-        row_num += 1
-
-    # Split unused objects: columns vs measures not used by any visual, filter or DAX
-    measure_keys = {(measure.table, measure.name) for measure in model.all_measures}
-    unused_measures = [col for col in unused_columns if col in measure_keys]
-    unused_columns = [col for col in unused_columns if col not in measure_keys]
-
-    row_num += 6
-    for title, objects in (
-        ("Unused Columns", unused_columns),
-        ("Measures not used in this report", unused_measures),
-    ):
-        worksheet.write(row_num, 0, f"{title} ({len(objects)})", formats["bi"])
-        row_num += 1
-        for table_name, field_name in objects:
-            worksheet.write(row_num, 0, f"{table_name}[{field_name}]")
-            row_num += 1
-        row_num += 1
-
-    # ========================================================================
-    # SECTION 8: CREATE PAGE-SPECIFIC TABS (One Tab Per Report Page)
-    # ========================================================================
-
-    # Create a tab per report page with visual info.
-    for report_name in report_info["Page"].unique().tolist():
-        worksheet_x = workbook.add_worksheet(excel_sheet_name(report_name, used_sheet_names))
-
-        worksheet_x.set_column(0, 6, 30, def_format)
-        worksheet_x.set_column(2, 2, 50, def_format)
-        worksheet_x.set_column(3, 3, 60, def_format)
-        worksheet_x.set_column(4, 4, 60, def_format)
-
-        local_df = report_info[report_info["Page"] == report_name]
-        visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
-
-        local_df = local_df.sort_values(by=["Visual Type", "Type"])
-
-        data_x = {
-            "Item Type": [],
-            "Visual Type": [],
-            "Type": [],
-            "Field": [],
-            "DisplayName": [],
-            "Visual Filters": [],
-            "Interactivity": [],
-            "Comment": [],
-            "ID": [],
-        }
-
-        df_x = pd.DataFrame(data_x)
-
-        for visual in visual_ids:
-            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Visual Type"]
-
-            # Get visual type info from YAML configuration
-            v_type, s_type = visual_mapper.get_visual_info(visual_type)
-
-            # Log warning if visual type not found in config
-            if (
-                not visual_mapper.is_special_visual(visual_type)
-                and visual_type not in visual_type_list
-            ):
-                if visual_type not in ["Group"] and not visual_mapper.is_button_type(visual_type):
-                    logger.warning(f"New Visual type not yet supported: {visual_type}")
-
-            new_data = {
-                "Item Type": v_type,
-                "Visual Type": s_type,
-                "Type": "",
-                "Field": "",
-                "DisplayName": "",
-                "Visual Filters": "",
-                "Interactivity": "",
-                "Comment": "",
-                "ID": visual,
-            }
-
-            df_x.loc[-1] = new_data
-            df_x.index = df_x.index + 1
-
-        for i_filter, filter in enumerate(report_filters_string):
-            if filter[2] == "This Page" and filter[0] == report_name:
-                new_data = {
-                    "Item Type": "Filter",
-                    "Visual Type": "This Page",
-                    "Type": "",
-                    "Field": "",
-                    "DisplayName": "",
-                    "Visual Filters": "",
-                    "Interactivity": "",
-                    "Comment": "",
-                    "ID": i_filter,
-                }
-
-                df_x.loc[-1] = new_data
-                df_x.index = df_x.index + 1
-
-        for col_idx, name in enumerate(
-            [
-                "Item Type",
-                "Visual Type",
-                "ID",
-                "Description",
-                "Visual Filters",
-                "Interactivity",
-                "Comment",
-            ]
-        ):
-            worksheet_x.write(0, col_idx, name, formats["bi"])
-
-        sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
-        df_x["Item Type"] = pd.Categorical(df_x["Item Type"], categories=sort_order, ordered=True)
-        df_sorted = df_x.sort_values(by=["Item Type", "Visual Type"])
-
-        row_num = 1
-        for _, row in df_sorted.iterrows():
-            filter_array = []
-            for filter in report_filters_string:
-                if filter[2] == "Visual" and filter[0] == report_name and filter[1] == row["ID"]:
-                    filter_array.extend([formats["bold"], filter[3], " " + filter[4] + "\n"])
-
-            if filter_array and filter_array[-1][-1] == "\n":
-                filter_array[-1] = filter_array[-1][:-1]
-
-            if row["Item Type"] in ["Visual", "Slicer"]:
-                # One row per visual - build Description grouped by Type
-                r_data = local_df[local_df["Visual ID"] == row["ID"]]
-                description_parts = []
-                for field_type, group in r_data.groupby("Type", sort=False):
-                    description_parts.append(f"{field_type}:")
-                    for _, rrow in group.iterrows():
-                        display_name = (
-                            str(rrow["Display Name"])
-                            if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
-                            else rrow["Name"]
-                        )
-                        if display_name != rrow["Name"]:
-                            description_parts.append(
-                                f"  {rrow['Table']}[{rrow['Name']}] ({display_name})"
-                            )
-                        else:
-                            description_parts.append(f"  {rrow['Table']}[{rrow['Name']}]")
-                worksheet_x.write(row_num, 0, row["Item Type"])
-                worksheet_x.write(row_num, 1, row["Visual Type"])
-                worksheet_x.write(row_num, 2, row["ID"])
-                worksheet_x.write(row_num, 3, "\n".join(description_parts))
-                if len(filter_array) != 0:
-                    write_to_excel(worksheet_x, row_num, 4, filter_array)
-                row_num += 1
-
-            elif row["Item Type"] in ["Button", "Group"]:
-                rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                target, label = button_target_and_label(rrow)
-                worksheet_x.write(row_num, 0, row["Item Type"])
-                worksheet_x.write(row_num, 1, row["Visual Type"])
-                worksheet_x.write(row_num, 2, row["ID"])
-                if row["Item Type"] == "Button":
-                    description = f"{rrow['Type']}: {target}" if target else rrow["Type"]
-                    if label:
-                        description += f" ({label})"
-                else:
-                    description = target
-                worksheet_x.write(row_num, 3, description)
-                if len(filter_array) != 0:
-                    write_to_excel(worksheet_x, row_num, 4, filter_array)
-                row_num += 1
-
-            elif row["Item Type"] == "Filter":
-                filter_field = report_filters_string[row["ID"]][3]
-                filter_details = report_filters_string[row["ID"]][4]
-                worksheet_x.write(row_num, 0, row["Item Type"])
-                worksheet_x.write(row_num, 1, row["Visual Type"])
-                worksheet_x.write(row_num, 2, "")
-                worksheet_x.write(row_num, 3, f"{filter_field} {filter_details}")
-                row_num += 1
-
-            else:
-                if isinstance(row["Item Type"], float):
-                    logger.error(f"NaN Item Type Encountered: {row}")
-                    continue
-
-    # Create consolidated "Pages" tab with all pages combined
-    worksheet_pages = workbook.add_worksheet(excel_sheet_name("Pages", used_sheet_names))
-    worksheet_pages.set_column(0, 9, 30, def_format)
-    worksheet_pages.set_column(3, 3, 50, def_format)
-    worksheet_pages.set_column(4, 4, 20, def_format)
-    worksheet_pages.set_column(5, 5, 50, def_format)
-    worksheet_pages.set_column(6, 6, 30, def_format)
-    worksheet_pages.set_column(7, 7, 60, def_format)
-
-    # Write header with "Page" column added at the beginning
-    col = 0
-    worksheet_pages.write(0, col, "Page", formats["bi"])
-    col += 1
-    for name in [
-        "Item Type",
-        "Visual Type",
-        "ID",
-        "Type",
-        "Field",
-        "DisplayName",
-        "Visual Filters",
-        "Interactivity",
-        "Comment",
-    ]:
-        worksheet_pages.write(0, col, name, formats["bi"])
-        col += 1
-
-    row_num = 1
-    # Loop through all pages and consolidate data
-    for report_name in report_info["Page"].unique().tolist():
-        local_df = report_info[report_info["Page"] == report_name]
-        visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
-        local_df = local_df.sort_values(by=["Visual Type", "Type"])
-
-        data_x = {
-            "Item Type": [],
-            "Visual Type": [],
-            "Type": [],
-            "Field": [],
-            "DisplayName": [],
-            "Visual Filters": [],
-            "Interactivity": [],
-            "Comment": [],
-            "ID": [],
-        }
-
-        df_x = pd.DataFrame(data_x)
-
-        for visual in visual_ids:
-            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Visual Type"]
-
-            # Get visual type info from YAML configuration
-            v_type, s_type = visual_mapper.get_visual_info(visual_type)
-
-            # Log warning if visual type not found in config
-            if (
-                not visual_mapper.is_special_visual(visual_type)
-                and visual_type not in visual_type_list
-            ):
-                if visual_type not in ["Group"] and not visual_mapper.is_button_type(visual_type):
-                    logger.warning(f"New Visual type not yet supported: {visual_type}")
-
-            new_data = {
-                "Item Type": v_type,
-                "Visual Type": s_type,
-                "Type": "",
-                "Field": "",
-                "DisplayName": "",
-                "Visual Filters": "",
-                "Interactivity": "",
-                "Comment": "",
-                "ID": visual,
-            }
-
-            df_x.loc[-1] = new_data
-            df_x.index = df_x.index + 1
-
-        for i_filter, filter in enumerate(report_filters_string):
-            if filter[2] == "This Page" and filter[0] == report_name:
-                new_data = {
-                    "Item Type": "Filter",
-                    "Visual Type": "This Page",
-                    "Type": "",
-                    "Field": "",
-                    "DisplayName": "",
-                    "Visual Filters": "",
-                    "Interactivity": "",
-                    "Comment": "",
-                    "ID": i_filter,
-                }
-
-                df_x.loc[-1] = new_data
-                df_x.index = df_x.index + 1
-
-        sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
-        df_x["Item Type"] = pd.Categorical(df_x["Item Type"], categories=sort_order, ordered=True)
-        df_sorted = df_x.sort_values(by=["Item Type", "Visual Type"])
-
-        for _, row in df_sorted.iterrows():
-            filter_array = []
-            for filter in report_filters_string:
-                if filter[2] == "Visual" and filter[0] == report_name and filter[1] == row["ID"]:
-                    filter_array.extend([formats["bold"], filter[3], " " + filter[4] + "\n"])
-
-            if filter_array and filter_array[-1][-1] == "\n":
-                filter_array[-1] = filter_array[-1][:-1]
-
-            if row["Item Type"] in ["Visual", "Slicer"]:
-                # Create one row per field for visuals/slicers
-                r_data = local_df[local_df["Visual ID"] == row["ID"]]
-                for field_idx, rrow in enumerate(r_data.iloc()):
-                    worksheet_pages.write(row_num, 0, report_name)
-                    worksheet_pages.write(row_num, 1, row["Item Type"])
-                    worksheet_pages.write(row_num, 2, row["Visual Type"])
-                    worksheet_pages.write(row_num, 3, row["ID"])
-                    worksheet_pages.write(row_num, 4, rrow["Type"])
-                    worksheet_pages.write(row_num, 5, f"{rrow['Table']}[{rrow['Name']}]")
-                    display_name = (
-                        str(rrow["Display Name"])
-                        if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
-                        else rrow["Name"]
-                    )
-                    worksheet_pages.write(row_num, 6, display_name)
-                    if len(filter_array) != 0:
-                        write_to_excel(worksheet_pages, row_num, 7, filter_array)
-                    row_num += 1
-
-            elif row["Item Type"] in ["Button", "Group"]:
-                rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                target, label = button_target_and_label(rrow)
-                worksheet_pages.write(row_num, 0, report_name)
-                worksheet_pages.write(row_num, 1, row["Item Type"])
-                worksheet_pages.write(row_num, 2, row["Visual Type"])
-                worksheet_pages.write(row_num, 3, row["ID"])
-                worksheet_pages.write(row_num, 4, rrow["Type"])
-                worksheet_pages.write(row_num, 5, target)
-                worksheet_pages.write(row_num, 6, label)
-                if len(filter_array) != 0:
-                    write_to_excel(worksheet_pages, row_num, 7, filter_array)
-                row_num += 1
-
-            else:
-                if isinstance(row["Item Type"], float):
-                    logger.error(f"NaN Item Type Encountered: {row}")
-                    continue
-
-                # Filters
-                worksheet_pages.write(row_num, 0, report_name)
-                worksheet_pages.write(row_num, 1, row["Item Type"])
-                worksheet_pages.write(row_num, 2, row["Visual Type"])
-                worksheet_pages.write(row_num, 3, "")
-                filter_field = report_filters_string[row["ID"]][3]
-                filter_details = report_filters_string[row["ID"]][4]
-                worksheet_pages.write(row_num, 5, filter_field)
-                worksheet_pages.write(row_num, 6, filter_details)
-                row_num += 1
-
-    add_model_sheets(
-        workbook,
-        model,
-        formats["bi"],
-        lambda name: excel_sheet_name(name, used_sheet_names),
-        live_statistics,
+    # 4. Output
+    graph_path = os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png")
+    save_relationship_graph(documentation.relations, graph_path)
+    write_main_workbook(excel_file, documentation, graph_path, known_functions)
+    write_data_workbook(
+        os.path.join(cwd_save, f"{SAVE_NAME}_data.xlsx"),
+        documentation,
+        graph_path,
+        known_functions,
     )
-    if bpa_violations is not None:
-        add_bpa_sheets(
-            workbook,
-            bpa_violations,
-            formats["bi"],
-            lambda name: excel_sheet_name(name, used_sheet_names),
-        )
 
-    workbook.close()
-
-    # ========================================================================
-    # SECTION 10: CREATE SECOND EXCEL WORKBOOK (_data.xlsx)
-    # ========================================================================
-
-    # Create second Excel file with reorganized structure
-    excel_file_data = cwd_save + "\\" + SAVE_NAME + "_data.xlsx"
-    if os.path.exists(excel_file_data):
-        os.remove(excel_file_data)
-
-    workbook_data = xlsxwriter.Workbook(excel_file_data)
-
-    # Reuse the same formats from the first workbook
-    def_format_data = workbook_data.add_format({"align": "top", "text_wrap": True})
-    wrap_format_data = workbook_data.add_format({"text_wrap": True})
-
-    def get_workbook_data_format(index: int):
-        return workbook_data.add_format({"color": rgba_tuple_to_hex(DEFAULT_COLORS[index][1])})
-
-    formats_data = {
-        "function": get_workbook_data_format(0),
-        "measure": get_workbook_data_format(1),
-        "return": get_workbook_data_format(2),
-        "varname": get_workbook_data_format(3),
-        "comment": get_workbook_data_format(4),
-        "quote": get_workbook_data_format(5),
-        "var": get_workbook_data_format(6),
-        "bold": workbook_data.add_format({"bold": True}),
-        "italic": workbook_data.add_format({"italic": True}),
-        "bi": workbook_data.add_format({"bold": True, "italic": True}),
-        "para": [workbook_data.add_format({"color": color}) for color in paranthesis_color * 5],
-    }
-
-    # Tab 1: "pages" - Copy of the consolidated Pages tab
-    worksheet_pages_data = workbook_data.add_worksheet("pages")
-    worksheet_pages_data.set_column(0, 9, 30, def_format_data)
-    worksheet_pages_data.set_column(3, 3, 50, def_format_data)
-    worksheet_pages_data.set_column(4, 4, 20, def_format_data)
-    worksheet_pages_data.set_column(5, 5, 50, def_format_data)
-    worksheet_pages_data.set_column(6, 6, 30, def_format_data)
-    worksheet_pages_data.set_column(7, 7, 60, def_format_data)
-    worksheet_pages_data.set_column(8, 8, 60, def_format_data)
-
-    # Write header
-    col = 0
-    worksheet_pages_data.write(0, col, "Page", formats_data["bi"])
-    col += 1
-    for name in [
-        "Item Type",
-        "Visual Type",
-        "ID",
-        "Type",
-        "Field",
-        "DisplayName",
-        "Visual Filters",
-        "Interactivity",
-        "Comment",
-        "Description",
-    ]:
-        worksheet_pages_data.write(0, col, name, formats_data["bi"])
-        col += 1
-
-    row_num = 1
-    # Loop through all pages and consolidate data (same logic as before)
-    for report_name in report_info["Page"].unique().tolist():
-        local_df = report_info[report_info["Page"] == report_name]
-        visual_ids = local_df[["Visual ID"]]["Visual ID"].unique().tolist()
-        local_df = local_df.sort_values(by=["Visual Type", "Type"])
-
-        data_x = {
-            "Item Type": [],
-            "Visual Type": [],
-            "Type": [],
-            "Field": [],
-            "DisplayName": [],
-            "Visual Filters": [],
-            "Interactivity": [],
-            "Comment": [],
-            "ID": [],
-            "Description": [],
-        }
-
-        df_x = pd.DataFrame(data_x)
-
-        for visual in visual_ids:
-            visual_type = local_df[local_df["Visual ID"] == visual].iloc[0]["Visual Type"]
-
-            # Get visual type info from YAML configuration
-            v_type, s_type = visual_mapper.get_visual_info(visual_type)
-
-            # Log warning if visual type not found in config
-            if (
-                not visual_mapper.is_special_visual(visual_type)
-                and visual_type not in visual_type_list
-            ):
-                if visual_type not in ["Group"] and not visual_mapper.is_button_type(visual_type):
-                    logger.warning(f"New Visual type not yet supported: {visual_type}")
-
-            new_data_visual = {
-                "Item Type": v_type,
-                "Visual Type": s_type,
-                "Type": "",
-                "Field": "",
-                "DisplayName": "",
-                "Visual Filters": "",
-                "Interactivity": "",
-                "Comment": "",
-                "ID": visual,
-            }
-
-            df_x.loc[-1] = new_data_visual
-            df_x.index = df_x.index + 1
-
-        for i_filter, filter in enumerate(report_filters_string):
-            if filter[2] == "This Page" and filter[0] == report_name:
-                new_data_filter = {
-                    "Item Type": "Filter",
-                    "Visual Type": "This Page",
-                    "Type": "",
-                    "Field": "",
-                    "DisplayName": "",
-                    "Visual Filters": "",
-                    "Interactivity": "",
-                    "Comment": "",
-                    "ID": i_filter,
-                    "Description": "",
-                }
-
-                df_x.loc[-1] = new_data_filter
-                df_x.index = df_x.index + 1
-
-        sort_order = ["Visual", "Slicer", "Filter", "Button", "Group"]
-        df_x["Item Type"] = pd.Categorical(df_x["Item Type"], categories=sort_order, ordered=True)
-        df_sorted = df_x.sort_values(by=["Item Type", "Visual Type"])
-
-        for _, row in df_sorted.iterrows():
-            filter_array = []
-            for filter in report_filters_string:
-                if filter[2] == "Visual" and filter[0] == report_name and filter[1] == row["ID"]:
-                    filter_array.extend([formats_data["bold"], filter[3], " " + filter[4] + "\n"])
-
-            if filter_array and filter_array[-1][-1] == "\n":
-                filter_array[-1] = filter_array[-1][:-1]
-
-            if row["Item Type"] in ["Visual", "Slicer"]:
-                r_data = local_df[local_df["Visual ID"] == row["ID"]]
-                description_parts = []
-                for field_type, group in r_data.groupby("Type", sort=False):
-                    description_parts.append(f"{field_type}:")
-                    for _, rrow_desc in group.iterrows():
-                        display_name_desc = (
-                            str(rrow_desc["Display Name"])
-                            if not pd.isna(rrow_desc["Display Name"]) and rrow_desc["Display Name"]
-                            else rrow_desc["Name"]
-                        )
-                        if display_name_desc != rrow_desc["Name"]:
-                            description_parts.append(
-                                f"  {rrow_desc['Table']}[{rrow_desc['Name']}] ({display_name_desc})"
-                            )
-                        else:
-                            description_parts.append(f"  {rrow_desc['Table']}[{rrow_desc['Name']}]")
-                full_description = "\n".join(description_parts)
-
-                # Write one row per field
-                for field_idx, rrow in enumerate(r_data.iloc()):
-                    worksheet_pages_data.write(row_num, 0, report_name)
-                    worksheet_pages_data.write(row_num, 1, row["Item Type"])
-                    worksheet_pages_data.write(row_num, 2, row["Visual Type"])
-                    worksheet_pages_data.write(row_num, 3, row["ID"])
-                    worksheet_pages_data.write(row_num, 4, rrow["Type"])
-                    worksheet_pages_data.write(row_num, 5, f"{rrow['Table']}[{rrow['Name']}]")
-                    display_name = (
-                        str(rrow["Display Name"])
-                        if not pd.isna(rrow["Display Name"]) and rrow["Display Name"]
-                        else rrow["Name"]
-                    )
-                    worksheet_pages_data.write(row_num, 6, display_name)
-                    if len(filter_array) != 0:
-                        write_to_excel(worksheet_pages_data, row_num, 7, filter_array)
-                    worksheet_pages_data.write(row_num, 10, full_description)
-                    row_num += 1
-
-            elif row["Item Type"] in ["Button", "Group"]:
-                rrow = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
-                target, label = button_target_and_label(rrow)
-                worksheet_pages_data.write(row_num, 0, report_name)
-                worksheet_pages_data.write(row_num, 1, row["Item Type"])
-                worksheet_pages_data.write(row_num, 2, row["Visual Type"])
-                worksheet_pages_data.write(row_num, 3, row["ID"])
-                worksheet_pages_data.write(row_num, 4, rrow["Type"])
-                worksheet_pages_data.write(row_num, 5, target)
-                worksheet_pages_data.write(row_num, 6, label)
-                if len(filter_array) != 0:
-                    write_to_excel(worksheet_pages_data, row_num, 7, filter_array)
-                row_num += 1
-
-            else:
-                if isinstance(row["Item Type"], float):
-                    logger.error(f"NaN Item Type Encountered: {row}")
-                    continue
-
-                worksheet_pages_data.write(row_num, 0, report_name)
-                worksheet_pages_data.write(row_num, 1, row["Item Type"])
-                worksheet_pages_data.write(row_num, 2, row["Visual Type"])
-                worksheet_pages_data.write(row_num, 3, "")
-                filter_field = report_filters_string[row["ID"]][3]
-                filter_details = report_filters_string[row["ID"]][4]
-                worksheet_pages_data.write(row_num, 5, filter_field)
-                worksheet_pages_data.write(row_num, 6, filter_details)
-                row_num += 1
-
-    # Tab 2: "common" - Main data without relationships and unused measures
-    worksheet_common = workbook_data.add_worksheet("common")
-    worksheet_common.set_column(0, len(new_data), 30, wrap_format_data)
-    worksheet_common.set_column(definition_index, definition_index, 100, def_format_data)
-    worksheet_common.set_column(definition_index + 1, definition_index + 1, 30, wrap_format_data)
-    worksheet_common.set_column(parent_index, parent_index, 50, wrap_format_data)
-
-    # Write header
-    col = 0
-    for name in df.columns:
-        worksheet_common.write(0, col, name, formats_data["bi"])
-        col += 1
-
-    row_num = 1
-    for _, row in df.iterrows():
-        v_definition = row["Definition"]
-
-        if row["Type"] == "Column":
-            continue
-
-        var_names = find_vars(v_definition)
-        function_names = find_functions(v_definition, known_functions)
-        columns = find_columns(v_definition)
-        tables = [i for i, _ in columns]
-        columns_clean = ["[" + i + "]" for _, i in columns]
-        measures = find_measures(v_definition)
-
-        formated_text = v_definition.replace("\t", " XXX ")
-        formated_text = formated_text.replace("\r\n", " YYY ")
-        formated_text = formated_text.replace("\n", " YYY ")
-        formated_text = formated_text.replace("&&", " ZZZ ")
-        formated_text = formated_text.replace("||", " AAA ")
-
-        pattern = re.compile(r"(\(|\)|\[.*?\]|,|//|\d+\.\d+|\w+|(?<!\d)\.(?!\d)|\W)")
-        tokens = [token for token in re.findall(pattern, formated_text) if token.strip()]
-
-        format_array = []
-        parents_array = []
-        parenthesis_count = -1
-        is_whole_line_comment = False
-        quote_counter = 0
-
-        if exact_dependencies is not None:
-            all_parents = depends_on.get((row["Table"], row["Name"]), [])
-        else:
-            standalone_measures = [m for m in measures if m not in columns_clean]
-            all_parents = [i + "[" + j + "]" for i, j in columns] + standalone_measures
-        for token in all_parents:
-            parents_array.append(token)
-            parents_array.append("\n")
-        if parents_array:
-            parents_array.pop(-1)
-
-        for token in tokens:
-            if token == "//":
-                is_whole_line_comment = True
-            elif token == "YYY":
-                is_whole_line_comment = False
-
-            if token == '"' and not is_whole_line_comment:
-                quote_counter += 1
-
-            if is_whole_line_comment:
-                ls_app(formats_data["comment"], token + " ")
-            elif quote_counter > 0:
-                ls_app(formats_data["quote"])
-                if quote_counter == 2:
-                    ls_app(token + " ")
-                    quote_counter = 0
-                else:
-                    ls_app(token)
-            elif token == "XXX":
-                ls_app("\t")
-            elif token == "YYY":
-                ls_app("\n")
-            elif token == "ZZZ":
-                ls_app("&& ")
-            elif token == "AAA":
-                ls_app("|| ")
-            elif token == "(":
-                parenthesis_count += 1
-                safe_count = max(0, min(parenthesis_count, 14))
-                ls_app(formats_data["para"][safe_count], token + " ")
-            elif token == ")":
-                safe_count = max(0, min(parenthesis_count, 14))
-                ls_app(formats_data["para"][safe_count], token + " ")
-                parenthesis_count -= 1
-            elif token == "VAR":
-                ls_app(formats_data["var"], token + " ")
-            elif token in var_names:
-                ls_app(formats_data["varname"], token + " ")
-            elif token in measures:
-                ls_app(
-                    formats_data["para"][parenthesis_count + 1],
-                    token[0],
-                    formats_data["measure"],
-                    token[1:-1],
-                    formats_data["para"][parenthesis_count + 1],
-                    token[-1] + " ",
-                )
-            elif token in tables or token in columns_clean:
-                ls_app(formats_data["measure"], token)
-            elif token in function_names:
-                ls_app(formats_data["function"], token + " ")
-            elif token == "RETURN":
-                ls_app(formats_data["return"], token + " ")
-            else:
-                ls_app(token, " ")
-
-        for col, value in enumerate(row):
-            if col == definition_index and len(format_array) != 0:
-                write_to_excel(worksheet_common, row_num, col, format_array)
-            elif col == parent_index and len(parents_array) != 0:
-                write_to_excel(worksheet_common, row_num, col, parents_array)
-            elif value != "":
-                worksheet_common.write(row_num, col, value)
-        row_num += 1
-
-    # Tab 3: "relationships"
-    worksheet_relationships = workbook_data.add_worksheet("relationships")
-    worksheet_relationships.set_column(0, len(df_relations.columns) - 1, 25, wrap_format_data)
-
-    if num_relations > 0:
-        col = 0
-        for name in df_relations.columns:
-            worksheet_relationships.write(0, col, name, formats_data["bi"])
-            col += 1
-
-        row_num = 1
-        print_graph = True
-        for _, row in df_relations.iterrows():
-            if print_graph:
-                worksheet_relationships.insert_image(
-                    graph_cell,
-                    os.path.join(cwd_save, f"{SAVE_NAME}_Relationships.png"),
-                    {"x_scale": 1, "y_scale": 1},
-                )
-                print_graph = False
-
-            for col, value in enumerate(row):
-                worksheet_relationships.write(row_num, col, value)
-            row_num += 1
-
-    # Tab 4: "unused measures"
-    worksheet_unused = workbook_data.add_worksheet("unused measures")
-    worksheet_unused.set_column(0, 0, 60, wrap_format_data)
-    worksheet_unused.set_column(1, 1, 15, wrap_format_data)
-
-    worksheet_unused.write(0, 0, "Unused Columns and Measures", formats_data["bi"])
-    worksheet_unused.write(0, 1, "Type", formats_data["bi"])
-    row_num = 1
-    for object_type, objects in (("Column", unused_columns), ("Measure", unused_measures)):
-        for table_name, field_name in objects:
-            worksheet_unused.write(row_num, 0, f"{table_name}[{field_name}]")
-            worksheet_unused.write(row_num, 1, object_type)
-            row_num += 1
-
-    # Tab 5: "dependencies" - one row per measure+dependent pair
-    worksheet_deps = workbook_data.add_worksheet("dependencies")
-    worksheet_deps.set_column(0, 0, 50, wrap_format_data)
-    worksheet_deps.set_column(1, 1, 50, wrap_format_data)
-    worksheet_deps.set_column(2, 3, 16, wrap_format_data)
-
-    for col, title in enumerate(["MeasureName", "Dependent", "Object Type", "Dependent Type"]):
-        worksheet_deps.write(0, col, title, formats_data["bi"])
-
-    row_num = 1
-    if exact_dependencies is not None:
-        # Exact (Tabular Editor): measures, calculated columns/tables and RLS filters
-        for dependency in exact_dependencies:
-            worksheet_deps.write(row_num, 0, dependency.source_ref)
-            worksheet_deps.write(row_num, 1, dependency.target_ref)
-            worksheet_deps.write(row_num, 2, dependency.source_type)
-            worksheet_deps.write(row_num, 3, dependency.target_type)
-            row_num += 1
-
-    for _, row in df.iterrows() if exact_dependencies is None else []:
-        if row["Type"] == "Column":
-            continue
-
-        v_definition = row["Definition"]
-        measure_name = f"{row['Table']}[{row['Name']}]"
-
-        dep_columns = find_columns(v_definition)
-        dep_measures = find_measures(v_definition)
-        columns_clean_local = ["[" + j + "]" for _, j in dep_columns]
-        standalone = [m for m in dep_measures if m not in columns_clean_local]
-
-        # Text matching cannot tell columns from measures for unqualified [Name] references
-        all_deps = [(i + "[" + j + "]", "Column") for i, j in dep_columns] + [
-            (m, "Measure/Column") for m in standalone
-        ]
-
-        for dep, dep_type in all_deps:
-            worksheet_deps.write(row_num, 0, measure_name)
-            worksheet_deps.write(row_num, 1, dep)
-            worksheet_deps.write(row_num, 2, row["Type"])
-            worksheet_deps.write(row_num, 3, dep_type)
-            row_num += 1
-
-    add_model_sheets(workbook_data, model, formats_data["bi"], stats=live_statistics)
-    if bpa_violations is not None:
-        add_bpa_sheets(workbook_data, bpa_violations, formats_data["bi"])
-
-    workbook_data.close()
-
-    # ========================================================================
-    # SECTION 11: SAVE LOGS AND RETURN STATUS
-    # ========================================================================
-
-    ## Print Logging Info
+    # 5. Logs
     captured_logs = log_capture.get_logs()
     if captured_logs and LOG_DATA:
-        t = time.localtime()
-        current_time = time.strftime("%H_%M_%S", t)
         location_folder = os.path.join(cwd_save, "logs")
-        location = os.path.join(location_folder, f"log_data_{current_time}.txt")
-
-        if not os.path.exists(location_folder):
-            os.makedirs(location_folder)
-
-        with open(location, "w") as text_file:
-            text_file.write(captured_logs)
-
+        ensure_directory(location_folder)
+        current_time = time.strftime("%H_%M_%S", time.localtime())
+        with open(os.path.join(location_folder, f"log_data_{current_time}.txt"), "w") as file:
+            file.write(captured_logs)
         return "Log"
 
     return "Success"
