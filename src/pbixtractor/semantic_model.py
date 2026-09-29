@@ -11,6 +11,7 @@ TMDL (the folder format used by newer PBIP projects) is not supported yet.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -112,6 +113,42 @@ class Partition:
     entity_name: str = ""  # Direct Lake: source table/view
     schema_name: str = ""
     expression_source: str = ""  # Direct Lake: shared expression holding the connection
+
+    def source_summary(self) -> tuple[str, str]:
+        """
+        Summarise where this partition's data comes from.
+
+        Returns:
+            (connector, source objects), e.g. ("Sql.Database", "dbo.DimCustomer"),
+            ("Direct Lake", "gold.dim_date") or ("DAX", "calculated table").
+            Parsed from the M query, so unusual queries may give partial results.
+        """
+        if self.source_type == "calculated":
+            return "DAX", "calculated table"
+        if self.source_type == "entity":
+            name = (
+                f"{self.schema_name}.{self.entity_name}" if self.schema_name else self.entity_name
+            )
+            return "Direct Lake", name
+        if self.source_type != "m":
+            return self.source_type, ""
+
+        connector = _M_CONNECTOR.search(self.expression)
+        objects = [f"{schema}.{item}" for schema, item in _M_SCHEMA_ITEM.findall(self.expression)]
+        if not objects and _M_NATIVE_QUERY.search(self.expression):
+            objects = ["native SQL query"]
+        return (connector.group(1) if connector else "M"), ", ".join(dict.fromkeys(objects))
+
+
+# M query patterns used by Partition.source_summary()
+_M_CONNECTOR = re.compile(
+    r"\b(Sql\.Databases?|PostgreSQL\.Database|Lakehouse\.Contents|Fabric\.Warehouse|"
+    r"Snowflake\.Databases|Databricks\.Catalogs|Odbc\.\w+|OleDb\.\w+|Oracle\.Database|"
+    r"Excel\.Workbook|Csv\.Document|Json\.Document|SharePoint\.\w+|Web\.Contents|"
+    r"AzureStorage\.\w+|PowerPlatform\.Dataflows|Dataflows?\.\w+)\s*\("
+)
+_M_SCHEMA_ITEM = re.compile(r'Schema\s*=\s*"([^"]+)"\s*,\s*Item\s*=\s*"([^"]+)"')
+_M_NATIVE_QUERY = re.compile(r"Value\.NativeQuery|\[\s*Query\s*=")
 
 
 @dataclass

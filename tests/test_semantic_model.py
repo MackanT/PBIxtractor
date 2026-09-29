@@ -5,7 +5,14 @@ import json
 import pandas as pd
 import pytest
 
-from pbixtractor.semantic_model import DATASET_COLUMNS, model_to_dataset, parse_model, read_model
+from pbixtractor.model_sheets import model_column_rows, model_table_rows
+from pbixtractor.semantic_model import (
+    DATASET_COLUMNS,
+    Partition,
+    model_to_dataset,
+    parse_model,
+    read_model,
+)
 
 # Anonymised, trimmed-down .bim covering the TMSL features we read
 BIM = {
@@ -224,3 +231,50 @@ def test_tmdl_folder_gives_clear_error(tmp_path):
     (tmp_path / "definition").mkdir()
     with pytest.raises(NotImplementedError, match="TMDL"):
         read_model(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "partition, expected",
+    [
+        (
+            Partition(
+                "T",
+                "p",
+                source_type="m",
+                expression="let\n Source = Sql.Database(Server, Db),\n"
+                ' t = Source{[Schema="dbo",Item="DimCustomer"]}[Data]\nin\n t',
+            ),
+            ("Sql.Database", "dbo.DimCustomer"),
+        ),
+        (
+            Partition(
+                "T",
+                "p",
+                source_type="m",
+                expression='Sql.Database("srv", "db", [Query="SELECT 1"])',
+            ),
+            ("Sql.Database", "native SQL query"),
+        ),
+        (
+            Partition("T", "p", source_type="entity", entity_name="dim_date", schema_name="gold"),
+            ("Direct Lake", "gold.dim_date"),
+        ),
+        (Partition("T", "p", source_type="calculated"), ("DAX", "calculated table")),
+        (Partition("T", "p", source_type="m", expression="#table({}, {})"), ("M", "")),
+    ],
+)
+def test_partition_source_summary(partition, expected):
+    assert partition.source_summary() == expected
+
+
+def test_model_sheet_rows(model):
+    tables = {row[0]: row for row in model_table_rows(model)}
+    # Table, Storage Mode, Connector, Source Objects, Hidden, Columns, Calculated, Measures, ...
+    assert tables["Sales"][1:4] == ["Import", "M", ""]
+    assert tables["Sales"][5:9] == [2, 1, 2, 0]
+    assert tables["Dates"][1:4] == ["Direct Lake", "Direct Lake", "gold.dim_date"]
+
+    columns = {(row[0], row[1]): row for row in model_column_rows(model)}
+    assert columns[("Sales", "Date Key")][2:6] == ["Int64", "Data", "DateKey", "Yes"]
+    assert columns[("Sales", "Is Big")][3] == "Calculated"
+    assert columns[("Dates", "Month")][9] == "Month Number"  # sort by
