@@ -3,8 +3,6 @@
 import os
 import re
 
-import psutil
-
 
 def rgba_tuple_to_hex(color: tuple) -> str:
     """
@@ -104,28 +102,25 @@ def write_to_excel(worksheet, row: int, col: int, text: list[str]):
 
 def is_excel_open_with_file(file_path: str) -> bool:
     """
-    Check if Excel is currently open with the specified file.
+    Check if a workbook is open in Excel (or locked by another program), so it cannot be
+    overwritten.
+
+    Excel locks open workbooks against writing, so trying to open the file for writing is
+    enough. (Listing the open files of every process with psutil took ~35 s per call.)
 
     Args:
         file_path: Path to Excel file
 
     Returns:
-        True if file is open in Excel, False otherwise
+        True if the file exists and cannot be opened for writing
     """
     if not os.path.exists(file_path):
         return False
-
-    for proc in psutil.process_iter(["name", "open_files"]):
-        try:
-            if proc.info["name"] == "EXCEL.EXE":
-                if proc.info["open_files"]:
-                    for file in proc.info["open_files"]:
-                        if os.path.normpath(file.path) == os.path.normpath(file_path):
-                            return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-
-    return False
+    try:
+        with open(file_path, "r+b"):
+            return False
+    except PermissionError:
+        return True
 
 
 def excel_sheet_name(name: str, used: set[str]) -> str:

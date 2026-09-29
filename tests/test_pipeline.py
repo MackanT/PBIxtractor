@@ -1,6 +1,7 @@
 """Tests for the pipeline (pipeline.py) and the command line (cli.py)."""
 
 import json
+import sys
 
 import pytest
 
@@ -11,6 +12,7 @@ from pbixtractor.pipeline import (
     report_name,
     run_extraction,
 )
+from pbixtractor.utils import is_excel_open_with_file
 
 from .sample_layout import write_sample_pbix
 from .test_semantic_model import BIM
@@ -87,6 +89,34 @@ def test_run_extraction_errors(sample):
         )
     )
     assert result.status == "error" and "model file" in result.message
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows file locking")
+def test_workbook_open_in_excel_is_not_overwritten(sample):
+    """Excel opens workbooks without write sharing; the run must stop instead of failing late."""
+    import ctypes
+
+    options = ExtractionOptions(
+        report_path=sample / "Sample.pbix",
+        model_path=sample / "Sample.bim",
+        output_dir=sample / "out",
+        tabular_editor_analysis=False,
+    )
+    assert run_extraction(options).ok
+    workbook = sample / "out" / "Sample.xlsx"
+    assert not is_excel_open_with_file(str(workbook))
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    generic_read, share_read, open_existing = 0x80000000, 0x1, 3
+    handle = kernel32.CreateFileW(str(workbook), generic_read, share_read, None, open_existing, 0, None)
+    assert handle not in (None, ctypes.c_void_p(-1).value)
+    try:
+        assert is_excel_open_with_file(str(workbook))
+        result = run_extraction(options)
+        assert result.status == "error" and "close Sample.xlsx" in result.message
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 
 def test_cli_extract(sample, capsys):
