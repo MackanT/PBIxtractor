@@ -94,6 +94,7 @@ class PageInfo:
     page_type: str = ""  # "", "Tooltip" or "Drillthrough"
     visuals: int = 0  # visuals and slicers
     buttons: int = 0
+    broken_buttons: int = 0  # buttons pointing to a deleted bookmark or page
     page_filters: int = 0
     changed_interactions: int = 0
     sync_groups: list[str] = field(default_factory=list)
@@ -216,6 +217,17 @@ def button_target_and_label(row: pd.Series) -> tuple[str, str]:
         return display_name, ""
     return row["Name"] or "", display_name
 
+
+def is_missing_target(target: str) -> bool:
+    """True for a button target the extractor marked as deleted, e.g. "(missing page: id)"."""
+    return str(target).startswith("(missing ")
+
+
+def is_broken_button(item: PageItem) -> bool:
+    """A button whose bookmark or page no longer exists."""
+    return item.item_type == "Button" and is_missing_target(
+        button_target_and_label(item.first_row)[0]
+    )
 
 
 def field_display_name(row: pd.Series) -> str:
@@ -573,6 +585,7 @@ def build_page_info(
                 page_type=page.page_type,
                 visuals=sum(1 for i in items if i.item_type in ("Visual", "Slicer")),
                 buttons=sum(1 for i in items if i.item_type == "Button"),
+                broken_buttons=sum(1 for i in items if is_broken_button(i)),
                 page_filters=sum(
                     1 for f in filter_strings if f[2] == "This Page" and f[0] == page.display_name
                 ),

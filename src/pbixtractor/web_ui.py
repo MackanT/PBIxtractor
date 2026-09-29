@@ -127,6 +127,7 @@ def _stats(report_json: dict) -> list[tuple[str, object, str]]:
     items = [item for page in pages for item in page["items"]]
     measures = sum(len(t["measures"]) for t in report_json["model"]["tables"])
     unused_bookmarks = sum(1 for b in report_json["report"].get("bookmarks", []) if not b["used_by"])
+    broken = sum(1 for i in items if i.get("broken"))
     quality = Counter(v["severity"] for v in report_json["quality"] or [])
     stats = [
         ("Pages", len(pages), "primary"),
@@ -136,6 +137,7 @@ def _stats(report_json: dict) -> list[tuple[str, object, str]]:
         ("Unused columns", len(report_json["unused"]["columns"]), "warning"),
         ("Unused measures", len(report_json["unused"]["measures"]), "warning"),
         ("Buttons", sum(1 for i in items if i["type"] == "Button"), "primary"),
+        ("Broken buttons", broken, "negative" if broken else "positive"),
         ("Unused bookmarks", unused_bookmarks, "warning" if unused_bookmarks else "positive"),
     ]
     if report_json["quality"] is not None:
@@ -261,6 +263,33 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                     "Everything is used.",
                 )
             with ui.tab_panel(bookmarks_tab):
+                broken_buttons = [
+                    {
+                        "_id": f"{page['name']}/{item['id']}",
+                        "page": page["name"],
+                        "button": item.get("label") or item["id"],
+                        "action": item.get("action", ""),
+                        "target": item.get("target", ""),
+                    }
+                    for page in doc["report"]["pages"]
+                    for item in page["items"]
+                    if item.get("broken")
+                ]
+                if broken_buttons:
+                    ui.label("Broken buttons (bookmark or page deleted)").classes(
+                        "text-subtitle2 text-negative"
+                    )
+                    _table(
+                        broken_buttons,
+                        [
+                            ("page", "Page"),
+                            ("button", "Button"),
+                            ("action", "Action"),
+                            ("target", "Target"),
+                        ],
+                        "",
+                    )
+                    ui.label("Bookmarks").classes("text-subtitle2 q-mt-md")
                 _table(
                     [
                         {

@@ -13,7 +13,13 @@ from typing import Any, Optional
 
 from . import __version__
 from .dax import text_dependencies
-from .documentation import Documentation, PageItem, button_target_and_label, field_display_name
+from .documentation import (
+    Documentation,
+    PageItem,
+    button_target_and_label,
+    field_display_name,
+    is_missing_target,
+)
 from .model_sheets import STORAGE_MODES
 
 SCHEMA_VERSION = 1
@@ -60,6 +66,8 @@ def _item_dict(item: PageItem, interactivity: list[str]) -> dict:
         target, label = button_target_and_label(item.first_row)
         if item.item_type == "Button":
             data.update(action=item.first_row["Type"], target=target, label=label)
+            if is_missing_target(target):
+                data["broken"] = True  # its bookmark or page was deleted
         else:
             data["name"] = target
     if item.visual_filters:

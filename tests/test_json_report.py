@@ -89,6 +89,8 @@ def test_report_section(data):
         "target": "Panel Open",
         "label": "Show panel",
     }
+    assert by_id["btn4"]["broken"] is True  # its bookmark was deleted
+    assert by_id["btn4"]["target"] == "(missing bookmark: Bookmarkdeadbeef)"
     page_filter = next(i for i in page["items"] if i["type"] == "Filter")
     assert page_filter == {
         "type": "Filter",

@@ -216,6 +216,8 @@ def test_page_info_bookmarks_and_interactivity(model, report):
     assert info["Detail"].hidden and not info["Sales"].hidden  # empty pages are listed too
     assert info["Sales"].changed_interactions == 1
     assert info["Sales"].sync_groups == ["Year"]
+    assert info["Sales"].broken_buttons == 1  # btn4 points to a deleted bookmark
+    assert info["Detail"].broken_buttons == 0
 
     assert documentation.interactivity[("Sales", "slc1")] == [
         "Sync group: Year",

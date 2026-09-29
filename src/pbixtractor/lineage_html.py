@@ -143,6 +143,8 @@ def _visual_labels(doc: dict) -> dict[str, str]:
             if item["type"] == "Button":
                 target = item.get("target") or item.get("label") or item.get("action")
                 label = f"{kind} → {target}" if target else kind
+                if item.get("broken"):
+                    label = f"⚠ {label}"
             elif item["type"] == "Group":
                 label = f"{kind}: {item.get('name') or item['id']}"
             else:

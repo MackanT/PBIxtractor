@@ -81,6 +81,7 @@ def test_layers_follow_the_flow(data):
 def test_labels_details_and_unused(data):
     nodes = {n["id"]: n for n in data["nodes"]}
     assert nodes["visual:Sales/btn1"]["label"] == "Button → Panel Open"
+    assert nodes["visual:Sales/btn4"]["label"].startswith("⚠ ")  # deleted bookmark
     assert nodes["visual:Sales/slc1"]["label"].startswith("Slicer: ")
     assert nodes["visual:Sales/grp1"]["label"] == "Panel: Filter Popup"
 
