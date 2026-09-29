@@ -23,7 +23,8 @@ from .documentation import (  # noqa: F401 (re-exported)
     parse_tsv_object_name,
 )
 from .excel_report import write_data_workbook, write_main_workbook
-from .json_report import write_json
+from .json_report import documentation_to_dict, write_json_data
+from .lineage_html import write_lineage_html
 from .live_model import collect_live_statistics
 from .logger import get_logger, setup_logger
 from .relationship_graph import save_relationship_graph
@@ -926,8 +927,8 @@ def run_cmd():
     1. Read the semantic model (.bim) and run the optional Tabular Editor analysis
     2. Extract the report (visuals, buttons, filters) from the .pbix
     3. Analyse: objects, relationships, unused columns/measures (documentation.py)
-    4. Write the relationship graph, both Excel workbooks (excel_report.py) and the JSON
-       documentation (json_report.py)
+    4. Write the relationship graph, both Excel workbooks (excel_report.py), the JSON
+       documentation (json_report.py) and the lineage viewer (lineage_html.py)
     5. Save captured logs
 
     Returns:
@@ -1009,7 +1010,9 @@ def run_cmd():
         graph_path,
         known_functions,
     )
-    write_json(os.path.join(cwd_save, f"{SAVE_NAME}.json"), documentation)
+    report_json = documentation_to_dict(documentation)
+    write_json_data(os.path.join(cwd_save, f"{SAVE_NAME}.json"), report_json)
+    write_lineage_html(os.path.join(cwd_save, f"{SAVE_NAME}_lineage.html"), report_json)
 
     # 5. Logs
     captured_logs = log_capture.get_logs()

@@ -333,6 +333,10 @@ def _lineage_section(documentation: Documentation, dependencies: list[dict]) -> 
             cross_filter=rel.direction_label,
         )
 
+    # Every page gets a node, also pages without visuals (from page_info)
+    for info in documentation.page_info:
+        node(f"page:{info.name}", "page", info.name)
+
     for page, items in documentation.pages.items():
         page_id = node(f"page:{page}", "page", page)
         for item in items:
@@ -398,6 +402,11 @@ def documentation_to_dict(documentation: Documentation) -> dict:
 
 def write_json(path: str, documentation: Documentation) -> None:
     """Write the documentation as UTF-8 JSON (indented, stable key order)."""
+    write_json_data(path, documentation_to_dict(documentation))
+
+
+def write_json_data(path: str, data: dict) -> None:
+    """Write an already converted documentation dict (see documentation_to_dict)."""
     with open(path, "w", encoding="utf-8") as file:
-        json.dump(documentation_to_dict(documentation), file, indent=2, ensure_ascii=False)
+        json.dump(data, file, indent=2, ensure_ascii=False)
         file.write("\n")
