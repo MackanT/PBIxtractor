@@ -42,6 +42,7 @@ def data():
         visual_types=extractor.visual_type_list,
         logger=logging.getLogger("test"),
         exact_dependencies=DEPENDENCIES,
+        report=report.report,
     )
     return documentation_to_dict(documentation)
 
@@ -52,6 +53,19 @@ def test_top_level_sections(data):
     assert set(data) >= {"report", "model", "dependencies", "unused", "quality", "lineage"}
     assert data["quality"] is None  # BPA not run
     assert data["dependencies_exact"] is True
+
+
+def test_pages_and_bookmarks(data):
+    pages = {p["name"]: p for p in data["report"]["pages"]}
+    assert pages["Detail"]["hidden"] is True and pages["Detail"]["items"] == []
+    assert pages["Sales"]["sync_groups"] == ["Year"]
+    slicer = next(i for i in pages["Sales"]["items"] if i.get("id") == "slc1")
+    assert slicer["interactivity"] == ["Sync group: Year", "No effect on Table (tbl1)"]
+
+    bookmark = next(b for b in data["report"]["bookmarks"] if b["id"] == "Bookmark1")
+    assert bookmark["captures"] == ["Display", "Current page"]
+    assert bookmark["used_by"] == ["Sales (btn1)"]
+    assert bookmark["hides"] == ["Table (tbl1) on Sales", "Panel (grp1) on Sales"]
 
 
 def test_report_section(data):

@@ -17,6 +17,7 @@ import pandas as pd
 from .constants import REPORT_COLUMNS
 from .dax import find_columns, find_measures
 from .live_model import LiveStatistics
+from .readers import ReportDefinition
 from .semantic_model import SemanticModel
 from .tabular_editor import BpaViolation, Dependency
 from .utils import find_nth_occurrence
@@ -85,6 +86,34 @@ class PageItem:
 
 
 @dataclass
+class PageInfo:
+    """Summary of one report page."""
+
+    name: str
+    hidden: bool = False
+    page_type: str = ""  # "", "Tooltip" or "Drillthrough"
+    visuals: int = 0  # visuals and slicers
+    buttons: int = 0
+    page_filters: int = 0
+    changed_interactions: int = 0
+    sync_groups: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BookmarkInfo:
+    """A bookmark, what it captures, and which buttons use it."""
+
+    name: str  # id
+    display_name: str
+    group: str = ""
+    page: str = ""  # page display name it navigates to (if it captures the page)
+    captures: str = ""  # e.g. "Data, Display, Current page"
+    applies_to: str = ""  # "All visuals" or "N selected visuals"
+    hidden_visuals: list[str] = field(default_factory=list)  # labels of visuals it hides
+    used_by: list[str] = field(default_factory=list)  # "Page (visual id)" of buttons using it
+
+
+@dataclass
 class Documentation:
     """Everything the documentation writers need."""
 
@@ -100,6 +129,14 @@ class Documentation:
     exact_dependencies: Optional[list[Dependency]] = None
     bpa_violations: Optional[list[BpaViolation]] = None
     live_statistics: Optional[LiveStatistics] = None
+    page_info: list[PageInfo] = field(default_factory=list)
+    bookmarks: list[BookmarkInfo] = field(default_factory=list)
+    # (page, visual id) -> notes such as "Sync group: Year", "No effect on Table (a1b2)"
+    interactivity: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+
+    def interactivity_text(self, page: str, visual_id) -> str:
+        """Interactivity notes of a visual as one multi-line string."""
+        return "\n".join(self.interactivity.get((page, str(visual_id)), []))
 
     @cached_property
     def _dependencies_by_source(self) -> dict[tuple[str, str], list[str]]:
@@ -474,6 +511,124 @@ def find_unused(
     )
 
 
+def _visual_labels(pages: dict[str, list[PageItem]]) -> dict[str, str]:
+    """Visual id -> readable label, e.g. "Table (a1b2c3) on Sales"."""
+    labels = {}
+    for page, items in pages.items():
+        for item in items:
+            if item.item_type != "Filter":
+                labels[str(item.id)] = f"{item.visual_type} ({item.id}) on {page}"
+    return labels
+
+
+# How a changed interaction is described on the source visual
+_INTERACTION_TEXT = {"None": "No effect on", "Filter": "Filters", "Highlight": "Highlights"}
+
+
+def build_interactivity(
+    report: ReportDefinition, pages: dict[str, list[PageItem]]
+) -> dict[tuple[str, str], list[str]]:
+    """
+    Interactivity notes per visual: hidden state, slicer sync group, changed interactions.
+
+    Args:
+        report: Report definition (readers.read_report)
+        pages: Page items from build_page_items()
+
+    Returns:
+        (page, visual id) -> notes
+    """
+    labels = _visual_labels(pages)
+    notes: dict[tuple[str, str], list[str]] = {}
+    for page in report.pages:
+        for visual in page.visuals:
+            key = (page.display_name, visual.name)
+            if visual.hidden:
+                notes.setdefault(key, []).append("Hidden on page")
+            if visual.sync_group:
+                notes.setdefault(key, []).append(f"Sync group: {visual.sync_group}")
+        for interaction in page.interactions:
+            if interaction.kind == "Default":
+                continue
+            action = _INTERACTION_TEXT.get(interaction.kind, f"{interaction.kind}:")
+            target = labels.get(interaction.target, interaction.target)
+            target = target.removesuffix(f" on {page.display_name}")
+            notes.setdefault((page.display_name, interaction.source), []).append(
+                f"{action} {target}"
+            )
+    return notes
+
+
+def build_page_info(
+    report: ReportDefinition, pages: dict[str, list[PageItem]], filter_strings: list[list]
+) -> list[PageInfo]:
+    """One summary per report page, including pages without visuals."""
+    info = []
+    for page in report.pages:
+        items = pages.get(page.display_name, [])
+        info.append(
+            PageInfo(
+                name=page.display_name,
+                hidden=page.hidden,
+                page_type=page.page_type,
+                visuals=sum(1 for i in items if i.item_type in ("Visual", "Slicer")),
+                buttons=sum(1 for i in items if i.item_type == "Button"),
+                page_filters=sum(
+                    1 for f in filter_strings if f[2] == "This Page" and f[0] == page.display_name
+                ),
+                changed_interactions=sum(1 for i in page.interactions if i.kind != "Default"),
+                sync_groups=sorted({v.sync_group for v in page.visuals if v.sync_group}),
+            )
+        )
+    return info
+
+
+def build_bookmarks(
+    report: ReportDefinition, report_info: pd.DataFrame, pages: dict[str, list[PageItem]]
+) -> list[BookmarkInfo]:
+    """
+    Bookmarks with their capture options, hidden visuals and the buttons that use them.
+
+    Buttons are matched on the bookmark's display name (what the button rows hold).
+    """
+    labels = _visual_labels(pages)
+    page_names = {page.name: page.display_name for page in report.pages}
+    button_rows = report_info[report_info["Type"] == "Bookmark"]
+
+    bookmarks = []
+    for bookmark in report.bookmark_details:
+        captures = [
+            label
+            for label, captured in (
+                ("Data", bookmark.captures_data),
+                ("Display", bookmark.captures_display),
+                ("Current page", bookmark.captures_page),
+            )
+            if captured
+        ]
+        used_by = [
+            f"{row['Page']} ({row['Visual ID']})"
+            for _, row in button_rows[button_rows["Name"] == bookmark.display_name].iterrows()
+        ]
+        bookmarks.append(
+            BookmarkInfo(
+                name=bookmark.name,
+                display_name=bookmark.display_name,
+                group=bookmark.group,
+                page=page_names.get(bookmark.page, bookmark.page) if bookmark.captures_page else "",
+                captures=", ".join(captures),
+                applies_to=(
+                    f"{len(bookmark.target_visuals)} selected visuals"
+                    if bookmark.target_visuals
+                    else "All visuals"
+                ),
+                hidden_visuals=[labels.get(v, v) for v in bookmark.hidden_visuals],
+                used_by=list(dict.fromkeys(used_by)),
+            )
+        )
+    return bookmarks
+
+
 def resolve_hierarchy_columns(report_info: pd.DataFrame, model: SemanticModel) -> pd.DataFrame:
     """
     Replace hierarchy level names with the model column behind each level.
@@ -518,6 +673,7 @@ def build_documentation(
     exact_dependencies: Optional[list[Dependency]] = None,
     bpa_violations: Optional[list[BpaViolation]] = None,
     live_statistics: Optional[LiveStatistics] = None,
+    report: Optional[ReportDefinition] = None,
 ) -> Documentation:
     """
     Combine report extraction, model and analysis results.
@@ -535,6 +691,7 @@ def build_documentation(
         exact_dependencies: Tabular Editor dependencies (None: text matching)
         bpa_violations: Best Practice Analyzer findings (None: not run)
         live_statistics: Statistics from Power BI Desktop (None: not available)
+        report: Report definition for page info, bookmarks and interactivity (optional)
 
     Returns:
         Documentation
@@ -547,11 +704,12 @@ def build_documentation(
     unused_columns, unused_measures = find_unused(
         dataset, objects, model, report_info, unique, exact_dependencies
     )
+    pages = build_page_items(report_info, filter_strings, visual_mapper, visual_types, logger)
     return Documentation(
         report_name=report_name,
         report_info=report_info,
         filter_strings=filter_strings,
-        pages=build_page_items(report_info, filter_strings, visual_mapper, visual_types, logger),
+        pages=pages,
         model=model,
         objects=objects,
         relations=build_relations(model),
@@ -560,4 +718,7 @@ def build_documentation(
         exact_dependencies=exact_dependencies,
         bpa_violations=bpa_violations,
         live_statistics=live_statistics,
+        page_info=build_page_info(report, pages, filter_strings) if report else [],
+        bookmarks=build_bookmarks(report, report_info, pages) if report else [],
+        interactivity=build_interactivity(report, pages) if report else {},
     )

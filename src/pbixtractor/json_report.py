@@ -39,7 +39,7 @@ def _ref(table: str, name: str) -> str:
 # ============================================================================
 
 
-def _item_dict(item: PageItem) -> dict:
+def _item_dict(item: PageItem, interactivity: list[str]) -> dict:
     data = {"type": item.item_type, "visual_type": item.visual_type}
     if item.item_type == "Filter":
         data.update(field=item.filter_field, condition=item.filter_condition)
@@ -64,15 +64,41 @@ def _item_dict(item: PageItem) -> dict:
             data["name"] = target
     if item.visual_filters:
         data["filters"] = [{"field": f, "condition": c} for f, c in item.visual_filters]
+    if interactivity:
+        data["interactivity"] = interactivity
     return data
 
 
 def _report_section(documentation: Documentation) -> dict:
+    info = {p.name: p for p in documentation.page_info}
+    page_names = list(info) or list(documentation.pages)  # page_info also has empty pages
     return {
         "name": documentation.report_name,
         "pages": [
-            {"name": page, "items": [_item_dict(item) for item in items]}
-            for page, items in documentation.pages.items()
+            {
+                "name": page,
+                "hidden": info[page].hidden if page in info else None,
+                "page_type": (info[page].page_type or None) if page in info else None,
+                "sync_groups": info[page].sync_groups if page in info else [],
+                "items": [
+                    _item_dict(item, documentation.interactivity.get((page, str(item.id)), []))
+                    for item in documentation.pages.get(page, [])
+                ],
+            }
+            for page in page_names
+        ],
+        "bookmarks": [
+            {
+                "id": b.name,
+                "name": b.display_name,
+                "group": b.group or None,
+                "page": b.page or None,
+                "captures": [c for c in b.captures.split(", ") if c],
+                "applies_to": b.applies_to,
+                "hides": b.hidden_visuals,
+                "used_by": b.used_by,
+            }
+            for b in documentation.bookmarks
         ],
         "filters": [
             {

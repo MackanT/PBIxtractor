@@ -81,6 +81,7 @@ class ReportExtractor:
         self.name = name
         self.result = []
         self.filters = []
+        self.report = None  # readers.ReportDefinition after extract()
         self.logger = get_logger("pbixtractor")
 
         # Import modular extractors
@@ -168,7 +169,7 @@ class ReportExtractor:
         from .extractors import ReportContext
         from .readers import read_report
 
-        report = read_report(os.path.join(self.path, self.name), self.logger)
+        report = self.report = read_report(os.path.join(self.path, self.name), self.logger)
         self.logger.debug(f"Read {self.name} ({report.format} format)")
         context = ReportContext.from_report(report)
 
@@ -995,6 +996,7 @@ def run_cmd():
         exact_dependencies=exact_dependencies,
         bpa_violations=bpa_violations,
         live_statistics=live_statistics,
+        report=rep_ex.report,
     )
 
     # 4. Output

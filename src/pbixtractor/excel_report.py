@@ -17,7 +17,7 @@ from .documentation import (
     field_description,
     field_display_name,
 )
-from .model_sheets import add_bpa_sheets, add_model_sheets
+from .model_sheets import add_bpa_sheets, add_model_sheets, write_table
 from .utils import excel_sheet_name, rgba_tuple_to_hex, write_to_excel
 
 # Colours for nested brackets in DAX (cycled by nesting depth)
@@ -158,7 +158,9 @@ def _write_objects(
     return row_num
 
 
-def _write_page_sheet(worksheet, items: list[PageItem], formats: dict) -> None:
+def _write_page_sheet(
+    worksheet, page: str, items: list[PageItem], documentation: Documentation, formats: dict
+) -> None:
     """One sheet per report page: one row per visual, button, group or page filter."""
     worksheet.set_column(0, 6, 30, formats["top_wrap"])
     worksheet.set_column(2, 2, 50, formats["top_wrap"])
@@ -191,6 +193,9 @@ def _write_page_sheet(worksheet, items: list[PageItem], formats: dict) -> None:
         worksheet.write(row_num, 3, description)
         if item.visual_filters:
             write_to_excel(worksheet, row_num, 4, _filters_rich_text(item, formats))
+        interactivity = documentation.interactivity_text(page, item.id)
+        if interactivity:
+            worksheet.write(row_num, 5, interactivity)
 
 
 def _write_pages_sheet(
@@ -214,6 +219,7 @@ def _write_pages_sheet(
     for page, items in documentation.pages.items():
         for item in items:
             filters = _filters_rich_text(item, formats)
+            interactivity = documentation.interactivity_text(page, item.id)
 
             if item.item_type in ("Visual", "Slicer"):
                 description = field_description(item.fields) if with_description else None
@@ -227,6 +233,8 @@ def _write_pages_sheet(
                     worksheet.write(row_num, 6, field_display_name(field_row))
                     if filters:
                         write_to_excel(worksheet, row_num, 7, filters)
+                    if interactivity:
+                        worksheet.write(row_num, 8, interactivity)
                     if with_description:
                         worksheet.write(row_num, 10, description)
                     row_num += 1
@@ -242,6 +250,8 @@ def _write_pages_sheet(
                 worksheet.write(row_num, 6, label)
                 if filters:
                     write_to_excel(worksheet, row_num, 7, filters)
+                if interactivity:
+                    worksheet.write(row_num, 8, interactivity)
                 row_num += 1
 
             else:  # page filter
@@ -252,6 +262,93 @@ def _write_pages_sheet(
                 worksheet.write(row_num, 5, item.filter_field)
                 worksheet.write(row_num, 6, item.filter_condition)
                 row_num += 1
+
+
+def add_report_sheets(
+    workbook: xlsxwriter.Workbook,
+    documentation: Documentation,
+    formats: dict,
+    sheet_name=lambda name: name,
+) -> None:
+    """
+    Report-level sheets: "report pages" (hidden/tooltip/drillthrough pages and counts),
+    "bookmarks" (captures, hidden visuals, buttons using them) and "report filters" (every
+    filter on every level, including report-level filters).
+    """
+    if documentation.page_info:
+        write_table(
+            workbook.add_worksheet(sheet_name("report pages")),
+            formats["bi"],
+            [
+                ("Page", 30),
+                ("Hidden", 8),
+                ("Page Type", 13),
+                ("Visuals", 9),
+                ("Buttons", 9),
+                ("Page Filters", 11),
+                ("Changed Interactions", 12),
+                ("Sync Groups", 50),
+            ],
+            [
+                [
+                    p.name,
+                    "Yes" if p.hidden else "",
+                    p.page_type,
+                    p.visuals,
+                    p.buttons,
+                    p.page_filters,
+                    p.changed_interactions,
+                    ", ".join(p.sync_groups),
+                ]
+                for p in documentation.page_info
+            ],
+        )
+
+    if documentation.bookmarks:
+        write_table(
+            workbook.add_worksheet(sheet_name("bookmarks")),
+            formats["bi"],
+            [
+                ("Bookmark", 40),
+                ("Group", 20),
+                ("Page", 25),
+                ("Captures", 28),
+                ("Applies To", 20),
+                ("Hides", 60, formats["wrap"]),
+                ("Used By Buttons", 50, formats["wrap"]),
+                ("ID", 30),
+            ],
+            [
+                [
+                    b.display_name,
+                    b.group,
+                    b.page,
+                    b.captures,
+                    b.applies_to,
+                    "\n".join(b.hidden_visuals),
+                    "\n".join(b.used_by) if b.used_by else "(not used by any button)",
+                    b.name,
+                ]
+                for b in documentation.bookmarks
+            ],
+        )
+
+    if documentation.filter_strings:
+        write_table(
+            workbook.add_worksheet(sheet_name("report filters")),
+            formats["bi"],
+            [
+                ("Level", 12),
+                ("Page", 25),
+                ("Visual / Filter", 30),
+                ("Field", 40),
+                ("Condition", 60),
+            ],
+            [
+                [level, page or "(all pages)", item, field, condition]
+                for page, item, level, field, condition in documentation.filter_strings
+            ],
+        )
 
 
 # ============================================================================
@@ -300,11 +397,14 @@ def write_main_workbook(
         row_num += 1
 
     for page, items in documentation.pages.items():
-        _write_page_sheet(workbook.add_worksheet(sheet_name(page)), items, formats)
+        _write_page_sheet(
+            workbook.add_worksheet(sheet_name(page)), page, items, documentation, formats
+        )
 
     _write_pages_sheet(
         workbook.add_worksheet(sheet_name("Pages")), documentation, formats, with_description=False
     )
+    add_report_sheets(workbook, documentation, formats, sheet_name)
 
     add_model_sheets(
         workbook, documentation.model, formats["bi"], sheet_name, documentation.live_statistics
@@ -361,6 +461,7 @@ def write_data_workbook(
             row_num += 1
 
     _write_dependencies_sheet(workbook.add_worksheet("dependencies"), documentation, formats)
+    add_report_sheets(workbook, documentation, formats)
 
     add_model_sheets(
         workbook, documentation.model, formats["bi"], stats=documentation.live_statistics

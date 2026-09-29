@@ -35,16 +35,16 @@ def model():
 
 @pytest.fixture(scope="module")
 def report():
-    """Sample report extraction: (items, filters)."""
+    """Sample report extraction: (items, filters, report definition)."""
     folder = Path(tempfile.mkdtemp())
     write_sample_pbix(folder / "Sample.pbix")
     report_extractor = extractor.ReportExtractor(str(folder), "Sample.pbix")
     report_extractor.extract()
-    return report_extractor.result, report_extractor.filters
+    return report_extractor.result, report_extractor.filters, report_extractor.report
 
 
 def _documentation(model, report, **kwargs):
-    items, filters = report
+    items, filters, definition = report
     return build_documentation(
         report_items=items,
         report_filters=filters,
@@ -55,6 +55,7 @@ def _documentation(model, report, **kwargs):
         visual_mapper=extractor.visual_mapper,
         visual_types=extractor.visual_type_list,
         logger=LOGGER,
+        report=definition,
         **kwargs,
     )
 
@@ -172,10 +173,57 @@ def test_run_cmd_end_to_end(tmp_path, monkeypatch):
     with zipfile.ZipFile(output / "Sample_data.xlsx") as data_book:
         names = data_book.read("xl/workbook.xml").decode()
         strings = data_book.read("xl/sharedStrings.xml").decode()
-    for sheet in ("pages", "common", "relationships", "unused measures", "dependencies"):
+    for sheet in (
+        "pages",
+        "common",
+        "relationships",
+        "unused measures",
+        "dependencies",
+        "report pages",
+        "bookmarks",
+        "report filters",
+    ):
         assert f'name="{sheet}"' in names
     assert "Sales[Dynamic]" in strings  # unused measure listed
     assert "Panel Open" in strings  # bookmark button target
+    assert "Sync group: Year" in strings  # interactivity column
+
+    # Conditions like "= False" must be text, not Excel formulas
+    with zipfile.ZipFile(output / "Sample_data.xlsx") as data_book:
+        sheets = [n for n in data_book.namelist() if n.startswith("xl/worksheets/sheet")]
+        assert not any(b"<f>" in data_book.read(sheet) for sheet in sheets)
+    assert "= False" in strings
+
+
+def test_page_info_bookmarks_and_interactivity(model, report):
+    documentation = _documentation(model, report)
+
+    info = {p.name: p for p in documentation.page_info}
+    assert info["Detail"].hidden and not info["Sales"].hidden  # empty pages are listed too
+    assert info["Sales"].changed_interactions == 1
+    assert info["Sales"].sync_groups == ["Year"]
+
+    assert documentation.interactivity[("Sales", "slc1")] == [
+        "Sync group: Year",
+        "No effect on Table (tbl1)",
+    ]
+    assert documentation.interactivity[("Sales", "grp1")] == ["Hidden on page"]
+    assert documentation.interactivity_text("Sales", "btn1") == ""
+
+    bookmarks = {b.display_name: b for b in documentation.bookmarks}
+    panel = bookmarks["Panel Open"]
+    assert (panel.captures, panel.applies_to, panel.page) == (
+        "Display, Current page",
+        "2 selected visuals",
+        "Sales",
+    )
+    assert panel.hidden_visuals == ["Table (tbl1) on Sales", "Panel (grp1) on Sales"]
+    assert panel.used_by == ["Sales (btn1)"]
+
+    nested = bookmarks["Nested"]
+    assert nested.group == "Group"
+    assert nested.used_by == ["Sales (shp2)"]  # the clickable shape
+    assert nested.captures == "Data, Display, Current page"  # defaults: everything
 
 
 def test_resolve_hierarchy_columns(model):

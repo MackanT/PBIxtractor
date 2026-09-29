@@ -44,6 +44,10 @@ def _share(part: int, whole: int) -> Optional[float]:
     return round(part / whole, 4) if whole else None
 
 
+# Public name for other sheet writers
+write_table = _write_table
+
+
 def model_table_rows(model: SemanticModel, stats: Optional[LiveStatistics] = None) -> list[list]:
     """One row per table: storage mode, source, object counts and (live) rows/size."""
     rows = []
