@@ -117,6 +117,7 @@ VISUALS = [
                     }
                 }
             },
+            "syncGroup": {"groupName": "Year", "fieldChanges": True, "filterChanges": True},
         },
     ),
     _visual(
@@ -147,7 +148,12 @@ VISUALS = [
     _button(legacy.NAVIGATION_BUTTON),
     _button(legacy.ICON_BUTTON),
     _button(legacy.BROKEN_BUTTON),
-    {"name": "grp1", "position": {}, "visualGroup": {"displayName": "Filter Popup"}},
+    {
+        "name": "grp1",
+        "position": {},
+        "visualGroup": {"displayName": "Filter Popup"},
+        "isHidden": True,
+    },
     _button(legacy.SHAPE),
     _button(legacy.CLICKABLE_SHAPE),
 ]
@@ -165,10 +171,12 @@ def _definition_files() -> dict[str, dict]:
             "name": "ReportSectionA",
             "displayName": "Sales",
             "filterConfig": {"filters": _pbir_filters(legacy.PAGE_FILTERS)},
+            "visualInteractions": [{"source": "slc1", "target": "tbl1", "type": "NoFilter"}],
         },
         "definition/pages/ReportSectionB/page.json": {
             "name": "ReportSectionB",
             "displayName": "Detail",
+            "visibility": "HiddenInViewMode",
         },
         "definition/bookmarks/bookmarks.json": {
             "items": [
@@ -179,6 +187,7 @@ def _definition_files() -> dict[str, dict]:
         "definition/bookmarks/Bookmark1.bookmark.json": {
             "name": "Bookmark1",
             "displayName": "Panel Open",
+            **legacy.BOOKMARK_STATE,
         },
         "definition/bookmarks/Bookmark2.bookmark.json": {
             "name": "Bookmark2",

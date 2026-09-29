@@ -45,11 +45,22 @@ class VisualDefinition:
     objects: dict = field(default_factory=dict)  # visual formatting objects
     container_objects: dict = field(default_factory=dict)  # title, visualLink (actions), ...
     filters: list = field(default_factory=list)
+    sync_group: Optional[str] = None  # slicer sync group name
+    hidden: bool = False  # hidden on the page (selection pane)
 
     @property
     def is_group(self) -> bool:
         """True for visual groups."""
         return self.group_name is not None
+
+
+@dataclass
+class VisualInteraction:
+    """A changed "Edit interactions" setting: how a source visual affects a target visual."""
+
+    source: str  # visual name
+    target: str  # visual name
+    kind: str  # Filter | Highlight | None (no effect) | Default
 
 
 @dataclass
@@ -60,6 +71,24 @@ class PageDefinition:
     display_name: str
     visuals: list[VisualDefinition] = field(default_factory=list)
     filters: list = field(default_factory=list)
+    hidden: bool = False
+    page_type: str = ""  # "" (normal), "Tooltip" or "Drillthrough"
+    interactions: list[VisualInteraction] = field(default_factory=list)
+
+
+@dataclass
+class BookmarkDefinition:
+    """A bookmark and what it captures."""
+
+    name: str  # id, e.g. "Bookmark9e00a1c65dc7489350cb"
+    display_name: str
+    group: str = ""  # bookmark group display name
+    page: str = ""  # page (section) name the bookmark opens
+    captures_data: bool = True  # filters/slicers ("Data" option)
+    captures_display: bool = True  # visibility, spotlight, ... ("Display" option)
+    captures_page: bool = True  # navigates to its page ("Current page" option)
+    target_visuals: list[str] = field(default_factory=list)  # "Selected visuals"; empty = all
+    hidden_visuals: list[str] = field(default_factory=list)  # visuals/groups it hides
 
 
 @dataclass
@@ -70,6 +99,64 @@ class ReportDefinition:
     pages: list[PageDefinition] = field(default_factory=list)
     filters: list = field(default_factory=list)  # report-level ("All Pages") filters
     bookmarks: dict[str, str] = field(default_factory=dict)  # bookmark id -> display name
+    bookmark_details: list[BookmarkDefinition] = field(default_factory=list)
+
+
+# "Edit interactions" types: legacy numbers and PBIR names -> label
+INTERACTION_KINDS = {
+    0: "Default",
+    1: "Filter",
+    2: "Highlight",
+    3: "None",
+    "Default": "Default",
+    "DataFilter": "Filter",
+    "HighlightFilter": "Highlight",
+    "NoFilter": "None",
+}
+
+
+def _page_type(binding) -> str:
+    """Tooltip/Drillthrough from a page binding (only names are trusted, not codes)."""
+    kind = (binding or {}).get("type") if isinstance(binding, dict) else None
+    return kind if isinstance(kind, str) and kind in ("Tooltip", "Drillthrough") else ""
+
+
+def _interactions(items) -> list[VisualInteraction]:
+    return [
+        VisualInteraction(
+            source=item.get("source", ""),
+            target=item.get("target", ""),
+            kind=INTERACTION_KINDS.get(item.get("type"), str(item.get("type"))),
+        )
+        for item in items or []
+        if isinstance(item, dict)
+    ]
+
+
+def _bookmark(data: dict, group: str = "") -> BookmarkDefinition:
+    """Parse a bookmark (same structure in Report/Layout config and PBIR .bookmark.json)."""
+    state = data.get("explorationState") or {}
+    options = data.get("options") or {}
+    hidden = []
+    for section in (state.get("sections") or {}).values():
+        for visual_name, container in (section.get("visualContainers") or {}).items():
+            display = (container.get("singleVisual") or {}).get("display") or {}
+            if display.get("mode") == "hidden":
+                hidden.append(visual_name)
+        for group_name, container in (section.get("visualContainerGroups") or {}).items():
+            if (container or {}).get("isHidden"):
+                hidden.append(group_name)
+    return BookmarkDefinition(
+        name=data.get("name", ""),
+        display_name=data.get("displayName", ""),
+        group=group,
+        page=state.get("activeSection", ""),
+        captures_data=not options.get("suppressData", False),
+        captures_display=not options.get("suppressDisplay", False),
+        captures_page=not options.get("suppressActiveSection", False),
+        target_visuals=list(options.get("targetVisualNames") or []),
+        hidden_visuals=hidden,
+    )
 
 
 # ============================================================================
@@ -183,17 +270,22 @@ def _read_legacy(layout: dict, logger: logging.Logger) -> ReportDefinition:
     config = _parse_embedded(layout.get("config"), logger, "report config") or {}
 
     bookmarks = {}
+    bookmark_details = []
 
-    def collect(items: list):
+    def collect(items: list, group: str = ""):
         for bookmark in items:
             bookmarks[bookmark.get("name", "")] = bookmark.get("displayName", "")
-            collect(bookmark.get("children", []))  # bookmark groups
+            if "children" in bookmark:  # bookmark group
+                collect(bookmark["children"], bookmark.get("displayName", ""))
+            else:
+                bookmark_details.append(_bookmark(bookmark, group))
 
     collect(config.get("bookmarks", []))
 
     pages = []
     for section in layout.get("sections", []):
         page_name = section.get("displayName", "")
+        section_config = _parse_embedded(section.get("config"), logger, f"page {page_name}") or {}
         visuals = [
             _legacy_visual(container, logger, page_name)
             for container in section.get("visualContainers", [])
@@ -205,6 +297,9 @@ def _read_legacy(layout: dict, logger: logging.Logger) -> ReportDefinition:
                 visuals=[visual for visual in visuals if visual is not None],
                 filters=_parse_embedded(section.get("filters"), logger, f"filters on {page_name}")
                 or [],
+                hidden=section_config.get("visibility") == 1,
+                page_type=_page_type(section_config.get("pageBinding")),
+                interactions=_interactions(section_config.get("relationships")),
             )
         )
 
@@ -213,6 +308,7 @@ def _read_legacy(layout: dict, logger: logging.Logger) -> ReportDefinition:
         pages=pages,
         filters=_parse_embedded(layout.get("filters"), logger, "report filters") or [],
         bookmarks=bookmarks,
+        bookmark_details=bookmark_details,
     )
 
 
@@ -233,6 +329,7 @@ def _legacy_visual(
             visual_type=None,
             group_name=config["singleVisualGroup"].get("displayName", ""),
             filters=filters,
+            hidden=bool(config["singleVisualGroup"].get("isHidden")),
         )
 
     single_visual = config.get("singleVisual") or {}
@@ -273,6 +370,8 @@ def _legacy_visual(
         objects=single_visual.get("objects") or {},
         container_objects=single_visual.get("vcObjects") or {},
         filters=filters,
+        sync_group=(single_visual.get("syncGroup") or {}).get("groupName"),
+        hidden=((single_visual.get("display") or {}).get("mode") == "hidden"),
     )
 
 
@@ -323,15 +422,25 @@ def _read_pbir(files, names: set[str], prefix: str, logger: logging.Logger) -> R
                 display_name=page.get("displayName", folder),
                 visuals=[_pbir_visual(read(name[len(prefix) :])) for name in visual_files],
                 filters=page.get("filterConfig", {}).get("filters", []),
+                hidden=page.get("visibility") == "HiddenInViewMode",
+                page_type=_page_type(page.get("pageBinding")) or _page_type(page),
+                interactions=_interactions(page.get("visualInteractions")),
             )
         )
 
     # Bookmarks: one <name>.bookmark.json per bookmark; groups live in bookmarks.json
+    group_of = {}
+    for item in read("bookmarks/bookmarks.json").get("items", []):
+        for child in item.get("children", []):
+            group_of[child] = item.get("displayName", item.get("name", ""))
+
     bookmarks = {}
+    bookmark_details = []
     for name in sorted(names):
         if name.startswith(prefix + "bookmarks/") and name.endswith(".bookmark.json"):
             bookmark = read(name[len(prefix) :])
             bookmarks[bookmark.get("name", "")] = bookmark.get("displayName", "")
+            bookmark_details.append(_bookmark(bookmark, group_of.get(bookmark.get("name"), "")))
     for item in read("bookmarks/bookmarks.json").get("items", []):
         if "children" in item and item.get("name"):
             bookmarks.setdefault(item["name"], item.get("displayName", item["name"]))
@@ -341,6 +450,7 @@ def _read_pbir(files, names: set[str], prefix: str, logger: logging.Logger) -> R
         pages=pages,
         filters=report.get("filterConfig", {}).get("filters", []),
         bookmarks=bookmarks,
+        bookmark_details=bookmark_details,
     )
 
 
@@ -355,6 +465,7 @@ def _pbir_visual(visual_json: dict) -> VisualDefinition:
             visual_type=None,
             group_name=visual_json["visualGroup"].get("displayName", ""),
             filters=filters,
+            hidden=bool(visual_json.get("isHidden")),
         )
 
     visual = visual_json.get("visual") or {}
@@ -379,4 +490,6 @@ def _pbir_visual(visual_json: dict) -> VisualDefinition:
         objects=visual.get("objects") or {},
         container_objects=visual.get("visualContainerObjects") or {},
         filters=filters,
+        sync_group=(visual.get("syncGroup") or {}).get("groupName"),
+        hidden=bool(visual_json.get("isHidden")),
     )

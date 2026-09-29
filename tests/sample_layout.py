@@ -114,6 +114,7 @@ SLICER = _visual(
     "slc1",
     {
         "visualType": "slicer",
+        "syncGroup": {"groupName": "Year", "fieldChanges": True, "filterChanges": True},
         "projections": {"Values": [{"queryRef": "Dates.Date Hierarchy.Year Number"}]},
         "prototypeQuery": {
             "Version": 2,
@@ -215,7 +216,26 @@ BROKEN_BUTTON = _visual(
     },
 )
 
-GROUP = {"config": {"name": "grp1", "singleVisualGroup": {"displayName": "Filter Popup"}}}
+GROUP = {
+    "config": {
+        "name": "grp1",
+        "singleVisualGroup": {"displayName": "Filter Popup", "isHidden": True},
+    }
+}
+
+# Bookmark1: captures display + current page (not data) for two selected visuals, hides both
+BOOKMARK_STATE = {
+    "explorationState": {
+        "activeSection": "ReportSectionA",
+        "sections": {
+            "ReportSectionA": {
+                "visualContainers": {"tbl1": {"singleVisual": {"display": {"mode": "hidden"}}}},
+                "visualContainerGroups": {"grp1": {"isHidden": True}},
+            }
+        },
+    },
+    "options": {"suppressData": True, "targetVisualNames": ["tbl1", "grp1"]},
+}
 
 SHAPE = _visual("shp1", {"visualType": "shape", "objects": {}})
 
@@ -291,7 +311,7 @@ REPORT_FILTERS = [
 LAYOUT = {
     "config": {
         "bookmarks": [
-            {"name": "Bookmark1", "displayName": "Panel Open"},
+            {"name": "Bookmark1", "displayName": "Panel Open", **BOOKMARK_STATE},
             {
                 "name": "BookmarkGroup",
                 "displayName": "Group",
@@ -304,6 +324,8 @@ LAYOUT = {
         {
             "name": "ReportSectionA",
             "displayName": "Sales",
+            # "Edit interactions": the slicer has no effect on the table (type 3)
+            "config": {"relationships": [{"source": "slc1", "target": "tbl1", "type": 3}]},
             "filters": PAGE_FILTERS,
             "visualContainers": [
                 TABLE,
@@ -321,6 +343,7 @@ LAYOUT = {
         {
             "name": "ReportSectionB",
             "displayName": "Detail",
+            "config": {"visibility": 1},  # hidden page
             "filters": "[]",
             "visualContainers": [],
         },
@@ -336,6 +359,8 @@ def _stringify(layout: dict) -> dict:
     for section in encoded["sections"]:
         if not isinstance(section["filters"], str):
             section["filters"] = json.dumps(section["filters"])
+        if "config" in section:
+            section["config"] = json.dumps(section["config"])
         for container in section["visualContainers"]:
             for key in ("config", "filters"):
                 if key in container:

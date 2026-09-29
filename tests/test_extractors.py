@@ -74,6 +74,30 @@ def test_report_context_includes_nested_bookmarks(sample_path):
     assert context.bookmark_names["Bookmark2"] == "Nested"
 
 
+def test_page_and_bookmark_details(sample_path):
+    """Hidden pages, interactions, sync groups, hidden visuals and bookmarks in every format."""
+    report = read_report(sample_path)
+    sales, detail = report.pages
+    assert (sales.hidden, detail.hidden) == (False, True)
+    assert [(i.source, i.target, i.kind) for i in sales.interactions] == [("slc1", "tbl1", "None")]
+
+    visuals = {v.name: v for v in sales.visuals}
+    assert visuals["slc1"].sync_group == "Year"
+    assert visuals["grp1"].hidden and not visuals["tbl1"].hidden
+
+    bookmarks = {b.name: b for b in report.bookmark_details}
+    panel = bookmarks["Bookmark1"]
+    assert (panel.captures_data, panel.captures_display, panel.captures_page) == (
+        False,
+        True,
+        True,
+    )
+    assert panel.page == "ReportSectionA"
+    assert panel.target_visuals == ["tbl1", "grp1"]
+    assert sorted(panel.hidden_visuals) == ["grp1", "tbl1"]
+    assert bookmarks["Bookmark2"].group == "Group"
+
+
 def test_fields_resolved_through_query_aliases(extracted):
     items, _ = extracted
     rows = _rows(items, "tbl1")
