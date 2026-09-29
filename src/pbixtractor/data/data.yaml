@@ -37,7 +37,7 @@ data_types:
     friendly_name: Targets
   - name: ExplainBy
     friendly_name: Explained By
-  - name: Anazlze
+  - name: Analyze
     friendly_name: Analyzed
   - name: Data
     friendly_name: Data

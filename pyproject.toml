@@ -55,7 +55,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-pbixtractor = ["data/*.csv"]
+pbixtractor = ["data/*.yaml", "data/*.png", "data/*.ico"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
