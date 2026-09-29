@@ -56,21 +56,44 @@ reviews and commits everything. Compare against baselines by copying output else
 ```
 src/pbixtractor/
   cli.py            argparse entry (--ui / --test / --version). No real headless mode yet.
-  extractor.py      ~2300 lines. Module-level YAML load (sys.exit on failure), globals
-                    (SAVE_NAME, _PBIX_=[stem, dir], _BIM_, LOG_DATA, DESCRIPT_TAG),
+  extractor.py      ~1100 lines. CONFIG = config.load_config() (sys.exit on failure) →
+                    visual_mapper, visual_type_list, known_functions; globals (SAVE_NAME, _PBIX_=[stem, dir],
+                    _BIM_, LOG_DATA, DESCRIPT_TAG, USE_TABULAR_EDITOR, RUN_TE_ANALYSIS),
                     ReportExtractor (readers.read_report → ReportContext + PageExtractor),
-                    run_ui() (DearPyGUI), gen_tsv() (writes TabularScript.cs, runs TE2 via
-                    PowerShell), run_cmd() (~1270-line pipeline: model dataset, relationships,
-                    graph, 2 workbooks), run_test_extraction(). USE_TABULAR_EDITOR global.
+                    run_ui() (DearPyGUI), gen_tsv() (TE2 TSV export), run_test_extraction(),
+                    _tabular_editor_analysis(), run_cmd() (~100-line orchestration:
+                    model → TE analysis → dataset → ReportExtractor → build_documentation →
+                    graph → write_main_workbook / write_data_workbook / write_json → logs).
+  config.py         load_config() → Config(visual_mapper, supported_visual_types (derived:
+                    standard_visuals + special_visuals), data_types, extract_types,
+                    function_names). extract_type(visual_type): standard | button | skip.
+  json_report.py    write_json() → <name>.json: report, model (incl. live stats), dependencies,
+                    unused, quality, lineage {nodes, edges} (ids page:/visual:/table:/column:/
+                    measure:/source:, edge types contains/uses/filters/depends_on/
+                    relationship/loads_from). Base for the Step 4 HTML graph.
+  documentation.py  Analysis stage, no file output: build_documentation() → Documentation
+                    (report_info, filter_strings, pages: {page: [PageItem]}, model, objects
+                    [OBJECT_COLUMNS], relations, unused_columns/measures, exact deps, BPA,
+                    live stats; depends_on(table, name)). Also parse_tsv_object_name,
+                    button_target_and_label, field_description.
+  dax.py            find_functions/find_measures/find_columns, text_dependencies() (fallback
+                    when no exact deps), highlight_dax() → rich-text segments.
+  excel_report.py   create_formats(), write_main_workbook(), write_data_workbook(); shared
+                    helpers per sheet type (_write_relations, _write_objects, _write_page_sheet,
+                    _write_pages_sheet, _write_dependencies_sheet).
+  relationship_graph.py save_relationship_graph() → PNG (networkx spring layout).
   semantic_model.py read_model(.bim or folder with model.bim) → SemanticModel (tables, columns,
                     measures, hierarchies+levels, partitions incl. Direct Lake entity, relationships
                     with cardinality/direction/active, shared expressions, roles/RLS).
                     model_to_dataset() → DataFrame identical to TE's TSV (verified on Invoices:
                     all 459 objects match; only DAX whitespace differs). structurally_used_columns():
                     relationship keys, sort-by and hierarchy-level columns. TMDL not supported yet.
-  tabular_editor.py find_tabular_editor(); run_best_practice_analyzer() parses "-A" console
-                    output (OEM code page) with rules from data/BPARules.json (Microsoft, MIT,
-                    see BPARules.LICENSE); export_dependencies() runs a C# script (DependsOn) →
+  tabular_editor.py find_tabular_editor(); run_script() (write C# script with %FOLDER%, run
+                    TE2 -S, collect output files); run_best_practice_analyzer() runs TE's
+                    Analyzer in a script → (violations, rule errors) with rules from
+                    data/BPARules.json (Microsoft, MIT, see BPARules.LICENSE). Do NOT use the
+                    "-A" console output: it is truncated unpredictably (112 of 125 findings).
+                    export_dependencies() runs a C# script (DependsOn) →
                     Dependency rows (measures, calc columns/tables, RLS TablePermission);
                     drop_redundant_table_refs() removes 'T' when T[col] is also referenced.
   live_model.py     find_local_instances() (psutil: msmdsrv listening port + parent
@@ -92,11 +115,11 @@ src/pbixtractor/
                     id → display name). BaseExtractor / VisualExtractor / FilterExtractor
                     (one condition describer for report/page/visual filters) / PageExtractor.
                     Emit ExtractedItem / ExtractedFilter (models.py) → .to_list() rows.
-  models.py         ExtractedItem, ExtractedFilter (used); VisualExtractionRule,
-                    FilterExtractionRule, ExtractionConfig (UNUSED).
+  models.py         ExtractedItem, ExtractedFilter (pydantic row models).
   visual_helpers.py VisualTypeMapper: visual type → (item_type, display name) from YAML.
   data/data.yaml    data_types (projection role → label), function_names (DAX highlight
-                    list), visual_types, visual_type_metadata, extraction_rules, filter_rules.
+                    list), visual_type_metadata (standard_visuals, special_visuals,
+                    button_types), extract_types (visual type → standard/button/skip).
   constants.py      DEFAULT_COLORS (mutated at runtime by the UI), UI_COLORS, REPORT_COLUMNS.
   logger.py         setup_logger(capture=True) → LogCapture buffer; any captured log line
                     makes run_cmd() return "Log" instead of "Success".
@@ -131,8 +154,9 @@ src/pbixtractor/
    Layout structures: button action in `singleVisual.vcObjects.visualLink[].properties`
    (`type`, `bookmark`, `navigationSection`); bookmarks in `config.bookmarks` (groups via
    `children`); fields in `singleVisual.prototypeQuery.Select` with roles in `projections`.
-   Hierarchy levels: the layout only has the level name; the column is the last part of the
-   queryRef `Table.Hierarchy.Column` (level "Day" → column "Day Number Month").
+   Hierarchy levels: the layout only has the level name (queryRef is unreliable: sometimes
+   column, sometimes level). documentation.resolve_hierarchy_columns() maps level → column
+   from the model (level "Year" → column "Year Number").
 3. `run_cmd()` always reads the model with `read_model(_BIM_)`. The measures/columns
    dataset comes from `model_to_dataset(model)`, or from `documentation.tsv` when
    `USE_TABULAR_EDITOR` (columns: Object, Name, Description, SourceColumn, Expression,
@@ -156,17 +180,18 @@ src/pbixtractor/
   measures are renamed or moved (e.g. `_Measures.Total Sales Budget` is really
   `SalesBudgets[Total Sales Budget OC]`). Always use `resolve_field()`. The queryRef is
   only for matching projection roles / columnProperties and hierarchy columns.
-- `data.yaml` `extraction_rules.*_path` and `filter_rules` are **not read** by any code;
-  `visual_types` duplicates `visual_type_metadata.standard_visuals` + specials.
-  `models.py` VisualExtractionRule/FilterExtractionRule/ExtractionConfig are unused.
 - Report-level ("All Pages") filters, bookmark contents (captured state), drillthrough/
   tooltip/hidden pages, visual interactions and slicer sync groups are not in the output.
 - The "User Input" UI tab appends to `Input/*.csv`, which nothing reads any more (YAML config).
   The measures-table combo (`defMeasTable`) is hidden and its value unused.
-- DAX highlighting/tokenising and the page-tab builder are copy-pasted 2–3× in `run_cmd()`;
-  `ls_app` closes over whichever `format_array` is currently bound.
-- DataFrames are grown row by row with `df.loc[-1] = …; df.index += 1` (quadratic).
+- Kept on purpose during the Step 2 refactor (output identical to before), candidates to fix:
+  common sheets skip all `Type == "Column"` rows, so calculated columns (and their DAX) are
+  never listed; report pages without visuals get no page sheet; the "Dependants" column lists
+  what an object *depends on*; objects are listed in reverse model order (the old code
+  prepended rows); text-matching fallback order is set-based (not stable across runs).
 - Windows-only: backslash path joins, PowerShell launch of TE2, Excel-open check.
+- Editing tip: shell heredocs/sed mangle backslash escapes (\t, \n) in Python/C# code —
+  write patch scripts with the file tool instead. Files may have CRLF endings (autocrlf).
 - `extractor.py` is not black-formatted and has pre-existing ruff warnings; don't mass-reformat
   it in a feature change (keeps diffs reviewable).
 
@@ -186,9 +211,18 @@ src/pbixtractor/
 - Plan order: Step 0 (fix regressions, done) → 1 typed model + local readers (done for
   reports: readers.py, and for .bim models: semantic_model.py; TMDL still TODO) →
   model extras (done 2026-09-29: unused measures, model sheets, BPA, exact dependencies,
-  live statistics) → 2 modular handlers/writers →
+  live statistics) → 2 modular handlers/writers (run_cmd split into documentation.py /
+  excel_report.py / dax.py / relationship_graph.py, config.py + extract_types handler
+  registry, JSON writer done) →
   3 buttons/bookmarks/filters complete → 1b DevOps/Fabric readers → 4 HTML lineage graph →
   5 CLI + NiceGUI UI → 6 SQL/Fabric source lineage (sqlglot).
+
+## Refactoring safety net
+Output is deterministic (except the graph PNG layout). Before a refactor, copy
+`output/Invoices_NEW/*.xlsx` and `output/AdventureWorks/*.xlsx` somewhere, re-run, and compare
+workbooks cell by cell incl. rich-text runs and resolved styles (a small zip/XML comparer was
+used for Step 2; `tests/test_documentation.py::test_run_cmd_end_to_end` covers the pipeline on
+the sample data).
 
 ## Conventions
 - black/ruff, line length 100, py311 target. Google-style docstrings with Args/Returns.
