@@ -169,6 +169,12 @@ visual_type_metadata:
     advancedSlicerVisual:
       display_name: "Slicer (new)"
       item_type: "Slicer"
+    listSlicer:
+      display_name: "Slicer (list)"
+      item_type: "Slicer"
+    textSlicer:
+      display_name: "Slicer (text)"
+      item_type: "Slicer"
     actionButton:
       display_name: "Button"
       item_type: "Button"
@@ -192,3 +198,4 @@ extract_types:
   shape: skip
   image: skip
   textbox: skip
+  pageNavigator: skip  # built-in page navigator: no fields, lists pages automatically
