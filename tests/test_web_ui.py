@@ -95,8 +95,7 @@ def test_run_shows_results_and_serves_lineage(sample):
         assert (sample / "output" / "Sample" / "Sample.xlsx").is_file()
 
         # The lineage iframe is served through the /files route
-        token, folder = next(iter(web_ui._OUTPUT_DIRS.items()))
-        assert folder == sample / "output" / "Sample"
+        token = next(t for t, f in web_ui._OUTPUT_DIRS.items() if f == sample / "output" / "Sample")
         response = await user.http_client.get(f"/files/{token}/Sample_lineage.html")
         assert response.status_code == 200 and "<svg" in response.text.lower()
         # Only files inside the run's folder

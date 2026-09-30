@@ -3,6 +3,12 @@
     pbixtractor            # starts this UI on http://localhost:8081
     pbixtractor web --port 9000 --no-browser
 
+Embedded in another NiceGUI app (see docs/EMBEDDING.md):
+
+    from pbixtractor import web_ui
+    web_ui.register(prefix="/pbixtractor")    # once, before ui.run()
+    web_ui.build_page()                       # inside one of the host's pages
+
 Runs locally; the browser is only the front end. The lineage viewer is shown inline, and all
 output files can be downloaded. The extraction itself runs in a background thread
 (pipeline.run_extraction) while progress and log messages stream into the page.
@@ -18,13 +24,13 @@ import time
 import webbrowser
 from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from nicegui import app, background_tasks, events, run, ui
 
-from . import __version__
+from . import __version__, web_config
 from .azure_auth import ApiError
 from .data import DATA_DIR
 from .live_model import find_local_instances
@@ -38,19 +44,21 @@ from .pipeline import (
 )
 from .tabular_editor import add_tabular_editor_location, find_tabular_editor
 from .theme import apply_theme, card_header, page_title, serve_fonts, stat_tile
-from .web_sources import DevOpsPanel, FabricPanel, Fetched, stored_choices
+from .web_config import output_root, stored_choices, url
+from .web_sources import DevOpsPanel, FabricPanel, Fetched
 
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
 _OUTPUT_DIRS: dict[str, Path] = {}
 
+
 def default_catalog_dir() -> Path:
     """Default catalog folder: inside output/, which is gitignored (client DAX stays out of git)."""
-    return Path.cwd() / "output" / "_catalog"
+    return output_root() / "_catalog"
 
 
 UPLOAD_SUFFIXES = (".pbix", ".bim")
 MAX_UPLOAD_BYTES = 2_000_000_000  # real .pbix files reach several hundred MB
-UPLOAD_FOLDER = Path("output") / "_uploads"  # dropped files are copied here (CWD-relative)
+UPLOAD_FOLDER_NAME = "_uploads"  # dropped files are copied to output_root()/_uploads
 # After a restart the open tab reconnects on its own (socket.io retries at most every 5 s, then
 # the page reloads because the new server does not know it); only open a new tab if none does
 BROWSER_GRACE_SECONDS = 7
@@ -121,10 +129,41 @@ def add_host_check(port: int) -> None:
 
 
 def register_routes() -> None:
-    """Add the output file routes (the lineage iframe and the catalog) and the fonts."""
-    serve_fonts()
-    app.add_api_route("/files/{token}/{name}", _serve_output_file, methods=["GET"])
-    app.add_api_route("/catalog/{path:path}", _serve_catalog_file, methods=["GET"])
+    """Add the output file routes (the lineage iframe and the catalog) - under the configured
+    prefix - and, stand-alone, the fonts (an embedding app serves its own)."""
+    if not web_config.CONFIG.embedded:
+        serve_fonts()
+    app.add_api_route(url("/files/{token}/{name}"), _serve_output_file, methods=["GET"])
+    app.add_api_route(url("/catalog/{path:path}"), _serve_catalog_file, methods=["GET"])
+
+
+def register(
+    prefix: str = "/pbixtractor",
+    *,
+    output_root: Optional[Path] = None,
+    storage_prefix: str = "pbixtractor.",
+    local_machine: bool = False,
+) -> None:
+    """
+    Embed PBIxtractor in another NiceGUI app: call once at startup (before ui.run), then call
+    build_page() inside one of the host's pages. The host keeps its own theme, layout, auth and
+    host checks; PBIxtractor adds no header, rail or colours of its own.
+
+    Args:
+        prefix: URL prefix of PBIxtractor's routes (lineage files, catalog)
+        output_root: Where documentation, uploads and downloads go (default <cwd>/output)
+        storage_prefix: Prefix of PBIxtractor's keys in app.storage.general
+        local_machine: True only if every user's browser runs on the server's own PC - it
+            allows browsing the server's disk, server paths, Power BI Desktop detection, ...
+    """
+    web_config.configure(
+        prefix=prefix.rstrip("/"),
+        output_root=Path(output_root) if output_root else None,
+        storage_prefix=storage_prefix,
+        local_machine=local_machine,
+        embedded=True,
+    )
+    register_routes()
 
 
 # ============================================================================
@@ -298,7 +337,7 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                 ui.button(
                     label, icon=file_icon, on_click=lambda p=path: ui.download.file(p)
                 ).props("outline color=primary")
-            if hasattr(os, "startfile"):
+            if hasattr(os, "startfile") and web_config.CONFIG.local_machine:
                 ui.button(
                     "Open folder",
                     icon="folder_open",
@@ -423,13 +462,35 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
 
 
 def _mode() -> str:
-    """The app's current light/dark choice (light by default)."""
+    """The stand-alone app's light/dark choice (light by default)."""
     return "dark" if stored_choices().get("dark_mode") else "light"
 
 
-def _themed(url: str) -> str:
-    """A generated page's URL that opens it in the app's current light/dark mode."""
-    return f"{url}?theme={_mode()}"
+def _themed(path: str) -> str:
+    """URL of a generated page (lineage viewer, catalog) under the configured prefix. Stand-
+    alone it opens in the app's light/dark mode; embedded, the host owns that choice, so a new
+    tab follows the system setting (the embedded viewer follows the host, see _THEME_SYNC)."""
+    if web_config.CONFIG.embedded:
+        return url(path)
+    return f"{url(path)}?theme={_mode()}"
+
+
+# Keeps embedded lineage viewers in the page's light/dark mode, whichever app hosts the page:
+# Quasar marks dark mode with body.body--dark; the viewer (a sandboxed iframe) takes a message
+_THEME_SYNC = """<script>(function () {
+  if (window.__pbixtractorThemeSync) return;
+  window.__pbixtractorThemeSync = true;
+  function mode() { return document.body.classList.contains("body--dark") ? "dark" : "light"; }
+  function send(frame) {
+    try { frame.contentWindow.postMessage({pbixtractorTheme: mode()}, "*"); } catch (e) {}
+  }
+  new MutationObserver(function () {
+    document.querySelectorAll("iframe.lineage-frame").forEach(send);
+  }).observe(document.body, {attributes: true, attributeFilter: ["class"]});
+  document.addEventListener("load", function (e) {
+    if (e.target.classList && e.target.classList.contains("lineage-frame")) send(e.target);
+  }, true);
+})();</script>"""
 
 
 def _catalog_ready() -> bool:
@@ -464,12 +525,7 @@ def _build_shell():
 
         def toggle_dark() -> None:
             dark.value = not dark.value
-            stored_choices()["dark_mode"] = dark.value
-            # An open lineage viewer switches too (it is sandboxed: a message, no reload)
-            ui.run_javascript(
-                "document.querySelectorAll('iframe.lineage-frame').forEach(f => "
-                f"f.contentWindow && f.contentWindow.postMessage({{pbixtractorTheme: '{_mode()}'}}, '*'))"
-            )
+            stored_choices()["dark_mode"] = dark.value  # an open viewer follows (_THEME_SYNC)
             dark_button.props(f"icon={'light_mode' if dark.value else 'dark_mode'}")
 
         dark_button = (
@@ -490,19 +546,19 @@ def _build_shell():
         entries = [("description", "Document a report", None)]
         if _catalog_ready():
             entries.append(("menu_book", "Catalog", "/catalog/catalog.html"))
-        for icon, label, url in entries:
+        for icon, label, page in entries:
             button = ui.button(
                 label if rail["expanded"] else "",
                 icon=icon,
-                on_click=(lambda u=url: ui.navigate.to(_themed(u), new_tab=True)) if url else None,
+                on_click=(lambda p=page: ui.navigate.to(_themed(p), new_tab=True)) if page else None,
             ).props(f'flat color=white aria-label="{label}"')
             button.classes(
                 ("rail-btn-x" if rail["expanded"] else "rail-btn")
                 + " nav-btn"
-                + ("" if url else " nav-active")
-            ).mark("nav_catalog" if url else "nav_document")
+                + ("" if page else " nav-active")
+            ).mark("nav_catalog" if page else "nav_document")
             if not rail["expanded"]:
-                button.tooltip(label + (" (opens in a new tab)" if url else ""))
+                button.tooltip(label + (" (opens in a new tab)" if page else ""))
 
     def toggle_rail() -> None:
         rail["expanded"] = not rail["expanded"]
@@ -521,10 +577,26 @@ def _build_shell():
 
 
 def index() -> None:
-    """The single page of the app (the root page passed to ui.run)."""
-    tabular_editor = find_tabular_editor()
+    """The stand-alone app's root page (passed to ui.run): theme, shell and the page."""
     apply_theme()
     refresh_nav = _build_shell()
+    build_page(on_catalog_change=refresh_nav)
+
+
+def build_page(on_catalog_change: Optional[Callable[[], None]] = None) -> None:
+    """
+    The documentation page's content: report choice, options, run, results.
+
+    Stand-alone it sits in the app shell (index); embedded, call it inside one of the host's
+    pages after register(). It adds no header, drawer or theme of its own.
+
+    Args:
+        on_catalog_change: Called after a run that may have created a catalog (the stand-alone
+            rail shows a Catalog entry then); embedded, the page shows its own catalog link
+    """
+    local = web_config.CONFIG.local_machine
+    tabular_editor = find_tabular_editor()
+    ui.add_body_html(_THEME_SYNC)
 
     with ui.column().classes("w-full max-w-screen-2xl mx-auto p-4 gap-4"):
         page_title(
@@ -533,17 +605,38 @@ def index() -> None:
             "model",
             icon="description",
         )
+
+        @ui.refreshable
+        def catalog_link() -> None:
+            # The stand-alone rail has a Catalog entry; embedded there is no rail
+            if web_config.CONFIG.embedded and _catalog_ready():
+                ui.button(
+                    "Open catalog",
+                    icon="menu_book",
+                    on_click=lambda: ui.navigate.to(_themed("/catalog/catalog.html"), new_tab=True),
+                ).props("flat color=primary").mark("page_catalog")
+
+        catalog_link()
+        if on_catalog_change is None:
+            on_catalog_change = catalog_link.refresh
         with ui.row().classes("w-full gap-4 items-stretch"):
             # ---------------- inputs ----------------
             # basis-0: long help texts wrap instead of pushing the Environment card down
             with ui.card().classes("grow basis-0 min-w-[420px]"):
                 with ui.row().classes("w-full items-center no-wrap gap-2"):
                     card_header(
-                        "insert_drive_file", "Report", "A local file, a Fabric workspace or Azure DevOps"
+                        "insert_drive_file",
+                        "Report",
+                        ("A local file" if local else "An uploaded file")
+                        + ", a Fabric workspace or Azure DevOps",
                     )
                     source = (
                         ui.toggle(
-                            {"local": "Local file", "fabric": "Fabric", "devops": "Azure DevOps"},
+                            {
+                                "local": "Local file" if local else "Upload",
+                                "fabric": "Fabric",
+                                "devops": "Azure DevOps",
+                            },
                             value="local",
                         )
                         .props("dense unelevated")
@@ -564,17 +657,21 @@ def index() -> None:
 
                         ui.button(icon="folder_open", on_click=pick).props("flat round")
 
-                    with ui.row().classes("w-full items-center no-wrap"):
+                    # Server paths and the server-side file browser only when the browser runs on
+                    # the server's own PC; otherwise these stay hidden and uploads fill them
+                    with ui.row().classes("w-full items-center no-wrap").mark("report_row") as report_row:
                         report_input = ui.input(
                             "Report (.pbix, .pbip or .Report folder)",
                             placeholder=r"C:\Reports\Sales.pbix",
                         ).classes("grow").mark("report")
                         picker_button(report_input, REPORT_SUFFIXES, report_folders=True)
-                    with ui.row().classes("w-full items-center no-wrap"):
+                    with ui.row().classes("w-full items-center no-wrap").mark("model_row") as model_row:
                         model_input = ui.input(
                             "Model (.bim or TMDL model.tmdl) - found automatically for most reports"
                         ).classes("grow").mark("model")
                         picker_button(model_input, (".bim", ".tmdl"))
+                    report_row.set_visibility(local)
+                    model_row.set_visibility(local)
 
                     # Drag & drop: the browser never reveals a dropped file's path, so the file is
                     # copied to output/_uploads and that copy is documented
@@ -586,7 +683,7 @@ def index() -> None:
                         if suffix not in UPLOAD_SUFFIXES:
                             ui.notify(f"{name}: drop a .pbix report or a .bim model.", type="warning")
                             return
-                        target = Path.cwd() / UPLOAD_FOLDER / name
+                        target = output_root() / UPLOAD_FOLDER_NAME / name
                         await event.file.save(target)
                         if suffix == ".bim":
                             model_input.value = str(target)
@@ -599,14 +696,18 @@ def index() -> None:
                         ui.notify(f"{name} copied to {target.parent}", type="positive")
 
                     ui.upload(
-                        label="…or drop a .pbix and/or .bim file here",
+                        label=(
+                            "…or drop a .pbix and/or .bim file here"
+                            if local
+                            else "Drop a .pbix and/or .bim file here, or click +"
+                        ),
                         multiple=True,
                         auto_upload=True,
                         on_upload=on_upload,
                         max_file_size=MAX_UPLOAD_BYTES,
                         on_rejected=lambda: ui.notify(
                             f"Files larger than {MAX_UPLOAD_BYTES // 1_000_000_000} GB are not "
-                            "accepted - use the folder picker for those.",
+                            "accepted" + (" - use the folder picker for those." if local else "."),
                             type="warning",
                         ),
                     ).props('accept=".pbix,.bim" flat').classes("drop-zone").mark("upload")
@@ -616,7 +717,7 @@ def index() -> None:
                 suggested_output = {"value": None}  # replaced by the model name in model mode
 
                 def suggest_output(name: str) -> None:
-                    output_input.value = suggested_output["value"] = str(Path.cwd() / "output" / name)
+                    output_input.value = suggested_output["value"] = str(output_root() / name)
 
                 remote = {}
                 for key, panel_class in (("fabric", FabricPanel), ("devops", DevOpsPanel)):
@@ -625,6 +726,7 @@ def index() -> None:
                     box.bind_visibility_from(source, "value", value=key)
 
                 output_input = ui.input("Output folder").classes("w-full").mark("output")
+                output_input.set_visibility(local)  # a server path: output_root()/<name> otherwise
 
                 with ui.expansion("Options", icon="tune").classes("w-full"):
                     te_analysis = ui.switch(
@@ -656,10 +758,13 @@ def index() -> None:
                         catalog_input = (
                             ui.input(
                                 "Catalog folder",
-                                value=remembered.get("catalog_dir") or str(default_catalog_dir()),
+                                value=(remembered.get("catalog_dir") if local else None)
+                                or str(default_catalog_dir()),
                             )
                             .classes("grow")
-                            .bind_visibility_from(add_catalog, "value")
+                            .bind_visibility_from(
+                                add_catalog, "value", backward=lambda on: on and local
+                            )
                             .mark("catalog_dir")
                         )
                     description_tag = ui.input(
@@ -669,7 +774,11 @@ def index() -> None:
             # ---------------- environment ----------------
             with ui.card().classes("w-[380px] max-w-full"):
                 with ui.row().classes("w-full items-center no-wrap gap-2"):
-                    card_header("settings_suggest", "Environment", "What this PC adds to a run")
+                    card_header(
+                        "settings_suggest",
+                        "Environment",
+                        "What this PC adds to a run" if local else "What the server adds to a run",
+                    )
                 with ui.row().classes("items-center no-wrap"):
                     if tabular_editor:
                         ui.icon("check_circle", color="positive")
@@ -680,7 +789,7 @@ def index() -> None:
                             "Tabular Editor 2 not found - BPA, exact dependencies and live "
                             "statistics are unavailable"
                         ).classes("text-sm")
-                if not tabular_editor:
+                if not tabular_editor and local:
 
                     def save_location() -> None:
                         if add_tabular_editor_location(te_folder.value or ""):
@@ -738,10 +847,11 @@ def index() -> None:
                                     + (" - live statistics will be included" if match else "")
                                 ).classes("text-sm")
 
-                ui.button("Refresh", icon="refresh", on_click=lambda: refresh_desktop()).props(
-                    "flat dense"
-                )
-                ui.timer(0.05, lambda: refresh_desktop(), once=True)  # after the page is sent
+                if local:  # Power BI Desktop on the server is no use to a remote user
+                    ui.button(
+                        "Refresh", icon="refresh", on_click=lambda: refresh_desktop()
+                    ).props("flat dense")
+                    ui.timer(0.05, lambda: refresh_desktop(), once=True)  # after the page is sent
 
         # ---------------- run ----------------
         with ui.card().classes("w-full"):
@@ -774,8 +884,9 @@ def index() -> None:
         if not model_input.value or model_input.value == auto_model["value"]:
             model_input.value = str(model) if model else ""
             auto_model["value"] = model_input.value or None
-        output_input.value = str(Path.cwd() / "output" / report_name(path))
-        background_tasks.create(refresh_desktop(delay=0.5), name="refresh_desktop")
+        output_input.value = str(output_root() / report_name(path))
+        if local:
+            background_tasks.create(refresh_desktop(delay=0.5), name="refresh_desktop")
 
     auto_model = {"value": None}  # the model value on_report_change filled in last
     report_input.on_value_change(lambda _: on_report_change())
@@ -839,7 +950,7 @@ def index() -> None:
             report, model, extra_reports = fetched.report_folder, fetched.model_path, fetched.extra_reports
             name = fetched.name
             if fetched.model_mode and output_input.value == suggested_output["value"]:
-                output_input.value = str(Path.cwd() / "output" / name)  # named after the model
+                output_input.value = str(output_root() / name)  # named after the model
             not_included = list(fetched.skipped)  # also logged as warnings of the run
             if fetched.skipped:
                 ui.notify(
@@ -868,7 +979,7 @@ def index() -> None:
         options = ExtractionOptions(
             report_path=report,
             model_path=model,
-            output_dir=Path(output_input.value or Path.cwd() / "output" / (name or report_name(report))),
+            output_dir=Path(output_input.value or output_root() / (name or report_name(report))),
             name=name,
             description_tag=description_tag.value or ExtractionOptions.description_tag,
             tabular_editor_analysis=te_analysis.value,
@@ -881,7 +992,7 @@ def index() -> None:
         )
         remembered = stored_choices()
         remembered["catalog_enabled"] = add_catalog.value
-        if catalog_input.value:
+        if catalog_input.value and local:  # a server path: only remembered when chosen locally
             remembered["catalog_dir"] = catalog_input.value
 
         events: queue.Queue = queue.Queue()
@@ -920,7 +1031,7 @@ def index() -> None:
         # The live log is only for following the run; the result shows the same messages
         log_view.visible = False
         _render_result(result_box, result, options)
-        refresh_nav()  # the Catalog entry appears after the first run that adds to one
+        on_catalog_change()  # a Catalog entry appears after the first run that adds to one
         ui.notify(
             result.message if result.ok else f"Failed: {result.message}",
             type={"success": "positive", "warnings": "warning", "error": "negative"}[result.status],
@@ -947,6 +1058,7 @@ def start(port: int = 8081, open_browser: bool = True, host: Optional[str] = Non
     With open_browser, a tab is opened only when no existing tab connects within a few seconds:
     after a restart the open tab reconnects by itself, so no duplicate tab appears.
     """
+    web_config.configure()  # stand-alone: no prefixes, this PC's own disk (local_machine)
     register_routes()
     add_host_check(port)
     if open_browser:

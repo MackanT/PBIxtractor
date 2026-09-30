@@ -100,9 +100,23 @@ src/pbixtractor/
                     exits the process) → visual_mapper, visual_type_list, known_functions;
                     ReportExtractor (readers.read_report → ReportContext + PageExtractor);
                     extract_reports(paths) for model mode.
-  web_ui.py         NiceGUI app: _build_shell() (pine header + 60px icon rail, menu toggles
+  web_config.py     How the web UI is hosted: WebConfig(prefix, output_root, storage_prefix,
+                    local_machine, embedded) in web_config.CONFIG (read it via the module - configure()
+                    replaces it); url(), output_root(), stored_choices() (app.storage.general behind
+                    a key prefix). Stand-alone = defaults; web_ui.register() sets the embedded ones.
+  web_ui.py         NiceGUI app, stand-alone and embeddable (docs/EMBEDDING.md):
+                    register(prefix="/pbixtractor", output_root, storage_prefix="pbixtractor.",
+                    local_machine=False) for a host app, then build_page() inside the host's page
+                    (no header/rail/theme/host check of ours; routes under the prefix; a catalog
+                    link on the page). local_machine=False hides everything acting on the server's
+                    machine: path inputs + PathPicker, Tabular Editor folder, Desktop detection,
+                    output/catalog folder inputs (and never stores catalog_dir), "Open folder";
+                    uploads fill the hidden inputs. _THEME_SYNC script: embedded lineage iframes
+                    follow body.body--dark by postMessage (any host). Stand-alone: start() →
+                    configure() defaults + register_routes() + host check + ui.run(index);
+                    index() = apply_theme + _build_shell() (pine header + 60px icon rail, menu toggles
                     labels, light/dark toggle remembered in stored_choices; Catalog rail entry
-                    once a catalog exists) + index() root page (report/model/output inputs, server-side
+                    once a catalog exists) + build_page() (report/model/output inputs, server-side
                     PathPicker dialog, options, TE/Desktop status) → run_extraction in
                     run.io_bound; progress/log via a queue drained by ui.timer. Results:
                     stat cards, download buttons, tabs Lineage (iframe of <name>_lineage.html
@@ -444,9 +458,10 @@ Open, by owner priority:
 - Module + stand-alone (owner, 2026-09-30): PBIxtractor must work stand-alone AND as a module
   inside the owner's private data-platform NiceGUI app (read only via `gh api`; never clone it
   or store its content on this PC). Phase 1 done: theme.py + restyled stand-alone UI.
-  Phase 2: split web_ui into build_page() (content only) / register(app, prefix) (routes under
-  a prefix, prefixed storage keys, configurable output root; no host check - the host has auth)
-  / start() (stand-alone shell), plus a test host app. Phase 3: integration in data-platform
+  Phase 2 done (web_config.py, register/build_page, tests/test_embedding.py, docs/EMBEDDING.md).
+  Open for embedding: Fabric/DevOps sign-in is interactive on the SERVER (hosted needs `az
+  login` there or a PAT); drop-zone/lineage-frame CSS must be added on the host side; tag a
+  release for the host to pin. Phase 3: integration in data-platform
   (git dependency pinned to a tag + one nav section) - done there, not from here. Later: restyle
   the generated lineage/catalog HTML pages; logo/about page (logo_large.png kept for it).
 - 6b database lineage (lower): connect to Azure SQL / Fabric Warehouse / Lakehouse SQL endpoint

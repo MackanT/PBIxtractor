@@ -15,11 +15,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from nicegui import app, run, ui
+from nicegui import run, ui
 
 from . import devops, fabric
 from .azure_auth import ApiError
 from .pipeline import model_name
+from .web_config import output_root, stored_choices
 
 logger = logging.getLogger("pbixtractor")
 
@@ -81,14 +82,6 @@ async def _call(function, *args, select: Optional[ui.select] = None):
 
 def _set_options(select: ui.select, options: dict, value=None) -> None:
     select.set_options(options, value=value if value in options else None)
-
-
-def stored_choices() -> dict:
-    """Remembered choices (server-side JSON in .nicegui/); empty if storage is unavailable."""
-    try:
-        return app.storage.general
-    except (RuntimeError, AttributeError):
-        return {}
 
 
 class FabricPanel:
@@ -172,7 +165,7 @@ class FabricPanel:
             self._get_client(),
             self.workspace.value,
             self.report.value,
-            Path.cwd() / "output" / "_fabric" / fabric.safe_name(workspace),
+            output_root() / "_fabric" / fabric.safe_name(workspace),
             progress=progress,
             all_reports=self.all_reports.value,
             all_workspaces=self.all_workspaces.value,
@@ -334,7 +327,11 @@ class DevOpsPanel:
             self.project.value,
             self.repo.value,
             self.report.value,
-            Path.cwd() / devops.default_destination(self.project.value, self.repo.value, version),
+            # default_destination() is output/_devops/...: keep the layout, below output_root()
+            output_root()
+            / devops.default_destination(self.project.value, self.repo.value, version).relative_to(
+                "output"
+            ),
             version,
             version_type,
             progress=progress,
