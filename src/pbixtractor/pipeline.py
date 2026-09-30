@@ -19,6 +19,7 @@ from typing import Callable, Optional
 import pandas as pd
 
 from .azure_auth import ApiError
+from .catalog import add_to_catalog
 from .constants import DESCRIPT_TAG
 from .documentation import Documentation, build_documentation
 from .excel_report import write_data_workbook, write_main_workbook
@@ -73,12 +74,15 @@ class ExtractionOptions:
     # downloaded from Fabric; None = look for <report>.fabric_source.json next to the report
     service_model: Optional[ServiceModel] = None
     service_statistics: bool = True
+    # Also add the result to this catalog folder (catalog.py): one searchable page for many models
+    catalog_dir: Optional[Path] = None
 
     def __post_init__(self):
         self.report_path = Path(self.report_path)
         self.model_path = Path(self.model_path)
         self.output_dir = Path(self.output_dir)
         self.extra_reports = [Path(p) for p in self.extra_reports]
+        self.catalog_dir = Path(self.catalog_dir) if self.catalog_dir else None
         if not self.name:
             self.name = report_name(self.report_path)
 
@@ -376,6 +380,20 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
     report_json = documentation_to_dict(documentation)
     write_json_data(str(files["json"]), report_json)
     write_lineage_html(files["lineage"], report_json)
+
+    if options.catalog_dir:
+        progress("Adding to the catalog", 0.98)
+        try:
+            files["catalog"] = add_to_catalog(
+                options.catalog_dir,
+                report_json,
+                options.report_path,
+                options.model_path,
+                options.name if options.extra_reports else model_name(options.model_path),
+                files,
+            )
+        except (OSError, ValueError, KeyError) as e:
+            logger.warning(f"Adding to the catalog {options.catalog_dir} failed: {e}")
 
     return ExtractionResult(
         "success",

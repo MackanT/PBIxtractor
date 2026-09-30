@@ -76,7 +76,7 @@ def _set_options(select: ui.select, options: dict, value=None) -> None:
     select.set_options(options, value=value if value in options else None)
 
 
-def _storage() -> dict:
+def stored_choices() -> dict:
     """Remembered choices (server-side JSON in .nicegui/); empty if storage is unavailable."""
     try:
         return app.storage.general
@@ -135,7 +135,7 @@ class FabricPanel:
         self._workspaces = {
             w["id"]: w["displayName"] for w in sorted(items, key=lambda w: w["displayName"].lower())
         }
-        _set_options(self.workspace, self._workspaces, _storage().get("fabric_workspace"))
+        _set_options(self.workspace, self._workspaces, stored_choices().get("fabric_workspace"))
         if not items:
             ui.notify("No workspaces found for this account.", type="warning")
 
@@ -143,7 +143,7 @@ class FabricPanel:
         _set_options(self.report, {})
         if not self.workspace.value:
             return
-        _storage()["fabric_workspace"] = self.workspace.value
+        stored_choices()["fabric_workspace"] = self.workspace.value
         items = await _call(self._get_client().reports, self.workspace.value, select=self.report)
         if items is not None:
             _set_options(
@@ -191,7 +191,7 @@ class DevOpsPanel:
                 ui.input(
                     "Organisation",
                     placeholder="myorg or https://dev.azure.com/myorg",
-                    value=_storage().get("devops_org", ""),
+                    value=stored_choices().get("devops_org", ""),
                 )
                 .classes("grow")
                 .mark("devops_org")
@@ -245,26 +245,26 @@ class DevOpsPanel:
         names = await _call(lambda: self._get_client().projects(), select=self.project)
         if names is None:
             return
-        _storage()["devops_org"] = self.org.value.strip()
-        _set_options(self.project, {n: n for n in names}, _storage().get("devops_project"))
+        stored_choices()["devops_org"] = self.org.value.strip()
+        _set_options(self.project, {n: n for n in names}, stored_choices().get("devops_project"))
 
     async def _project_changed(self) -> None:
         for select in (self.repo, self.branch, self.report):
             _set_options(select, {})
         if not self.project.value:
             return
-        _storage()["devops_project"] = self.project.value
+        stored_choices()["devops_project"] = self.project.value
         repos = await _call(self._get_client().repositories, self.project.value, select=self.repo)
         if repos is not None:
             self._default_branches = {r["name"]: r["defaultBranch"] for r in repos}
-            _set_options(self.repo, {r["name"]: r["name"] for r in repos}, _storage().get("devops_repo"))
+            _set_options(self.repo, {r["name"]: r["name"] for r in repos}, stored_choices().get("devops_repo"))
 
     async def _repo_changed(self) -> None:
         _set_options(self.branch, {})
         _set_options(self.report, {})
         if not self.repo.value:
             return
-        _storage()["devops_repo"] = self.repo.value
+        stored_choices()["devops_repo"] = self.repo.value
         names = await _call(self._get_client().branches, self.project.value, self.repo.value, select=self.branch)
         if names:
             default = self._default_branches.get(self.repo.value)

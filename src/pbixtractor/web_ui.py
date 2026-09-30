@@ -36,7 +36,7 @@ from .pipeline import (
     run_extraction,
 )
 from .tabular_editor import add_tabular_editor_location, find_tabular_editor
-from .web_sources import DevOpsPanel, FabricPanel, Fetched
+from .web_sources import DevOpsPanel, FabricPanel, Fetched, stored_choices
 
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
 _OUTPUT_DIRS: dict[str, Path] = {}
@@ -67,9 +67,23 @@ def _serve_output_file(token: str, name: str) -> FileResponse:
     return FileResponse(path)
 
 
+# The catalog folder in use (set when a run adds to it or the page finds one), served at /catalog/
+_CATALOG = {"dir": None}
+
+
+def _serve_catalog_file(path: str) -> FileResponse:
+    """Serve a file from the catalog folder (catalog.html and the models' copied files)."""
+    folder = _CATALOG["dir"]
+    target = (folder / path).resolve() if folder else None
+    if target is None or folder.resolve() not in target.parents or not target.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(target)
+
+
 def register_routes() -> None:
-    """Add the output file route (served to the lineage iframe)."""
+    """Add the output file routes (the lineage iframe and the catalog)."""
     app.add_api_route("/files/{token}/{name}", _serve_output_file, methods=["GET"])
+    app.add_api_route("/catalog/{path:path}", _serve_catalog_file, methods=["GET"])
 
 
 # ============================================================================
@@ -214,6 +228,14 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
 
         with ui.row().classes("w-full gap-2 items-center"):
             for kind, path in result.files.items():
+                if kind == "catalog":
+                    _CATALOG["dir"] = Path(path).parent
+                    ui.button(
+                        "Open catalog",
+                        icon="menu_book",
+                        on_click=lambda: ui.navigate.to("/catalog/catalog.html", new_tab=True),
+                    ).props("outline no-caps").mark("open_catalog")
+                    continue
                 label, file_icon = FILE_LABELS.get(kind, (kind, "download"))
                 ui.button(
                     label, icon=file_icon, on_click=lambda p=path: ui.download.file(p)
@@ -349,7 +371,14 @@ def index() -> None:
             ui.icon("insights", size="md")
             ui.label("PBIxtractor").classes("text-h6")
             ui.label(f"v{__version__}").classes("text-caption opacity-70")
-        ui.label("Power BI report documentation").classes("text-caption opacity-80")
+        with ui.row().classes("items-center gap-4"):
+            known = Path(stored_choices().get("catalog_dir") or Path.cwd() / "catalog")
+            if (known / "catalog.html").is_file():
+                _CATALOG["dir"] = known
+                ui.link("Catalog", "/catalog/catalog.html", new_tab=True).classes(
+                    "text-white text-sm"
+                ).mark("header_catalog")
+            ui.label("Power BI report documentation").classes("text-caption opacity-80")
 
     with ui.column().classes("w-full max-w-[1400px] mx-auto q-pa-md gap-4"):
         with ui.row().classes("w-full gap-4 items-stretch"):
@@ -454,6 +483,25 @@ def index() -> None:
                         value=True,
                     )
                     log_file = ui.switch("Write warnings to a log file", value=True)
+                    remembered = stored_choices()
+                    with ui.row().classes("w-full items-center no-wrap gap-2"):
+                        add_catalog = (
+                            ui.switch("Add to catalog", value=bool(remembered.get("catalog_enabled")))
+                            .tooltip(
+                                "Also add this model to a catalog folder: one searchable page for "
+                                "all documented models (the same model again replaces its entry)"
+                            )
+                            .mark("catalog_switch")
+                        )
+                        catalog_input = (
+                            ui.input(
+                                "Catalog folder",
+                                value=remembered.get("catalog_dir") or str(Path.cwd() / "catalog"),
+                            )
+                            .classes("grow")
+                            .bind_visibility_from(add_catalog, "value")
+                            .mark("catalog_dir")
+                        )
                     description_tag = ui.input(
                         "Description tag in DAX", value=ExtractionOptions.description_tag
                     ).classes("w-48")
@@ -632,7 +680,12 @@ def index() -> None:
             write_log_file=log_file.value,
             extra_reports=extra_reports,
             service_statistics=service_stats.value,
+            catalog_dir=Path(catalog_input.value) if add_catalog.value and catalog_input.value else None,
         )
+        remembered = stored_choices()
+        remembered["catalog_enabled"] = add_catalog.value
+        if catalog_input.value:
+            remembered["catalog_dir"] = catalog_input.value
 
         events: queue.Queue = queue.Queue()
 

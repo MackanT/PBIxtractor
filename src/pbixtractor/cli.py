@@ -94,6 +94,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not read row counts / distinct values from the Power BI service for Fabric models",
     )
+    extract.add_argument(
+        "--catalog",
+        type=Path,
+        metavar="FOLDER",
+        help="also add the result to this catalog folder (one searchable catalog.html for many "
+        "models; documenting the same model again replaces its entry)",
+    )
     extract.add_argument("--tenant", help="Entra tenant id for the Fabric / DevOps sign-in")
     extract.add_argument(
         "--model",
@@ -161,6 +168,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for sub in (fabric_list, fabric_fetch, devops_list, devops_fetch):
         sub.add_argument("--tenant", help="Entra tenant id for the sign-in")
+
+    catalog = commands.add_parser(
+        "catalog",
+        help="list, remove or rebuild catalog entries",
+        description="Manage a catalog folder (add models with: extract ... --catalog FOLDER).",
+    )
+    catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
+    catalog_list = catalog_commands.add_parser("list", help="the models in a catalog")
+    catalog_remove = catalog_commands.add_parser("remove", help="remove a model (by its key)")
+    catalog_rebuild = catalog_commands.add_parser("rebuild", help="regenerate catalog.html")
+    for sub in (catalog_list, catalog_remove, catalog_rebuild):
+        sub.add_argument("folder", type=Path, help="the catalog folder")
+    catalog_remove.add_argument("key", help="entry key, as shown by 'catalog list'")
 
     web = commands.add_parser("web", help="start the web UI (default)")
     web.add_argument("--port", type=int, default=8081, help="port (default: 8081)")
@@ -279,6 +299,29 @@ def run_devops(args: argparse.Namespace) -> int:
         return 1
 
 
+def run_catalog(args: argparse.Namespace) -> int:
+    """Handle `pbixtractor catalog list|remove|rebuild`. Returns the process exit code."""
+    from .catalog import list_entries, rebuild_catalog, remove_from_catalog
+
+    if args.catalog_command == "list":
+        entries = list_entries(args.folder)
+        for entry in entries:
+            reports = ", ".join(r["name"] for r in entry["reports"] if r["name"]) or "-"
+            print(f"{entry['key']}\n  {entry['name']} ({entry['documented']}) - reports: {reports}")
+            print(f"  {entry['source']['label']}")
+        if not entries:
+            print(f"No entries in {args.folder}")
+        return 0
+    if args.catalog_command == "remove":
+        if not remove_from_catalog(args.folder, args.key):
+            print(f"ERROR: no entry {args.key} in {args.folder}", file=sys.stderr)
+            return 1
+        print(f"Removed {args.key}")
+        return 0
+    print(f"Catalog written: {rebuild_catalog(args.folder)}")
+    return 0
+
+
 def run_extract(args: argparse.Namespace) -> int:
     """Handle `pbixtractor extract`. Returns the process exit code."""
     from .azure_auth import ApiError
@@ -345,6 +388,7 @@ def run_extract(args: argparse.Namespace) -> int:
         write_log_file=not args.no_log_file,
         extra_reports=extra_reports,
         service_statistics=not args.no_service_statistics,
+        catalog_dir=args.catalog,
     )
     if args.description_tag:
         options.description_tag = args.description_tag
@@ -382,6 +426,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(run_fabric(args))
     if args.command == "devops":
         sys.exit(run_devops(args))
+    if args.command == "catalog":
+        sys.exit(run_catalog(args))
 
     from .web_ui import start
 

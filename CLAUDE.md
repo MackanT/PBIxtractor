@@ -174,6 +174,18 @@ src/pbixtractor/
                     (warned: "unused" may be incomplete). CLI --all-reports / --all-workspaces /
                     --also; UI switch "All reports on its semantic model". Output named after the
                     model (pipeline.model_name()).
+  catalog.py        Catalog folder (options.catalog_dir / --catalog / UI "Add to catalog"):
+                    entries/<key>.json = one SLIM entry per semantic model (reports+pages,
+                    tables/columns/measures with DAX, usage field→pages, DAX depends_on, unused
+                    flags; no BPA/bookmarks/partitions), models/<key>/ = copied lineage viewer +
+                    workbook (relative links, deep links #measure:T[M]), catalog.json + one offline
+                    catalog.html (search names/DAX, filters, details, "Loaded by" across models).
+                    Key from origin (source_identity): fabric-<model id> | devops-<proj>-<repo>-
+                    <hash> | file-<name>-<hash>; same model again replaces the entry (latest only).
+                    CLI `catalog list|remove|rebuild FOLDER`. Web UI serves it at /catalog/.
+                    Known gap: source names are not database-qualified (Name navigation gives
+                    "vw_x", Schema/Item "dbo.vw_x") - cross-model source matching needs server/db
+                    (with 6b).
   web_sources.py    Web UI panels FabricPanel (workspace → report) and DevOpsPanel (org →
                     project → repo → branch → report → version/commit); ready(), blocking
                     fetch(progress) → (report folder, model folder). make_fabric_client /
