@@ -26,7 +26,7 @@ import shutil
 import time
 import urllib.parse
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -238,6 +238,22 @@ class DevOpsClient(RestClient):
             for c in body.get("value", [])
         ]
 
+    def read_file(
+        self, project: str, repo: str, path: str, version: str = "", version_type: str = "branch"
+    ) -> bytes:
+        """The content of one file of the repository."""
+        _, _, content = self.request(
+            "GET",
+            self._url(
+                f"{self._repo(project, repo)}/items",
+                path=path,
+                download="true",
+                **self._version(version, version_type),
+            ),
+            raw=True,
+        )
+        return content
+
     def download_folder(
         self, project: str, repo: str, path: str, version: str = "", version_type: str = "branch"
     ) -> bytes:
@@ -289,6 +305,17 @@ class DevOpsFetched:
     version: str  # branch / tag / commit that was read
     report_folder: Path  # local <name>.Report
     model_path: Path  # local <model>.SemanticModel
+    # With all_reports: every downloaded report on the model (the asked-for one first)
+    report_folders: list[Path] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+
+
+def _model_reference(pbir: bytes, report_path: str) -> Optional[str]:
+    """Repository path of the model a definition.pbir points to (None if byConnection)."""
+    reference = (json.loads(pbir.decode("utf-8-sig")).get("datasetReference") or {}).get("byPath")
+    if not (reference or {}).get("path"):
+        return None
+    return posixpath.normpath(posixpath.join(report_path, reference["path"]))
 
 
 def safe_name(name: str) -> str:
@@ -304,6 +331,7 @@ def fetch_report(
     version: str = "",
     version_type: str = "branch",
     progress: Optional[Callable[[str], None]] = None,
+    all_reports: bool = False,
 ) -> DevOpsFetched:
     """
     Download a PBIP report folder and the semantic model it references.
@@ -316,6 +344,8 @@ def fetch_report(
             reference to its model still works). Default: default_destination()
         version, version_type: Branch / tag / commit ("" = the default branch)
         progress: Called with a short status text per step
+        all_reports: Also download every other report in the repository whose
+            definition.pbir points to the same model folder (model mode)
 
     Returns:
         DevOpsFetched with the local report and model folders
@@ -333,37 +363,62 @@ def fetch_report(
         destination,
     )
 
-    pbir = json.loads((report_folder / "definition.pbir").read_bytes().decode("utf-8-sig"))
-    reference = (pbir.get("datasetReference") or {}).get("byPath") or {}
-    if not reference.get("path"):
+    model_path = _model_reference((report_folder / "definition.pbir").read_bytes(), report_path)
+    if model_path is None:
         raise ApiError(
             f"{report_path} is bound to a semantic model in the Power BI service (not stored in "
             "the repository) - document it from the Fabric workspace instead."
         )
-    model_path = posixpath.normpath(posixpath.join(report_path, reference["path"]))
     say(f"Downloading {model_path}")
     model_folder = extract_folder(
         client.download_folder(project, repo, model_path, version, version_type),
         model_path,
         destination,
     )
-    (report_folder.parent / f"{report_folder.stem}.devops_source.json").write_text(
-        json.dumps(
-            {
-                "organization": client.org,
-                "project": project,
-                "repository": repo,
-                "report": report_path,
-                "semantic_model": model_path,
-                "version": version,
-                "version_type": version_type,
-                "fetched": time.strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+
+    def write_source(folder: Path, path: str) -> None:
+        (folder.parent / f"{folder.stem}.devops_source.json").write_text(
+            json.dumps(
+                {
+                    "organization": client.org,
+                    "project": project,
+                    "repository": repo,
+                    "report": path,
+                    "semantic_model": model_path,
+                    "version": version,
+                    "version_type": version_type,
+                    "fetched": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    write_source(report_folder, report_path)
+    fetched = DevOpsFetched(
+        project, repo, version, report_folder, model_folder, report_folders=[report_folder]
     )
-    return DevOpsFetched(project, repo, version, report_folder, model_folder)
+    if not all_reports:
+        return fetched
+
+    say("Looking for other reports on the same model")
+    for other in client.find_reports(project, repo, version, version_type):
+        if other.lower() == report_path.lower():
+            continue
+        try:
+            pbir = client.read_file(project, repo, f"{other}/definition.pbir", version, version_type)
+            if (_model_reference(pbir, other) or "").lower() != model_path.lower():
+                continue
+            say(f"Downloading {other}")
+            folder = extract_folder(
+                client.download_folder(project, repo, other, version, version_type), other, destination
+            )
+        except (ApiError, ValueError) as error:
+            fetched.skipped.append(f"{other}: {error}")
+            continue
+        write_source(folder, other)
+        fetched.report_folders.append(folder)
+    return fetched
 
 
 def default_destination(project: str, repo: str, version: str) -> Path:

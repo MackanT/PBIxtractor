@@ -47,6 +47,22 @@ def _repo_files(tmp_path: Path, bound_by_path: bool = True) -> dict[str, bytes]:
     return files
 
 
+def _with_sibling_reports(files: dict[str, bytes]) -> dict[str, bytes]:
+    """Add a second report on the same model and one on another model."""
+    extra = {}
+    for path, content in files.items():
+        if path.startswith("/Reports/Sample.Report/"):
+            extra[path.replace("/Reports/Sample.Report/", "/Detail/Sample Detail.Report/")] = content
+            extra[path.replace("/Reports/Sample.Report/", "/Other/Other.Report/")] = content
+    extra["/Detail/Sample Detail.Report/definition.pbir"] = json.dumps(
+        {"datasetReference": {"byPath": {"path": "../../Reports/Sample.SemanticModel"}}}
+    ).encode()
+    extra["/Other/Other.Report/definition.pbir"] = json.dumps(
+        {"datasetReference": {"byPath": {"path": "../Other.SemanticModel"}}}
+    ).encode()
+    return {**files, **extra}
+
+
 class FakeDevOps(DevOpsClient):
     """Answers the calls the client makes; folder downloads are zips like DevOps returns."""
 
@@ -82,6 +98,8 @@ class FakeDevOps(DevOpsClient):
                         relative = file[len(folder) + 1 :]
                         archive.writestr(f"{name}/{relative}" if self.prefix_folder else relative, content)
             return 200, {}, buffer.getvalue()
+        if path.endswith("/items") and "path" in query:  # one file
+            return 200, {}, self.repo_files[query["path"]]
         if path.endswith("/items"):
             return 200, {}, {"value": [{"path": f, "isFolder": False} for f in self.repo_files]
                                       + [{"path": "/Reports", "isFolder": True}]}
@@ -160,6 +178,32 @@ def test_fetch_uses_default_branch(tmp_path, monkeypatch):
     fetched = fetch_report(client, "BI Team", "reports", "/Reports/Sample.Report")
     assert fetched.version == "main"
     assert Path("output/_devops/BI Team/reports/main/Reports/Sample.Report").is_dir()
+
+
+def test_fetch_all_reports_on_the_model(tmp_path):
+    client = FakeDevOps(_with_sibling_reports(_repo_files(tmp_path)))
+    fetched = fetch_report(
+        client, "BI Team", "reports", "/Reports/Sample.Report", tmp_path / "out", "main",
+        all_reports=True,
+    )
+    names = [folder.name for folder in fetched.report_folders]
+    assert names == ["Sample.Report", "Sample Detail.Report"]  # Other.Report uses another model
+    assert (tmp_path / "out" / "Detail" / "Sample Detail.Report" / "definition.pbir").is_file()
+    assert fetched.skipped == []
+
+
+def test_cli_extract_all_reports_from_devops(tmp_path, monkeypatch, capsys):
+    client = FakeDevOps(_with_sibling_reports(_repo_files(tmp_path)))
+    monkeypatch.setattr("pbixtractor.cli._devops_client", lambda args, org: client)
+    output = tmp_path / "doc"
+    url = "https://dev.azure.com/contoso/BI%20Team/_git/reports?path=/Reports/Sample.Report"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", "--devops", url, "--all-reports", "-o", str(output),
+              "--no-tabular-editor", "-q"])
+    assert exit_info.value.code == 0, capsys.readouterr().err
+    document = json.loads((output / "Sample.json").read_text(encoding="utf-8"))  # model name
+    pages = [page["name"] for page in document["report"]["pages"]]
+    assert "Sample › Sales" in pages and "Sample Detail › Sales" in pages
 
 
 def test_report_bound_to_service_model(tmp_path):

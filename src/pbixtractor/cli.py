@@ -70,6 +70,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --devops: branch name, tag:<name> or commit:<id> (default: the URL's "
         "version, else the default branch)",
     )
+    extract.add_argument(
+        "--all-reports",
+        action="store_true",
+        help="model mode: document every report on the same semantic model together (with "
+        "--fabric / --devops; pages become '<report> › <page>', 'unused' = unused by all)",
+    )
+    extract.add_argument(
+        "--all-workspaces",
+        action="store_true",
+        help="with --fabric --all-reports: look for reports in every workspace you can access "
+        "(default: the report's and the model's workspace)",
+    )
+    extract.add_argument(
+        "--also",
+        type=Path,
+        nargs="+",
+        metavar="REPORT",
+        help="model mode for local files: more reports on the same model to document together",
+    )
+    extract.add_argument(
+        "--no-service-statistics",
+        action="store_true",
+        help="do not read row counts / distinct values from the Power BI service for Fabric models",
+    )
     extract.add_argument("--tenant", help="Entra tenant id for the Fabric / DevOps sign-in")
     extract.add_argument(
         "--model",
@@ -163,6 +187,8 @@ def _fetch(args: argparse.Namespace, path: str, destination: Optional[Path]):
         report,
         destination,
         progress=None if getattr(args, "quiet", False) else lambda text: print(f"  {text}"),
+        all_reports=getattr(args, "all_reports", False),
+        all_workspaces=getattr(args, "all_workspaces", False),
     )
 
 
@@ -218,6 +244,7 @@ def _devops_fetch(args: argparse.Namespace, url: str, destination: Optional[Path
         version,
         version_type,
         progress=None if getattr(args, "quiet", False) else lambda text: print(f"  {text}"),
+        all_reports=getattr(args, "all_reports", False),
     )
 
 
@@ -255,7 +282,13 @@ def run_devops(args: argparse.Namespace) -> int:
 def run_extract(args: argparse.Namespace) -> int:
     """Handle `pbixtractor extract`. Returns the process exit code."""
     from .azure_auth import ApiError
-    from .pipeline import ExtractionOptions, find_model_for_report, report_name, run_extraction
+    from .pipeline import (
+        ExtractionOptions,
+        find_model_for_report,
+        model_name,
+        report_name,
+        run_extraction,
+    )
 
     if sum(bool(x) for x in (args.report, args.fabric, args.devops)) != 1:
         print(
@@ -277,6 +310,20 @@ def run_extract(args: argparse.Namespace) -> int:
             return 1
         args.report = fetched.report_folder
         args.model = args.model or fetched.model_path
+        extra_reports = fetched.report_folders[1:]
+        for skipped in getattr(fetched, "skipped", []):
+            print(f"WARNING: not included (could not be downloaded): {skipped}", file=sys.stderr)
+        if args.all_reports and not args.name:
+            args.name = model_name(fetched.model_path)
+    else:
+        if args.all_reports:
+            print("--all-reports works with --fabric / --devops; for local files use --also.",
+                  file=sys.stderr)
+            return 2
+        extra_reports = list(args.also or [])
+        if extra_reports and not args.name:
+            model_path = args.model or find_model_for_report(args.report)
+            args.name = model_name(model_path) if model_path else None
 
     model = args.model or find_model_for_report(args.report)
     if model is None:
@@ -296,6 +343,8 @@ def run_extract(args: argparse.Namespace) -> int:
         tabular_editor_analysis=not args.no_tabular_editor,
         tabular_editor_tsv=args.tabular_editor_tsv,
         write_log_file=not args.no_log_file,
+        extra_reports=extra_reports,
+        service_statistics=not args.no_service_statistics,
     )
     if args.description_tag:
         options.description_tag = args.description_tag

@@ -18,22 +18,29 @@ Sign-in: see azure_auth.py.
 import base64
 import json
 import logging
+import os
 import re
 import shutil
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from .azure_auth import FABRIC_SCOPE, ApiError, RestClient
+from .azure_auth import FABRIC_SCOPE, POWERBI_SCOPE, ApiError, RestClient
 
 logger = logging.getLogger("pbixtractor")
 
 API = "https://api.fabric.microsoft.com/v1"
+POWERBI_API = "https://api.powerbi.com/v1.0/myorg"
 _GUID = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 
 FabricError = ApiError  # kept as the name callers catch
+
+
+def _column_name(key: str) -> str:
+    """executeQueries column key -> plain name: "[Rows]" -> "Rows", "T[Col]" -> "Col"."""
+    return key[key.index("[") + 1 : -1] if key.endswith("]") and "[" in key else key
 
 
 # ============================================================================
@@ -52,6 +59,39 @@ class FabricClient(RestClient):
             sleep: Wait function used while polling (tests pass a no-op)
         """
         super().__init__(api, FABRIC_SCOPE, credential=credential, sleep=sleep)
+        self._powerbi: Optional[RestClient] = None
+
+    @property
+    def powerbi(self) -> RestClient:
+        """The Power BI REST API (same sign-in): report -> model bindings and DAX queries."""
+        if self._powerbi is None:
+            self._powerbi = RestClient(
+                POWERBI_API, POWERBI_SCOPE, credential=self._credential, sleep=self._sleep
+            )
+        return self._powerbi
+
+    def powerbi_reports(self, workspace_id: str) -> list[dict]:
+        """Reports of a workspace with their model: [{"id", "name", "datasetId", ...}]."""
+        _, _, body = self.powerbi.request("GET", f"groups/{workspace_id}/reports")
+        return body.get("value", [])
+
+    def execute_query(self, workspace_id: str, model_id: str, dax: str) -> list[dict]:
+        """
+        Run one DAX query on a semantic model in the service (read-only).
+
+        Returns:
+            Rows as dicts; column names without brackets ("Table[Col]" -> "Col")
+        """
+        _, _, body = self.powerbi.request(
+            "POST",
+            f"groups/{workspace_id}/datasets/{model_id}/executeQueries",
+            {"queries": [{"query": dax}], "serializerSettings": {"includeNulls": True}},
+        )
+        result = (body.get("results") or [{}])[0]
+        if result.get("error"):
+            raise ApiError(f"DAX query failed: {result['error'].get('message', result['error'])}")
+        rows = ((result.get("tables") or [{}])[0]).get("rows", [])
+        return [{_column_name(key): value for key, value in row.items()} for row in rows]
 
     def _list(self, path: str) -> list[dict]:
         """GET a paged list (follows continuationUri)."""
@@ -73,7 +113,12 @@ class FabricClient(RestClient):
         return self._list(f"workspaces/{workspace_id}/semanticModels")
 
     def get_definition(
-        self, workspace_id: str, item_id: str, kind: str, format: Optional[str] = None
+        self,
+        workspace_id: str,
+        item_id: str,
+        kind: str,
+        format: Optional[str] = None,
+        progress: Optional[Callable[[float], None]] = None,
     ) -> list[dict]:
         """
         Download an item definition (long-running operation: polled until done).
@@ -84,6 +129,7 @@ class FabricClient(RestClient):
             kind: "reports" or "semanticModels"
             format: Optional definition format (reports: PBIR / PBIR-Legacy; models: TMDL /
                 TMSL)
+            progress: Called with the seconds waited so far while Fabric prepares it
 
         Returns:
             Definition parts: [{"path", "payload" (base64), "payloadType"}]
@@ -93,16 +139,23 @@ class FabricClient(RestClient):
             url += f"?format={urllib.parse.quote(format)}"
         status, headers, body = self.request("POST", url)
         if status == 202:
-            body = self._wait_for_operation(headers)
+            body = self._wait_for_operation(headers, progress=progress)
         return (body or {}).get("definition", {}).get("parts", [])
 
-    def _wait_for_operation(self, headers: dict, timeout: float = 600) -> dict:
+    def _wait_for_operation(
+        self, headers: dict, timeout: float = 600, progress: Optional[Callable[[float], None]] = None
+    ) -> dict:
         headers = {k.lower(): v for k, v in headers.items()}
         operation = headers.get("x-ms-operation-id")
         location = headers.get("location") or f"{self._api}/operations/{operation}"
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
         while True:
-            self._sleep(float(headers.get("retry-after") or 2))
+            # Fabric suggests the wait (Retry-After, often 20-30 s); poll at least every 5 s so
+            # small items finish sooner and the user sees progress
+            self._sleep(min(float(headers.get("retry-after") or 2), 5))
+            if progress:
+                progress(time.monotonic() - started)
             _, headers, state = self.request("GET", location)
             headers = {k.lower(): v for k, v in headers.items()}
             status = (state or {}).get("status")
@@ -179,8 +232,14 @@ class FetchedReport:
     workspace: str
     report: str
     model: str
-    report_folder: Path  # <report>.Report
+    report_folder: Path  # <report>.Report (the report asked for)
     model_path: Path  # <model>.SemanticModel
+    model_id: str = ""
+    model_workspace_id: str = ""
+    # With all_reports: every downloaded report on the model (the asked-for one first)
+    report_folders: list[Path] = field(default_factory=list)
+    # Reports on the model that could not be downloaded: "<name> (<workspace>): <reason>"
+    skipped: list[str] = field(default_factory=list)
 
 
 def safe_name(name: str) -> str:
@@ -199,12 +258,86 @@ def write_parts(parts: list[dict], folder: Path) -> None:
         target.write_bytes(base64.b64decode(part.get("payload", "")))
 
 
+def _download_report(client: FabricClient, ws: dict, rep: dict, folder: Path, say) -> dict:
+    """Download a report definition into folder; returns its definition.pbir content."""
+    say(f"Downloading report {rep['displayName']}")
+    try:
+        parts = client.get_definition(
+            ws["id"],
+            rep["id"],
+            "reports",
+            progress=lambda s: say(f"Report {rep['displayName']}: Fabric is preparing it ({s:.0f} s)"),
+        )
+    except FabricError as error:
+        raise FabricError(
+            f"{error} (Reports with an encrypting sensitivity label cannot be downloaded from "
+            "Fabric; use a git-synced copy, e.g. Azure DevOps, instead.)"
+        ) from None
+    write_parts(parts, folder)
+    pbir_path = folder / "definition.pbir"
+    return json.loads(pbir_path.read_bytes().decode("utf-8-sig")) if pbir_path.is_file() else {}
+
+
+def _bind_to_local_model(report_folder: Path, pbir: dict, model_folder: Path) -> None:
+    """Point the report at the local model, as in a PBIP project saved by Power BI Desktop."""
+    relative = Path(os.path.relpath(model_folder, report_folder)).as_posix()
+    pbir["datasetReference"] = {"byPath": {"path": relative}}
+    (report_folder / "definition.pbir").write_text(json.dumps(pbir, indent=2), encoding="utf-8")
+
+
+def _write_source(report_folder: Path, ws: dict, rep: dict, model_ws: dict, model: dict) -> None:
+    """<report>.fabric_source.json next to the report: where it came from (used for statistics)."""
+    (report_folder.parent / f"{report_folder.stem}.fabric_source.json").write_text(
+        json.dumps(
+            {
+                "workspace": {"id": ws["id"], "name": ws["displayName"]},
+                "report": {"id": rep["id"], "name": rep["displayName"]},
+                "semantic_model": {
+                    "id": model["id"],
+                    "name": model["displayName"],
+                    "workspace": model_ws["displayName"],
+                    "workspace_id": model_ws["id"],
+                },
+                "fetched": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def reports_on_model(
+    client: FabricClient, model_id: str, workspaces: list[dict], say=None
+) -> list[tuple[dict, dict]]:
+    """
+    Reports bound to a semantic model, in the given workspaces.
+
+    Returns:
+        [(workspace, report as {"id", "displayName"})]; workspaces that cannot be read are skipped
+    """
+    found = []
+    for ws in workspaces:
+        if say:
+            say(f"Looking for reports on the model in {ws['displayName']}")
+        try:
+            reports = client.powerbi_reports(ws["id"])
+        except FabricError as error:
+            logger.debug(f"Cannot list reports in {ws['displayName']}: {error}")
+            continue
+        for report in reports:
+            if (report.get("datasetId") or "").lower() == model_id.lower():
+                found.append((ws, {"id": report["id"], "displayName": report["name"]}))
+    return found
+
+
 def fetch_report(
     client: FabricClient,
     workspace: str,
     report: str,
     destination: Path,
     progress: Optional[Callable[[str], None]] = None,
+    all_reports: bool = False,
+    all_workspaces: bool = False,
 ) -> FetchedReport:
     """
     Download a report and its semantic model as a PBIP project.
@@ -215,30 +348,23 @@ def fetch_report(
         report: Report name or id
         destination: Folder for <report>.Report and <model>.SemanticModel
         progress: Called with a short status text per step
+        all_reports: Also download every other report bound to the same model (model mode)
+        all_workspaces: With all_reports, search every accessible workspace, not only the
+            report's and the model's
 
     Returns:
-        FetchedReport with the local report folder and model folder
+        FetchedReport with the local report folder(s) and model folder
     """
     say = progress or (lambda text: None)
+    destination = Path(destination)
     say(f"Finding workspace {workspace}")
     workspaces = client.workspaces()
     ws = _find(workspaces, workspace, "workspace")
     say(f"Finding report {report}")
     rep = _find(client.reports(ws["id"]), report, "report")
 
-    say(f"Downloading report {rep['displayName']}")
-    try:
-        report_parts = client.get_definition(ws["id"], rep["id"], "reports")
-    except FabricError as error:
-        raise FabricError(
-            f"{error} (Reports with an encrypting sensitivity label cannot be downloaded from "
-            "Fabric; use a git-synced copy, e.g. Azure DevOps, instead.)"
-        ) from None
-    report_folder = Path(destination) / f"{safe_name(rep['displayName'])}.Report"
-    write_parts(report_parts, report_folder)
-
-    pbir_path = report_folder / "definition.pbir"
-    pbir = json.loads(pbir_path.read_bytes().decode("utf-8-sig")) if pbir_path.is_file() else {}
+    report_folder = destination / f"{safe_name(rep['displayName'])}.Report"
+    pbir = _download_report(client, ws, rep, report_folder, say)
     model_id, model_ws_name = model_reference(pbir)
     if not model_id:
         raise FabricError(
@@ -261,34 +387,51 @@ def fetch_report(
         )
 
     say(f"Downloading semantic model {model['displayName']}")
-    model_parts = client.get_definition(model_ws["id"], model["id"], "semanticModels", "TMDL")
-    model_folder = Path(destination) / f"{safe_name(model['displayName'])}.SemanticModel"
-    write_parts(model_parts, model_folder)
-
-    # Point the report at the local model, as in a PBIP project saved by Power BI Desktop
-    pbir["datasetReference"] = {"byPath": {"path": f"../{model_folder.name}"}}
-    pbir_path.write_text(json.dumps(pbir, indent=2), encoding="utf-8")
-    (Path(destination) / "fabric_source.json").write_text(
-        json.dumps(
-            {
-                "workspace": {"id": ws["id"], "name": ws["displayName"]},
-                "report": {"id": rep["id"], "name": rep["displayName"]},
-                "semantic_model": {
-                    "id": model["id"],
-                    "name": model["displayName"],
-                    "workspace": model_ws["displayName"],
-                },
-                "fetched": time.strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    model_parts = client.get_definition(
+        model_ws["id"],
+        model["id"],
+        "semanticModels",
+        "TMDL",
+        progress=lambda s: say(f"Semantic model {model['displayName']}: Fabric is preparing it ({s:.0f} s)"),
     )
-    logger.debug(f"Fetched {rep['displayName']} and {model['displayName']} to {destination}")
-    return FetchedReport(
+    model_folder = destination / f"{safe_name(model['displayName'])}.SemanticModel"
+    write_parts(model_parts, model_folder)
+    _bind_to_local_model(report_folder, pbir, model_folder)
+    _write_source(report_folder, ws, rep, model_ws, model)
+
+    fetched = FetchedReport(
         workspace=ws["displayName"],
         report=rep["displayName"],
         model=model["displayName"],
         report_folder=report_folder,
         model_path=model_folder,
+        model_id=model["id"],
+        model_workspace_id=model_ws["id"],
+        report_folders=[report_folder],
     )
+    if not all_reports:
+        return fetched
+
+    search = workspaces if all_workspaces else list({w["id"]: w for w in (ws, model_ws)}.values())
+    used_names = {report_folder.name.lower()}
+    for other_ws, other in reports_on_model(client, model["id"], search, say):
+        if other["id"] == rep["id"]:
+            continue
+        name = safe_name(other["displayName"])
+        if f"{name}.report".lower() in used_names:  # same name in another workspace
+            name = safe_name(f"{other['displayName']} ({other_ws['displayName']})")
+        used_names.add(f"{name}.report".lower())
+        folder = destination / f"{name}.Report"
+        try:
+            other_pbir = _download_report(client, other_ws, other, folder, say)
+        except FabricError as error:
+            fetched.skipped.append(f"{other['displayName']} ({other_ws['displayName']}): {error}")
+            logger.warning(f"Report {other['displayName']} on the model could not be downloaded: {error}")
+            continue
+        _bind_to_local_model(folder, other_pbir, model_folder)
+        _write_source(folder, other_ws, other, model_ws, model)
+        fetched.report_folders.append(folder)
+    logger.debug(
+        f"Fetched {len(fetched.report_folders)} report(s) and {model['displayName']} to {destination}"
+    )
+    return fetched

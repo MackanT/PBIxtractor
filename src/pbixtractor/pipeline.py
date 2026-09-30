@@ -18,6 +18,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
+from .azure_auth import ApiError
 from .constants import DESCRIPT_TAG
 from .documentation import Documentation, build_documentation
 from .excel_report import write_data_workbook, write_main_workbook
@@ -27,8 +28,15 @@ from .live_model import collect_live_statistics
 from .logger import capture_logs, get_logger
 from .readers import ReportReadError
 from .relationship_graph import save_relationship_graph
-from .report_extractor import ReportExtractor, known_functions, visual_mapper, visual_type_list
+from .report_extractor import (
+    ReportExtractor,
+    extract_reports,
+    known_functions,
+    visual_mapper,
+    visual_type_list,
+)
 from .semantic_model import model_source, model_to_dataset, read_model
+from .service_stats import ServiceModel, read_service_statistics, service_model_for_report
 from .tabular_editor import (
     drop_redundant_table_refs,
     export_dependencies,
@@ -58,13 +66,25 @@ class ExtractionOptions:
     tabular_editor_analysis: bool = True  # BPA, exact dependencies, live statistics
     tabular_editor_tsv: bool = False  # use TE's TSV export (formats DAX via daxformatter.com)
     write_log_file: bool = True  # save warnings to <output_dir>/logs/
+    # Model mode: more reports on the same model, documented together with report_path (pages
+    # become "<report> › <page>"; "unused" then means unused by all of them)
+    extra_reports: list[Path] = field(default_factory=list)
+    # Statistics from the Power BI service (row counts, sizes, measure types) for a model
+    # downloaded from Fabric; None = look for <report>.fabric_source.json next to the report
+    service_model: Optional[ServiceModel] = None
+    service_statistics: bool = True
 
     def __post_init__(self):
         self.report_path = Path(self.report_path)
         self.model_path = Path(self.model_path)
         self.output_dir = Path(self.output_dir)
+        self.extra_reports = [Path(p) for p in self.extra_reports]
         if not self.name:
             self.name = report_name(self.report_path)
+
+    @property
+    def report_paths(self) -> list[Path]:
+        return [self.report_path] + self.extra_reports
 
 
 @dataclass
@@ -88,6 +108,19 @@ def report_name(report_path: str | Path) -> str:
     """Report name from its path: "Sales.pbix" / "Sales.pbip" / "Sales.Report" -> "Sales"."""
     path = Path(report_path)
     return path.name[: -len(".Report")] if path.name.endswith(".Report") else path.stem
+
+
+def model_name(model_path: str | Path) -> str:
+    """Model name from its path: "Sales.bim", "Sales.SemanticModel[/definition[/model.tmdl]]"."""
+    path = Path(model_path)
+    if path.suffix.lower() == ".tmdl":
+        path = path.parent
+    if path.name.lower() == "definition":
+        path = path.parent
+    for suffix in (".SemanticModel", ".Dataset", ".bim"):
+        if path.name.endswith(suffix):
+            return path.name[: -len(suffix)]
+    return path.stem
 
 
 def find_model_for_report(report_path: str | Path) -> Optional[Path]:
@@ -183,6 +216,31 @@ def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, pr
     return bpa_violations, exact_dependencies, live_statistics
 
 
+def _service_statistics(model, options: ExtractionOptions, progress):
+    """Row counts and distinct values from the Power BI service for a Fabric model (else None)."""
+    if not options.service_statistics:
+        return None
+    service = options.service_model or service_model_for_report(options.report_path)
+    if service is None:
+        return None
+    # Counting a DirectQuery table would query the source database
+    countable = [
+        table.name
+        for table in model.tables
+        if not table.is_calculation_group
+        and not any(p.mode == "directQuery" for p in table.partitions)
+    ]
+    progress("Row counts from the Power BI service", 0.47)
+    try:
+        stats = read_service_statistics(service, countable)
+    except (ApiError, OSError) as e:
+        logger.warning(f"Reading statistics from the Power BI service failed: {e}")
+        return None
+    for query, error in stats.errors.items():
+        logger.warning(f"Power BI service statistics ({query}) failed: {error[:400]}")
+    return stats
+
+
 def run_extraction(
     options: ExtractionOptions,
     progress: Optional[Callable[[str, float], None]] = None,
@@ -238,8 +296,9 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
     for key in ("workbook", "data_workbook"):
         if is_excel_open_with_file(str(files[key])):
             return ExtractionResult("error", f"Please close {files[key].name} in Excel first.")
-    if not options.report_path.exists():
-        return ExtractionResult("error", f"Report not found: {options.report_path}")
+    for path in options.report_paths:
+        if not path.exists():
+            return ExtractionResult("error", f"Report not found: {path}")
 
     # 1. Model: always read from the .bim (relationships, sort-by and hierarchy columns come
     #    from here, even when Tabular Editor provides the TSV)
@@ -253,6 +312,10 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
     bpa_violations, exact_dependencies, live_statistics = _tabular_editor_analysis(
         model, source, options, progress
     )
+    service_statistics = _service_statistics(model, options, progress)
+    if service_statistics is not None and not (live_statistics and live_statistics.has_sizes):
+        # Desktop (when open) knows more: sizes and measure types; the service only rows/values
+        live_statistics = service_statistics
 
     # Measure data types are only known by a live model (the .bim usually lacks them)
     if live_statistics:
@@ -272,19 +335,25 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
     else:
         dataset = model_to_dataset(model)
 
-    # 2. Report
-    progress("Reading the report", 0.55)
-    extractor = ReportExtractor(str(options.report_path.parent), options.report_path.name)
-    extractor.extract()
+    # 2. Report(s)
+    if options.extra_reports:
+        progress(f"Reading {len(options.report_paths)} reports", 0.55)
+        report_items, report_filters, report_definition = extract_reports(options.report_paths)
+    else:
+        progress("Reading the report", 0.55)
+        extractor = ReportExtractor(str(options.report_path.parent), options.report_path.name)
+        extractor.extract()
+        report_items, report_filters = extractor.result, extractor.filters
+        report_definition = extractor.report
 
     # 3. Analysis
     progress("Analysing", 0.65)
     documentation = build_documentation(
-        report_items=extractor.result,
-        report_filters=extractor.filters,
+        report_items=report_items,
+        report_filters=report_filters,
         model=model,
         dataset=dataset,
-        report_name=report_name(options.report_path),
+        report_name=options.name if options.extra_reports else report_name(options.report_path),
         description_tag=options.description_tag,
         visual_mapper=visual_mapper,
         visual_types=visual_type_list,
@@ -292,7 +361,7 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         exact_dependencies=exact_dependencies,
         bpa_violations=bpa_violations,
         live_statistics=live_statistics,
-        report=extractor.report,
+        report=report_definition,
     )
 
     # 4. Output

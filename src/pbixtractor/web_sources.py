@@ -10,6 +10,7 @@ downloads it as a local PBIP project when the documentation is created:
 API calls block (and the first one may open a browser sign-in), so they run in threads.
 """
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -17,6 +18,34 @@ from nicegui import app, run, ui
 
 from . import devops, fabric
 from .azure_auth import ApiError
+from .pipeline import model_name
+
+
+@dataclass
+class Fetched:
+    """What a panel downloaded: the report(s) and their model."""
+
+    report_folder: Path
+    model_path: Path
+    extra_reports: list[Path] = field(default_factory=list)  # model mode: the other reports
+    skipped: list[str] = field(default_factory=list)  # reports that could not be downloaded
+
+    @property
+    def model_mode(self) -> bool:
+        return bool(self.extra_reports) or bool(self.skipped)
+
+    @property
+    def name(self) -> str:
+        """Output name: the model's in model mode, else the report's."""
+        if self.model_mode:
+            return model_name(self.model_path)
+        return self.report_folder.name.removesuffix(".Report")
+
+
+MODEL_MODE_HELP = (
+    "Document every report on this semantic model together: pages become '<report> › <page>' "
+    "and 'unused' then means unused by all of them."
+)
 
 
 def make_fabric_client():
@@ -81,6 +110,18 @@ class FabricPanel:
             .classes("w-full")
             .mark("fabric_report")
         )
+        with ui.row().classes("items-center gap-4"):
+            self.all_reports = (
+                ui.switch("All reports on its semantic model").tooltip(MODEL_MODE_HELP).mark(
+                    "fabric_all_reports"
+                )
+            )
+            self.all_workspaces = (
+                ui.switch("Search all my workspaces (slower)")
+                .tooltip("Default: only the report's and the model's workspace")
+                .bind_visibility_from(self.all_reports, "value")
+                .mark("fabric_all_workspaces")
+            )
 
     def _get_client(self):
         if self._client is None:
@@ -117,7 +158,7 @@ class FabricPanel:
     def ready(self) -> bool:
         return bool(self.workspace.value and self.report.value)
 
-    def fetch(self, progress: Callable[[str], None]) -> tuple[Path, Path]:
+    def fetch(self, progress: Callable[[str], None]) -> Fetched:
         workspace = self._workspaces.get(self.workspace.value, self.workspace.value)
         fetched = fabric.fetch_report(
             self._get_client(),
@@ -125,8 +166,12 @@ class FabricPanel:
             self.report.value,
             Path.cwd() / "output" / "_fabric" / fabric.safe_name(workspace),
             progress=progress,
+            all_reports=self.all_reports.value,
+            all_workspaces=self.all_workspaces.value,
         )
-        return fetched.report_folder, fetched.model_path
+        return Fetched(
+            fetched.report_folder, fetched.model_path, fetched.report_folders[1:], fetched.skipped
+        )
 
 
 class DevOpsPanel:
@@ -180,6 +225,11 @@ class DevOpsPanel:
             ui.select({"": "Latest on the branch"}, label="Version", value="")
             .classes("w-full")
             .mark("devops_version")
+        )
+        self.all_reports = (
+            ui.switch("All reports on its semantic model")
+            .tooltip(MODEL_MODE_HELP + " (reports in this repository at the chosen version)")
+            .mark("devops_all_reports")
         )
 
     def _get_client(self):
@@ -259,7 +309,7 @@ class DevOpsPanel:
     def ready(self) -> bool:
         return bool(self.project.value and self.repo.value and self.branch.value and self.report.value)
 
-    def fetch(self, progress: Callable[[str], None]) -> tuple[Path, Path]:
+    def fetch(self, progress: Callable[[str], None]) -> Fetched:
         commit = self.version.value or ""
         version, version_type = (commit, "commit") if commit else (self.branch.value, "branch")
         fetched = devops.fetch_report(
@@ -271,5 +321,8 @@ class DevOpsPanel:
             version,
             version_type,
             progress=progress,
+            all_reports=self.all_reports.value,
         )
-        return fetched.report_folder, fetched.model_path
+        return Fetched(
+            fetched.report_folder, fetched.model_path, fetched.report_folders[1:], fetched.skipped
+        )

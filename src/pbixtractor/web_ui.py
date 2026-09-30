@@ -36,7 +36,7 @@ from .pipeline import (
     run_extraction,
 )
 from .tabular_editor import add_tabular_editor_location, find_tabular_editor
-from .web_sources import DevOpsPanel, FabricPanel
+from .web_sources import DevOpsPanel, FabricPanel, Fetched
 
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
 _OUTPUT_DIRS: dict[str, Path] = {}
@@ -424,8 +424,10 @@ def index() -> None:
                 local_box.bind_visibility_from(source, "value", value="local")
 
                 # Remote sources: pick a report; it is downloaded when the documentation runs
+                suggested_output = {"value": None}  # replaced by the model name in model mode
+
                 def suggest_output(name: str) -> None:
-                    output_input.value = str(Path.cwd() / "output" / name)
+                    output_input.value = suggested_output["value"] = str(Path.cwd() / "output" / name)
 
                 remote = {}
                 for key, panel_class in (("fabric", FabricPanel), ("devops", DevOpsPanel)):
@@ -445,6 +447,11 @@ def index() -> None:
                         "Use Tabular Editor TSV export (formats DAX via daxformatter.com - "
                         "sends DAX online)",
                         value=False,
+                    )
+                    service_stats = ui.switch(
+                        "Row counts and distinct values from the Power BI service (reports "
+                        "downloaded from Fabric; read-only DAX queries)",
+                        value=True,
                     )
                     log_file = ui.switch("Write warnings to a log file", value=True)
                     description_tag = ui.input(
@@ -547,8 +554,12 @@ def index() -> None:
 
     report_input.on_value_change(lambda _: on_report_change())
 
-    async def download_remote_report(panel) -> Optional[tuple[Path, Path]]:
-        """Fetch the chosen Fabric/DevOps report (progress in the step label); None on error."""
+    async def download_remote_report(panel) -> Optional[Fetched]:
+        """Fetch the chosen Fabric/DevOps report; None on error.
+
+        The download has no measurable fraction (Fabric prepares the definition in the
+        background), so the bar is indeterminate and the label shows the current step.
+        """
         step_label.text = "Downloading the report…"
         messages: queue.Queue = queue.Queue()
 
@@ -558,6 +569,8 @@ def index() -> None:
 
         timer = ui.timer(0.2, show_progress)
         run_button.disable()
+        progress_bar.props("indeterminate")
+        progress_bar.visible = True
         try:
             return await run.io_bound(panel.fetch, messages.put)
         except (ApiError, ValueError, OSError) as error:
@@ -566,6 +579,8 @@ def index() -> None:
         finally:
             timer.cancel()
             run_button.enable()
+            progress_bar.props(remove="indeterminate")
+            progress_bar.visible = False
             step_label.text = ""
 
     async def start_run() -> None:
@@ -578,8 +593,20 @@ def index() -> None:
             fetched = await download_remote_report(panel)
             if fetched is None:
                 return
-            report, model = fetched
+            report, model, extra_reports = fetched.report_folder, fetched.model_path, fetched.extra_reports
+            name = fetched.name
+            if fetched.model_mode and output_input.value == suggested_output["value"]:
+                output_input.value = str(Path.cwd() / "output" / name)  # named after the model
+            if fetched.skipped:
+                ui.notify(
+                    "Not included (could not be downloaded) - 'unused' may be incomplete: "
+                    + "; ".join(fetched.skipped),
+                    type="warning",
+                    multi_line=True,
+                    timeout=30000,
+                )
         else:
+            extra_reports, name = [], ""
             report = Path((report_input.value or "").strip('"'))
             model_value = (model_input.value or "").strip('"')
             if not report_input.value or not report.exists():
@@ -597,11 +624,14 @@ def index() -> None:
         options = ExtractionOptions(
             report_path=report,
             model_path=model,
-            output_dir=Path(output_input.value or Path.cwd() / "output" / report_name(report)),
+            output_dir=Path(output_input.value or Path.cwd() / "output" / (name or report_name(report))),
+            name=name,
             description_tag=description_tag.value or ExtractionOptions.description_tag,
             tabular_editor_analysis=te_analysis.value,
             tabular_editor_tsv=te_tsv.value,
             write_log_file=log_file.value,
+            extra_reports=extra_reports,
+            service_statistics=service_stats.value,
         )
 
         events: queue.Queue = queue.Queue()

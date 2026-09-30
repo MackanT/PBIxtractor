@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from pbixtractor.azure_auth import error_text
 from pbixtractor.cli import main
 from pbixtractor.fabric import (
     FabricClient,
@@ -18,6 +19,7 @@ from pbixtractor.fabric import (
     split_fabric_path,
     write_parts,
 )
+from pbixtractor.service_stats import ServiceModel, read_service_statistics, row_count_query
 
 from .sample_pbir import write_sample_pbip
 from .sample_tmdl import SAMPLE_TMDL
@@ -63,15 +65,49 @@ def _model_parts() -> list[dict]:
     return parts + [_part("definition.pbism", b'{"version": "4.0"}')]
 
 
+OTHER_REPORT_ID = "55555555-5555-5555-5555-555555555555"
+
+# executeQueries answers for the sample model (plain DAX only: the API rejects INFO/DMV)
+SERVICE_ROWS = {
+    "COUNTROWS(": [{"Table": "Sales", "Rows": 1000}, {"Table": "Dates", "Rows": 365}],
+    "COLUMNSTATISTICS(": [
+        {"Table Name": "Sales", "Column Name": "Amount", "Cardinality": 321},
+        {"Table Name": "Sales", "Column Name": "RowNumber-2662979B", "Cardinality": 1000},
+    ],
+}
+
+
 class FakeFabric(FabricClient):
     """Answers the API calls fetch_report makes; getDefinition is a long-running operation."""
 
-    def __init__(self, report_parts, model_workspace=WS_SALES):
+    def __init__(self, report_parts, model_workspace=WS_SALES, other_report_parts=None):
         super().__init__(credential=_Credential(), sleep=lambda seconds: None)
         self.report_parts = report_parts
+        self.other_report_parts = other_report_parts  # a second report on the same model
         self.model_workspace = model_workspace
         self.calls = []
         self.polls = 0
+        self.queries = []
+
+    def powerbi_reports(self, workspace_id):
+        self.calls.append(("GET", f"powerbi/{workspace_id}/reports"))
+        if workspace_id != WS_SALES:
+            return []
+        reports = [{"id": REPORT_ID, "name": "Sample", "datasetId": MODEL_ID},
+                   {"id": "66666666-6666-6666-6666-666666666666", "name": "Other model",
+                    "datasetId": "77777777-7777-7777-7777-777777777777"}]
+        if self.other_report_parts:
+            reports.append({"id": OTHER_REPORT_ID, "name": "Sample Detail", "datasetId": MODEL_ID})
+        return reports
+
+    def execute_query(self, workspace_id, model_id, dax):
+        self.queries.append((workspace_id, model_id, dax))
+        if "INFO." in dax:
+            raise FabricError("HTTP 400: DatasetExecuteQueriesError: INFO functions are not supported")
+        for marker, rows in SERVICE_ROWS.items():
+            if marker in dax:
+                return rows
+        raise FabricError(f"unexpected query {dax}")
 
     def request(self, method, url, body=None):
         self.calls.append((method, url))
@@ -85,6 +121,10 @@ class FakeFabric(FabricClient):
             return 200, {}, {"value": [{"id": WS_MODELS, "displayName": "Shared Models"}]}
         if url == f"workspaces/{WS_SALES}/reports":
             return 200, {}, {"value": [{"id": REPORT_ID, "displayName": "Sample"}]}
+        if url == f"workspaces/{WS_SALES}/reports/{OTHER_REPORT_ID}/getDefinition":
+            if self.other_report_parts == "fail":
+                raise FabricError("HTTP 403: InsufficientPrivileges")
+            return 200, {}, {"definition": {"parts": self.other_report_parts}}
         if url.endswith("/semanticModels"):
             models = [{"id": MODEL_ID, "displayName": "Sample Model"}]
             return 200, {}, {"value": models if self.model_workspace in url else []}
@@ -136,11 +176,17 @@ def test_fetch_report_writes_a_pbip_project(tmp_path):
     assert (fetched.model_path / "definition" / "model.tmdl").is_file()
     pbir = json.loads((fetched.report_folder / "definition.pbir").read_text(encoding="utf-8"))
     assert pbir["datasetReference"] == {"byPath": {"path": "../Sample Model.SemanticModel"}}
-    source = json.loads((tmp_path / "out" / "fabric_source.json").read_text(encoding="utf-8"))
+    source = json.loads((tmp_path / "out" / "Sample.fabric_source.json").read_text(encoding="utf-8"))
     assert source["semantic_model"]["id"] == MODEL_ID
+    assert source["semantic_model"]["workspace_id"] == WS_SALES
+    assert (fetched.model_id, fetched.model_workspace_id) == (MODEL_ID, WS_SALES)
+    assert fetched.report_folders == [fetched.report_folder]
     assert client.polls == 4  # two polls per getDefinition
     assert any("TMDL" in url for _, url in client.calls)
     assert steps[0].startswith("Finding workspace")
+    # While Fabric prepares a definition, the waiting time is reported
+    assert any(s.startswith("Report Sample: Fabric is preparing it (") for s in steps)
+    assert any(s.startswith("Semantic model Sample Model: Fabric is preparing it (") for s in steps)
 
 
 def test_model_in_another_workspace(tmp_path):
@@ -165,6 +211,96 @@ def test_cli_extract_from_fabric(tmp_path, monkeypatch, capsys):
     assert exit_info.value.code == 0, capsys.readouterr().err
     assert (output / "Sample.xlsx").is_file()
     assert (output / "source" / "Sample.Report" / "definition.pbir").is_file()
+
+
+def test_fetch_all_reports_on_the_model(tmp_path):
+    client = FakeFabric(
+        _report_parts(tmp_path / "a", "Sales WS"),
+        other_report_parts=_report_parts(tmp_path / "b", "Sales WS"),
+    )
+    fetched = fetch_report(client, "Sales WS", "Sample", tmp_path / "out", all_reports=True)
+    assert [f.name for f in fetched.report_folders] == ["Sample.Report", "Sample Detail.Report"]
+    detail = fetched.report_folders[1]
+    pbir = json.loads((detail / "definition.pbir").read_text(encoding="utf-8"))
+    assert pbir["datasetReference"] == {"byPath": {"path": "../Sample Model.SemanticModel"}}
+    assert (tmp_path / "out" / "Sample Detail.fabric_source.json").is_file()
+    # Only the report's (= the model's) workspace is searched by default
+    assert [u for _, u in client.calls if u.startswith("powerbi/")] == [f"powerbi/{WS_SALES}/reports"]
+
+
+def test_report_that_cannot_be_downloaded_is_skipped(tmp_path):
+    client = FakeFabric(_report_parts(tmp_path, "Sales WS"), other_report_parts="fail")
+    fetched = fetch_report(
+        client, "Sales WS", "Sample", tmp_path / "out", all_reports=True, all_workspaces=True
+    )
+    assert len(fetched.report_folders) == 1
+    assert fetched.skipped[0].startswith("Sample Detail (Sales WS): HTTP 403")
+    assert f"powerbi/{WS_MODELS}/reports" in [u for _, u in client.calls]  # every workspace
+
+
+def test_service_statistics(tmp_path):
+    client = FakeFabric([])
+    stats = read_service_statistics(ServiceModel(WS_SALES, MODEL_ID), ["Sales", "Dates"], client=client)
+    assert stats.table_rows == {"Sales": 1000, "Dates": 365}
+    assert stats.columns[("Sales", "Amount")].distinct_values == 321
+    assert ("Sales", "RowNumber-2662979B") not in stats.columns
+    assert not stats.has_sizes and stats.measure_types == {}  # not available from the service
+    assert stats.tables == {"Sales", "Dates"} and stats.errors == {}
+    assert all(q[:2] == (WS_SALES, MODEL_ID) for q in client.queries)
+    assert not any("INFO." in q[2] for q in client.queries)
+
+
+def test_row_count_query_escapes_names():
+    assert row_count_query(["Sales"]) == 'EVALUATE ROW("Table", "Sales", "Rows", COUNTROWS(\'Sales\'))'
+    query = row_count_query(["Bob's \"Sales\"", "Dates"])
+    assert query.startswith("EVALUATE UNION(")
+    assert "COUNTROWS('Bob''s \"Sales\"')" in query and '"Bob\'s ""Sales"""' in query
+
+
+def test_power_bi_error_details_are_shown():
+    body = json.dumps({"error": {"code": "DatasetExecuteQueriesError", "pbi.error": {"details": [
+        {"code": "DetailsMessage", "detail": {"type": 1, "value": "Query (1, 10) Failed to resolve name"}}
+    ]}}}).encode()
+    text = error_text(400, "https://api.powerbi.com/v1.0/myorg/groups/x/executeQueries?a=1", body)
+    assert text.startswith("HTTP 400: DatasetExecuteQueriesError: Query (1, 10) Failed to resolve")
+    assert text.endswith("[https://api.powerbi.com/v1.0/myorg/groups/x/executeQueries]")
+
+
+def test_execute_query_parses_rows_and_errors():
+    class PowerBI:
+        def __init__(self, body):
+            self.body = body
+
+        def request(self, method, url, body=None, raw=False):
+            assert url.endswith(f"groups/{WS_SALES}/datasets/{MODEL_ID}/executeQueries")
+            assert body["queries"][0]["query"] == "EVALUATE x"
+            return 200, {}, self.body
+
+    client = FabricClient(_Credential())
+    client._powerbi = PowerBI({"results": [{"tables": [{"rows": [{"[Rows]": 5, "Sales[Amount]": 1}]}]}]})
+    assert client.execute_query(WS_SALES, MODEL_ID, "EVALUATE x") == [{"Rows": 5, "Amount": 1}]
+    client._powerbi = PowerBI({"results": [{"error": {"message": "INFO needs write permission"}}]})
+    with pytest.raises(FabricError, match="INFO needs write permission"):
+        client.execute_query(WS_SALES, MODEL_ID, "EVALUATE x")
+
+
+def test_cli_extract_from_fabric_reads_service_statistics(tmp_path, monkeypatch, capsys):
+    client = FakeFabric(
+        _report_parts(tmp_path / "a", "Sales WS"),
+        other_report_parts=_report_parts(tmp_path / "b", "Sales WS"),
+    )
+    monkeypatch.setattr("pbixtractor.cli._fabric_client", lambda args: client)
+    monkeypatch.setattr("pbixtractor.service_stats.make_client", lambda: client)
+    output = tmp_path / "doc"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", "--fabric", "Sales WS/Sample", "--all-reports", "-o", str(output),
+              "--no-tabular-editor", "-q"])
+    assert exit_info.value.code == 0, capsys.readouterr().err
+    document = json.loads((output / "Sample Model.json").read_text(encoding="utf-8"))
+    sales = next(t for t in document["model"]["tables"] if t["name"] == "Sales")
+    assert sales["rows"] == 1000  # from the service
+    pages = [page["name"] for page in document["report"]["pages"]]
+    assert "Sample › Sales" in pages and "Sample Detail › Sales" in pages
 
 
 def test_cli_extract_needs_report_or_fabric(capsys):

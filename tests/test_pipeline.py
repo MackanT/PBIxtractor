@@ -15,6 +15,7 @@ from pbixtractor.pipeline import (
 from pbixtractor.utils import is_excel_open_with_file
 
 from .sample_layout import write_sample_pbix
+from .sample_pbir import write_sample_pbip
 from .test_semantic_model import BIM
 
 
@@ -65,6 +66,68 @@ def test_run_extraction(sample):
     assert steps == sorted(steps) and steps[-1] == 1.0
     if result.status == "warnings":
         assert result.logs and "log" in result.files
+
+
+def _detail_report(folder):
+    """A second report on the sample model (PBIP) with one extra card using Sales[Dynamic]."""
+    write_sample_pbip(folder, "Detail")
+    card = {
+        "name": "card9",
+        "position": {"x": 0, "y": 0, "z": 0},
+        "visual": {
+            "visualType": "card",
+            "query": {"queryState": {"Values": {"projections": [{
+                "field": {"Measure": {"Expression": {"SourceRef": {"Entity": "Sales"}},
+                                      "Property": "Dynamic"}},
+                "queryRef": "Sales.Dynamic",
+                "nativeQueryRef": "Dynamic",
+            }]}}},
+        },
+    }
+    target = folder / "Detail.Report/definition/pages/ReportSectionA/visuals/card9/visual.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(card), encoding="utf-8")
+    return folder / "Detail.Report"
+
+
+def test_model_mode_documents_reports_together(sample):
+    detail = _detail_report(sample / "detail")
+    alone = run_extraction(ExtractionOptions(
+        report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+        output_dir=sample / "alone", tabular_editor_analysis=False,
+    ))
+    assert "Sales[Dynamic]" in alone.report_json["unused"]["measures"]
+
+    result = run_extraction(ExtractionOptions(
+        report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+        output_dir=sample / "model", name="Sample model", tabular_editor_analysis=False,
+        extra_reports=[detail],
+    ))
+    assert result.ok, result.message
+    doc = result.report_json
+    assert doc["report"]["name"] == "Sample model"
+    # Used by the second report only: no longer unused
+    assert "Sales[Dynamic]" not in doc["unused"]["measures"]
+    pages = [p["name"] for p in doc["report"]["pages"]]
+    assert pages == ["Sample › Sales", "Sample › Detail", "Detail › Sales", "Detail › Detail"]
+    # Bookmarks keep to their own report: button btn1 of each report uses its own bookmark
+    panels = {b["name"]: b for b in doc["report"]["bookmarks"]}
+    assert panels["Sample › Panel Open"]["used_by"] == ["Sample › Sales (btn1)"]
+    assert panels["Detail › Panel Open"]["used_by"] == ["Detail › Sales (btn1)"]
+    assert panels["Sample › Panel Open"]["page"] == "Sample › Sales"
+    lineage_pages = {n["id"] for n in doc["lineage"]["nodes"] if n["type"] == "page"}
+    assert "page:Detail › Sales" in lineage_pages
+    assert result.files["workbook"].name == "Sample model.xlsx"
+
+
+def test_cli_also_documents_local_reports_together(sample, capsys):
+    detail = _detail_report(sample / "detail")
+    output = sample / "doc"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", str(sample / "Sample.pbix"), "--also", str(detail), "-o", str(output),
+              "--no-tabular-editor", "-q"])
+    assert exit_info.value.code == 0, capsys.readouterr().err
+    assert (output / "Sample.xlsx").is_file()  # named after the model (Sample.bim)
 
 
 def test_run_extraction_errors(sample):

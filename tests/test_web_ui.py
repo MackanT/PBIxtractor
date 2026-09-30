@@ -179,8 +179,12 @@ def test_document_a_report_from_devops(sample, monkeypatch):
 def test_document_a_report_from_fabric(sample, monkeypatch):
     from .test_fabric import REPORT_ID, WS_SALES, FakeFabric, _report_parts
 
-    client = FakeFabric(_report_parts(sample, "Sales WS"))
+    client = FakeFabric(
+        _report_parts(sample / "a", "Sales WS"),
+        other_report_parts=_report_parts(sample / "b", "Sales WS"),
+    )
     monkeypatch.setattr(web_sources, "make_fabric_client", lambda: client)
+    monkeypatch.setattr("pbixtractor.service_stats.make_client", lambda: client)
 
     async def scenario(user):
         await user.open("/")
@@ -191,9 +195,17 @@ def test_document_a_report_from_fabric(sample, monkeypatch):
         await asyncio.sleep(0.3)
         await _choose(user, "fabric_workspace", WS_SALES)
         await _choose(user, "fabric_report", REPORT_ID)
+        await _choose(user, "fabric_all_reports", True)  # model mode
         user.find("Create documentation").click()
         await user.should_see("Lineage", retries=100)
-        assert (sample / "output" / "Sample" / "Sample.xlsx").is_file()
+        # Named after the model; both reports' pages; statistics from the service
+        document = json.loads(
+            (sample / "output" / "Sample Model" / "Sample Model.json").read_text(encoding="utf-8")
+        )
+        pages = [page["name"] for page in document["report"]["pages"]]
+        assert "Sample Detail › Sales" in pages
+        sales = next(t for t in document["model"]["tables"] if t["name"] == "Sales")
+        assert sales["rows"] == 1000
 
     _simulate(scenario)
 
