@@ -313,16 +313,8 @@ def build_page_items(
         rows = []
         for visual in visual_ids:
             visual_type = sorted_rows[sorted_rows["Visual ID"] == visual].iloc[0]["Visual Type"]
+            # Unknown visual types were already reported (once) by the extractor
             item_type, display_type = visual_mapper.get_visual_info(visual_type)
-
-            if (
-                not visual_mapper.is_special_visual(visual_type)
-                and visual_type not in visual_types
-                and visual_type not in ["Group"]
-                and not visual_mapper.is_button_type(visual_type)
-            ):
-                logger.warning(f"New Visual type not yet supported: {visual_type}")
-
             rows.append({"Item Type": item_type, "Visual Type": display_type, "ID": visual})
 
         for index, filter_row in enumerate(filter_strings):

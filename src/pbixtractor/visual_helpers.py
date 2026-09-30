@@ -1,7 +1,24 @@
 """Helper functions for visual type handling based on YAML configuration."""
 
 import re
-from typing import Tuple
+from typing import Optional, Tuple
+
+# Custom (imported) visuals: "<name>" + a GUID, e.g. "PowerApps_PBI_CV_C29F1DCC_81F5_4973_94AD_
+# 0517D44CC06A" or "castellumCharts9A467DB81DD645A3AF0FB12DA8C0231E"; older marketplace visuals
+# use a 13-digit timestamp instead ("ChicletSlicer1448559807354")
+_CUSTOM_VISUAL = re.compile(
+    r"^(?P<name>[A-Za-z][A-Za-z0-9]*?)(?:(?:_PBI_CV)?_?"
+    r"[0-9A-Fa-f]{8}_?[0-9A-Fa-f]{4}_?[0-9A-Fa-f]{4}_?[0-9A-Fa-f]{4}_?[0-9A-Fa-f]{12}|\d{13})$"
+)
+
+
+def custom_visual_name(visual_type: str) -> Optional[str]:
+    """Readable name of a custom visual ("Power Apps"), or None for built-in visual types."""
+    match = _CUSTOM_VISUAL.match(visual_type or "")
+    if not match:
+        return None
+    words = re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+", match.group("name"))
+    return " ".join(word[:1].upper() + word[1:] for word in words)
 
 
 class VisualTypeMapper:
@@ -44,7 +61,11 @@ class VisualTypeMapper:
             display_name = self._camel_case_to_display_name(visual_type)
             return "Visual", display_name
 
-        # Unknown type - return as-is with warning
+        custom = custom_visual_name(visual_type)
+        if custom:
+            return "Visual", f"{custom} (custom visual)"
+
+        # Unknown type - return as-is
         return "Visual", visual_type
 
     def _camel_case_to_display_name(self, camel_case: str) -> str:

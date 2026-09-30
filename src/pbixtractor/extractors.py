@@ -12,6 +12,7 @@ from .config import Config
 from .logger import get_logger
 from .models import ExtractedFilter, ExtractedItem
 from .readers import FieldBinding, PageDefinition, ReportDefinition, VisualDefinition
+from .visual_helpers import custom_visual_name
 
 _JSONPATH_CACHE = {}
 
@@ -302,6 +303,7 @@ class VisualExtractor(BaseExtractor):
         super().__init__(config, logger)
         self.visual_types = config.supported_visual_types
         self.data_types = config.data_types
+        self._warned: set[tuple] = set()  # unknown types/roles already reported
         # Extract type (data.yaml extract_types) -> handler(visual, page, visual_type, context).
         # "skip" has no handler: those visuals are dropped unless they have an action.
         self.handlers = {
@@ -350,10 +352,15 @@ class VisualExtractor(BaseExtractor):
             if "type" not in link:
                 return []
             visual_type, extract_type = "actionButton", "button"
-        elif extract_type == "standard" and visual_type not in self.visual_types:
-            self.logger.warning(
-                f"Unknown visual type: {visual_type} on {page_name}. "
-                "Extracting fields generically - add it to data.yaml."
+        elif (
+            extract_type == "standard"
+            and visual_type not in self.visual_types
+            and not custom_visual_name(visual_type)  # custom visuals: fields read generically
+        ):
+            self._warn_once(
+                ("type", visual_type),
+                f"Unknown visual type: {visual_type} (first on {page_name}). "
+                "Extracting fields generically - add it to data.yaml.",
             )
 
         items = self.handlers[extract_type](visual, page_name, visual_type, context)
@@ -380,7 +387,7 @@ class VisualExtractor(BaseExtractor):
                 continue
             table_name, val_name = resolved
 
-            data_type = self._determine_data_type(binding)
+            data_type = self._determine_data_type(binding, visual_type)
             disp_name = binding.display_name
 
             if "HierarchyLevel" in binding.expr:
@@ -412,19 +419,29 @@ class VisualExtractor(BaseExtractor):
 
         return items
 
-    def _determine_data_type(self, binding: FieldBinding) -> str:
+    def _determine_data_type(self, binding: FieldBinding, visual_type: str = "") -> str:
         """Map a field's projection role to its friendly name from data.yaml."""
         if binding.role is None:
             self.logger.warning(f"Field not bound to any visual role: {binding.query_ref}")
             return "UNKNOWN Data Type"
 
-        if binding.role not in self.data_types:
-            self.logger.warning(
-                f"Unknown visual role '{binding.role}' - add it to data.yaml data_types"
-            )
-            return binding.role
+        if binding.role in self.data_types:
+            return self.data_types[binding.role]
+        if custom_visual_name(visual_type):
+            # Roles of custom visuals are defined by their author: show them as they are
+            return binding.role.replace("_", " ").strip().capitalize()
+        self._warn_once(
+            ("role", binding.role),
+            f"Unknown visual role '{binding.role}' (first in {visual_type}) - add it to data.yaml "
+            "data_types",
+        )
+        return binding.role
 
-        return self.data_types[binding.role]
+    def _warn_once(self, key: tuple, message: str) -> None:
+        """Log a warning once per extraction run (not once per visual or field)."""
+        if key not in self._warned:
+            self._warned.add(key)
+            self.logger.warning(message)
 
     def _extract_button(
         self,

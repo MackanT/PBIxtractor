@@ -7,6 +7,7 @@ import pytest
 from pbixtractor.config import load_config, parse_config
 from pbixtractor.extractors import ReportContext, VisualExtractor
 from pbixtractor.readers import FieldBinding, VisualDefinition
+from pbixtractor.visual_helpers import custom_visual_name
 
 YAML = {
     "data_types": [{"name": "Values", "friendly_name": "Values"}],
@@ -98,3 +99,49 @@ def test_unknown_type_extracted_generically_and_logged(caplog):
         items = _extractor().extract(visual, "Page")
     assert [(i.table_name, i.val_name) for i in items] == [("Sales", "Amount")]
     assert "Unknown visual type: someCustomVisual" in caplog.text
+
+
+def _field(role: str) -> FieldBinding:
+    return FieldBinding(
+        role=role,
+        expr={"Column": {"Expression": {"SourceRef": {"Entity": "Sales"}}, "Property": "Amount"}},
+        query_ref="Sales.Amount",
+    )
+
+
+@pytest.mark.parametrize(
+    "visual_type, expected",
+    [
+        ("PowerApps_PBI_CV_C29F1DCC_81F5_4973_94AD_0517D44CC06A", "Power Apps"),
+        ("castellumCharts9A467DB81DD645A3AF0FB12DA8C0231E", "Castellum Charts"),
+        ("ChicletSlicer1448559807354", "Chiclet Slicer"),
+        ("clusteredColumnChart", None),
+        ("tableEx", None),
+    ],
+)
+def test_custom_visual_names(visual_type, expected):
+    assert custom_visual_name(visual_type) == expected
+
+
+def test_custom_visuals_are_documented_without_warnings(caplog):
+    visual_type = "castellumCharts9A467DB81DD645A3AF0FB12DA8C0231E"
+    visual = VisualDefinition(name="c1", visual_type=visual_type, fields=[_field("tooltip_cols")])
+    with caplog.at_level(logging.WARNING, logger="test_config"):
+        items = _extractor().extract(visual, "Page")
+    assert [(i.val_name, i.data_type) for i in items] == [("Amount", "Tooltip cols")]
+    assert caplog.text == ""
+    mapper = parse_config(YAML).visual_mapper
+    assert mapper.get_visual_info(visual_type) == ("Visual", "Castellum Charts (custom visual)")
+
+
+def test_unknown_types_and_roles_are_reported_once(caplog):
+    extractor = _extractor()
+    with caplog.at_level(logging.WARNING, logger="test_config"):
+        for page in ("Page 1", "Page 2"):
+            for name in ("v1", "v2"):
+                visual = VisualDefinition(
+                    name=name, visual_type="someNewVisual", fields=[_field("odd"), _field("odd")]
+                )
+                extractor.extract(visual, page)
+    assert caplog.text.count("Unknown visual type: someNewVisual (first on Page 1)") == 1
+    assert caplog.text.count("Unknown visual role 'odd'") == 1
