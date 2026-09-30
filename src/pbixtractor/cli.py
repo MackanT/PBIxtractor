@@ -9,6 +9,7 @@
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
 
 from . import __version__
 
@@ -20,6 +21,15 @@ Examples:
   pbixtractor extract C:/Reports/Sales.pbip       PBIP project (model.bim or TMDL, found via
                                                   the report's definition.pbir)
   pbixtractor extract Sales.pbix --model Sales.SemanticModel/definition     TMDL model
+  pbixtractor extract --fabric "Sales WS/Sales"   Download from a Fabric workspace, then document
+  pbixtractor fabric list                         Workspaces you can access
+  pbixtractor fabric list "Sales WS"              Reports and semantic models in a workspace
+  pbixtractor fabric fetch "Sales WS/Sales" -o C:/pbip   Only download (as a PBIP project)
+  pbixtractor extract --devops "https://dev.azure.com/org/Proj/_git/Repo?path=/Sales.Report"
+                                                  Document a report from Azure DevOps (URL as
+                                                  copied from the browser; add --version)
+  pbixtractor devops list myorg                   Projects (then: myorg Proj, myorg Proj Repo)
+  pbixtractor devops fetch "<url>" --version commit:a1b2c3d   Download an older version
 """
 
 
@@ -38,7 +48,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="document a report",
         description="Write Excel workbooks, JSON and the lineage viewer for a report.",
     )
-    extract.add_argument("report", type=Path, help=".pbix, .pbip or <name>.Report folder")
+    extract.add_argument(
+        "report", type=Path, nargs="?", help=".pbix, .pbip or <name>.Report folder"
+    )
+    extract.add_argument(
+        "--fabric",
+        metavar="WORKSPACE/REPORT",
+        help="download the report and its semantic model from a Fabric workspace first "
+        "(names or ids; needs Contributor access)",
+    )
+    extract.add_argument(
+        "--devops",
+        metavar="URL",
+        help="download the report (and the model it references) from an Azure DevOps repository "
+        "first; the URL of the .Report folder or .pbip file as shown in the browser",
+    )
+    extract.add_argument(
+        "--version",
+        dest="repo_version",
+        metavar="VERSION",
+        help="with --devops: branch name, tag:<name> or commit:<id> (default: the URL's "
+        "version, else the default branch)",
+    )
+    extract.add_argument("--tenant", help="Entra tenant id for the Fabric / DevOps sign-in")
     extract.add_argument(
         "--model",
         type=Path,
@@ -63,15 +95,188 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--no-log-file", action="store_true", help="do not write logs/*.txt")
     extract.add_argument("-q", "--quiet", action="store_true", help="only print the result")
 
+    fabric = commands.add_parser(
+        "fabric",
+        help="list or download Fabric workspace items",
+        description="Browse Fabric workspaces and download reports as PBIP projects.",
+    )
+    fabric_commands = fabric.add_subparsers(dest="fabric_command", required=True)
+    fabric_list = fabric_commands.add_parser("list", help="list workspaces, or a workspace's items")
+    fabric_list.add_argument("workspace", nargs="?", help="workspace name or id")
+    fabric_fetch = fabric_commands.add_parser("fetch", help="download a report and its model")
+    fabric_fetch.add_argument("path", metavar="WORKSPACE/REPORT", help="names or ids")
+    fabric_fetch.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="folder for the PBIP project (default: output/_fabric/<workspace>)",
+    )
+    devops = commands.add_parser(
+        "devops",
+        help="list or download PBIP reports in Azure DevOps repositories",
+        description="Browse Azure DevOps repositories and download PBIP reports at any version. "
+        "Sign-in: same as Fabric, or a personal access token in AZURE_DEVOPS_PAT.",
+    )
+    devops_commands = devops.add_subparsers(dest="devops_command", required=True)
+    devops_list = devops_commands.add_parser(
+        "list", help="projects; a project's repositories; or a repository's branches and reports"
+    )
+    devops_list.add_argument("org", help="organisation name or URL")
+    devops_list.add_argument("project", nargs="?")
+    devops_list.add_argument("repo", nargs="?")
+    devops_list.add_argument(
+        "--history", metavar="REPORT_PATH", help="list the commits that changed this report"
+    )
+    devops_fetch = devops_commands.add_parser("fetch", help="download a report and its model")
+    devops_fetch.add_argument("url", help="URL of the .Report folder or .pbip file")
+    devops_fetch.add_argument(
+        "--version", dest="repo_version", help="branch, tag:<name> or commit:<id>"
+    )
+    devops_fetch.add_argument(
+        "-o", "--output", type=Path, help="local root (default: output/_devops/<project>/<repo>/<version>)"
+    )
+    for sub in (fabric_list, fabric_fetch, devops_list, devops_fetch):
+        sub.add_argument("--tenant", help="Entra tenant id for the sign-in")
+
     web = commands.add_parser("web", help="start the web UI (default)")
     web.add_argument("--port", type=int, default=8081, help="port (default: 8081)")
     web.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
     return parser
 
 
+def _fabric_client(args: argparse.Namespace):
+    from .azure_auth import get_credential
+    from .fabric import FabricClient
+
+    return FabricClient(get_credential(getattr(args, "tenant", None)))
+
+
+def _fetch(args: argparse.Namespace, path: str, destination: Optional[Path]):
+    """Download WORKSPACE/REPORT; returns the FetchedReport (raises FabricError/ValueError)."""
+    from .fabric import fetch_report, safe_name, split_fabric_path
+
+    workspace, report = split_fabric_path(path)
+    destination = destination or Path("output") / "_fabric" / safe_name(workspace)
+    return fetch_report(
+        _fabric_client(args),
+        workspace,
+        report,
+        destination,
+        progress=None if getattr(args, "quiet", False) else lambda text: print(f"  {text}"),
+    )
+
+
+def run_fabric(args: argparse.Namespace) -> int:
+    """Handle `pbixtractor fabric list|fetch`. Returns the process exit code."""
+    from .fabric import FabricError, find_workspace
+
+    try:
+        if args.fabric_command == "fetch":
+            fetched = _fetch(args, args.path, args.output)
+            print(f"Report: {fetched.report_folder}\nModel:  {fetched.model_path}")
+            return 0
+        client = _fabric_client(args)
+        if not args.workspace:
+            for ws in sorted(client.workspaces(), key=lambda w: w["displayName"].lower()):
+                print(f"{ws['id']}  {ws['displayName']}")
+            return 0
+        ws = find_workspace(client, args.workspace)
+        for label, items in (
+            ("Reports", client.reports(ws["id"])),
+            ("Semantic models", client.semantic_models(ws["id"])),
+        ):
+            print(f"{label} in {ws['displayName']}:")
+            for item in sorted(items, key=lambda i: i["displayName"].lower()):
+                print(f"  {item['id']}  {item['displayName']}")
+        return 0
+    except (FabricError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+
+def _devops_client(args: argparse.Namespace, org: str):
+    from .azure_auth import get_credential
+    from .devops import DevOpsClient
+
+    return DevOpsClient(org, get_credential(getattr(args, "tenant", None)))
+
+
+def _devops_fetch(args: argparse.Namespace, url: str, destination: Optional[Path]):
+    """Download the report at a DevOps URL (raises ApiError/ValueError)."""
+    from .devops import fetch_report, parse_devops_url, parse_version
+
+    location = parse_devops_url(url)
+    version, version_type = location.version, location.version_type
+    if getattr(args, "repo_version", None):
+        version, version_type = parse_version(args.repo_version)
+    return fetch_report(
+        _devops_client(args, location.org),
+        location.project,
+        location.repo,
+        location.path,
+        destination,
+        version,
+        version_type,
+        progress=None if getattr(args, "quiet", False) else lambda text: print(f"  {text}"),
+    )
+
+
+def run_devops(args: argparse.Namespace) -> int:
+    """Handle `pbixtractor devops list|fetch`. Returns the process exit code."""
+    from .azure_auth import ApiError
+
+    try:
+        if args.devops_command == "fetch":
+            fetched = _devops_fetch(args, args.url, args.output)
+            print(f"Version: {fetched.version}")
+            print(f"Report:  {fetched.report_folder}\nModel:   {fetched.model_path}")
+            return 0
+        client = _devops_client(args, args.org)
+        if not args.project:
+            for name in client.projects():
+                print(name)
+        elif not args.repo:
+            for repo in client.repositories(args.project):
+                print(f"{repo['name']}  (default branch: {repo['defaultBranch'] or '-'})")
+        elif args.history:
+            for commit in client.commits(args.project, args.repo, args.history):
+                print(f"{commit['short']}  {commit['date']}  {commit['author']}: {commit['comment']}")
+        else:
+            print("Branches: " + ", ".join(client.branches(args.project, args.repo)))
+            print("Reports on the default branch:")
+            for path in client.find_reports(args.project, args.repo):
+                print(f"  {path}")
+        return 0
+    except (ApiError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+
 def run_extract(args: argparse.Namespace) -> int:
     """Handle `pbixtractor extract`. Returns the process exit code."""
+    from .azure_auth import ApiError
     from .pipeline import ExtractionOptions, find_model_for_report, report_name, run_extraction
+
+    if sum(bool(x) for x in (args.report, args.fabric, args.devops)) != 1:
+        print(
+            "Give one of: a report path, --fabric WORKSPACE/REPORT or --devops URL.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.fabric or args.devops:
+        if not args.quiet:
+            print(f"Downloading {args.fabric or args.devops}")
+        source = args.output / "source" if args.output else None
+        try:
+            if args.fabric:
+                fetched = _fetch(args, args.fabric, source)
+            else:
+                fetched = _devops_fetch(args, args.devops, source)
+        except (ApiError, ValueError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        args.report = fetched.report_folder
+        args.model = args.model or fetched.model_path
 
     model = args.model or find_model_for_report(args.report)
     if model is None:
@@ -124,6 +329,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "extract":
         sys.exit(run_extract(args))
+    if args.command == "fabric":
+        sys.exit(run_fabric(args))
+    if args.command == "devops":
+        sys.exit(run_devops(args))
 
     from .web_ui import start
 
