@@ -31,9 +31,9 @@ dependencies = [
     "pyyaml>=6.0.3",
     "jsonpath-ng>=1.6.0",
     "pydantic>=2.0.0",
-    "psycopg>=3.3.4",
-    "psycopg-binary>=3.3.4",
     "nicegui>=2.24.1",
+    "sqlglot>=26",
+    "azure-identity>=1.19",
 ]
 
 [project.optional-dependencies]
