@@ -111,3 +111,9 @@ def test_html_is_self_contained_and_safe(doc, tmp_path):
     path = tmp_path / "lineage.html"
     write_lineage_html(path, doc)
     assert path.read_text(encoding="utf-8") == html
+
+
+def test_html_has_guide(doc):
+    html = render_lineage_html(doc)
+    assert 'id="help"' in html and 'id="guide"' in html
+    assert "How to read the lineage view" in html

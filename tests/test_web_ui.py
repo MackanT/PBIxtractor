@@ -11,6 +11,7 @@ from fastapi import HTTPException  # noqa: E402
 from nicegui import ui  # noqa: E402
 from nicegui.testing.user_simulation import user_simulation  # noqa: E402
 
+import pbixtractor.web_sources as web_sources  # noqa: E402
 import pbixtractor.web_ui as web_ui  # noqa: E402
 
 from .sample_layout import write_sample_pbix  # noqa: E402
@@ -112,3 +113,108 @@ def test_missing_report_warns(sample):
         await user.should_see("Choose an existing report first.")
 
     _simulate(scenario)
+
+
+def test_dropped_files_are_copied_and_filled_in(sample):
+    report_bytes = (sample / "Sample.pbix").read_bytes()
+    model_bytes = (sample / "Sample.bim").read_bytes()
+
+    async def scenario(user):
+        await user.open("/")
+        upload = user.find(marker="upload").elements.pop()
+        # The model and the report of one drop may arrive in any order
+        await upload.handle_uploads([ui.upload.SmallFileUpload("Dropped.bim", "", model_bytes)])
+        await upload.handle_uploads([ui.upload.SmallFileUpload("Dropped.pbix", "", report_bytes)])
+        await asyncio.sleep(0.3)  # let the handlers finish
+        uploads = sample / "output" / "_uploads"
+        assert (uploads / "Dropped.pbix").read_bytes() == report_bytes
+        assert user.find(marker="report").elements.pop().value == str(uploads / "Dropped.pbix")
+        assert user.find(marker="model").elements.pop().value == str(uploads / "Dropped.bim")
+        assert user.find(marker="output").elements.pop().value.endswith("Dropped")
+
+        await upload.handle_uploads([ui.upload.SmallFileUpload("notes.txt", "", b"x")])
+        await user.should_see("drop a .pbix report or a .bim model")
+
+    _simulate(scenario)
+
+
+async def _choose(user, marker: str, value) -> None:
+    """Set a select/input like a user would and let its (async) handler finish."""
+    user.find(marker=marker).elements.pop().value = value
+    await asyncio.sleep(0.3)
+
+
+def test_document_a_report_from_devops(sample, monkeypatch):
+    from .test_devops import FakeDevOps, _repo_files
+
+    client = FakeDevOps(_repo_files(sample))
+    monkeypatch.setattr(web_sources, "make_devops_client", lambda org: client)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "devops")
+        await _choose(user, "devops_org", "contoso")
+        user.find(marker="devops_load").click()
+        await asyncio.sleep(0.3)
+        await _choose(user, "devops_project", "BI Team")
+        await _choose(user, "devops_repo", "reports")
+        branch = user.find(marker="devops_branch").elements.pop()
+        assert branch.value == "main"  # the repository's default branch is preselected
+        await asyncio.sleep(0.3)
+        await _choose(user, "devops_report", "/Reports/Sample.Report")
+        version = user.find(marker="devops_version").elements.pop()
+        assert "a1b2c3d4" in list(version.options.values())[1]  # commit history listed
+        await _choose(user, "devops_version", "a1b2c3d4e5f6")
+        assert user.find(marker="output").elements.pop().value.endswith("Sample")
+
+        user.find("Create documentation").click()
+        await user.should_see("Lineage", retries=100)
+        assert (sample / "output" / "Sample" / "Sample.xlsx").is_file()
+        zips = [q for p, q in client.calls if q.get("$format") == "zip"]
+        assert zips[0]["versionDescriptor.version"] == "a1b2c3d4e5f6"
+
+    _simulate(scenario)
+
+
+def test_document_a_report_from_fabric(sample, monkeypatch):
+    from .test_fabric import REPORT_ID, WS_SALES, FakeFabric, _report_parts
+
+    client = FakeFabric(_report_parts(sample, "Sales WS"))
+    monkeypatch.setattr(web_sources, "make_fabric_client", lambda: client)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        user.find("Create documentation").click()
+        await user.should_see("Choose a report first.")
+        user.find(marker="fabric_load").click()
+        await asyncio.sleep(0.3)
+        await _choose(user, "fabric_workspace", WS_SALES)
+        await _choose(user, "fabric_report", REPORT_ID)
+        user.find("Create documentation").click()
+        await user.should_see("Lineage", retries=100)
+        assert (sample / "output" / "Sample" / "Sample.xlsx").is_file()
+
+    _simulate(scenario)
+
+
+def test_browser_opens_only_without_a_reconnecting_tab(monkeypatch):
+    opened = []
+    monkeypatch.setattr(web_ui, "BROWSER_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(web_ui.webbrowser, "open", opened.append)
+
+    async def scenario() -> None:
+        reconnected = asyncio.Event()
+        reconnected.set()
+        await web_ui._open_browser_unless_reconnected("http://x/", reconnected)
+        assert opened == []
+        await web_ui._open_browser_unless_reconnected("http://x/", asyncio.Event())
+        assert opened == ["http://x/"]
+
+    asyncio.run(scenario())
+
+
+def test_log_count_counts_messages_not_lines():
+    logs = "WARNING: first\nWARNING: Tabular Editor failed:\n  details\n  more\nERROR: last\n"
+    assert web_ui._log_count(logs) == 3
+    assert web_ui._log_count("") == 0

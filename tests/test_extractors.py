@@ -188,6 +188,19 @@ def test_pbix_without_report_gives_clear_error(tmp_path):
         ReportExtractor(str(tmp_path), "Empty.pbix").extract()
 
 
+def test_encrypted_pbix_gives_clear_error(tmp_path):
+    # Purview-labelled files are wrapped in a .pfile container instead of a zip
+    (tmp_path / "Labelled.pbix").write_bytes(b".pfile\x03\x00\x00\x00" + b"\x00" * 64)
+    with pytest.raises(ValueError, match="encrypted by a sensitivity label"):
+        read_report(tmp_path / "Labelled.pbix")
+
+
+def test_non_zip_pbix_gives_clear_error(tmp_path):
+    (tmp_path / "Broken.pbix").write_bytes(b"not a zip")
+    with pytest.raises(ValueError, match="not a valid .pbix file"):
+        read_report(tmp_path / "Broken.pbix")
+
+
 def test_excel_sheet_name():
     used = set()
     assert excel_sheet_name("Sales/Region: [EU]", used) == "Sales_Region_ _EU_"

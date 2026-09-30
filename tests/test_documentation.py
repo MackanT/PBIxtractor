@@ -243,6 +243,24 @@ def test_page_info_bookmarks_and_interactivity(model, report):
     assert nested.group == "Group"
     assert nested.used_by == ["Sales (shp2)"]  # the clickable shape
     assert nested.captures == "Data, Display, Current page"  # defaults: everything
+    assert not any(b.broken for b in documentation.bookmarks)
+
+
+def test_bookmark_on_deleted_page_is_broken(model, report, caplog):
+    items, filters, definition = report
+    original = definition.bookmark_details[0].page
+    definition.bookmark_details[0].page = "ReportSectionGone"
+    try:
+        with caplog.at_level(logging.WARNING, logger="test"):
+            documentation = _documentation(model, report)
+    finally:
+        definition.bookmark_details[0].page = original  # the fixture is module-scoped
+
+    bookmark = documentation.bookmarks[0]
+    assert bookmark.broken
+    assert bookmark.page == "(missing page: ReportSectionGone)"
+    assert "no longer exists: ReportSectionGone" in caplog.text
+    assert not any(b.broken for b in documentation.bookmarks[1:])
 
 
 def test_resolve_hierarchy_columns(model):
