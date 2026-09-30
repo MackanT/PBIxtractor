@@ -15,7 +15,7 @@ which sets these; everything the web UI puts in shared places goes through here:
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 from nicegui import app
 
@@ -27,6 +27,9 @@ class WebConfig:
     storage_prefix: str = ""  # "" stand-alone (keeps existing keys), e.g. "pbixtractor."
     local_machine: bool = True
     embedded: bool = False  # set by register(): no shell, theme or host check of our own
+    # Host's sign-in/role check for the file routes (lineage files, catalog), called per
+    # request; None = no check (stand-alone: a local app behind the loopback host check)
+    access: Optional[Callable[[], bool]] = None
 
 
 CONFIG = WebConfig()
@@ -42,6 +45,16 @@ def configure(**settings) -> WebConfig:
 def url(path: str) -> str:
     """An app URL path of the web UI's own routes, e.g. url("/files/x") → "/pbixtractor/files/x"."""
     return CONFIG.prefix + path
+
+
+def may_access() -> bool:
+    """The current request may use the file routes (fails closed if the check errors)."""
+    if CONFIG.access is None:
+        return True
+    try:
+        return bool(CONFIG.access())
+    except Exception:  # noqa: BLE001 - a broken check must deny, not allow
+        return False
 
 
 def output_root() -> Path:

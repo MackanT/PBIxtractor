@@ -409,3 +409,21 @@ def test_sign_in_errors_become_api_errors():
 
     with pytest.raises(FabricError, match="Sign-in failed: User cancelled"):
         FabricClient(Failing(), api="https://api.fabric.microsoft.com/v1").request("GET", "x")
+
+
+# Imported at collection time: conftest replaces azure_auth.default_credential during tests
+from pbixtractor.azure_auth import default_credential as _real_default_credential  # noqa: E402
+
+
+def test_a_service_principal_in_the_environment_never_opens_a_browser(monkeypatch):
+    from azure.identity import EnvironmentCredential
+
+    from pbixtractor import azure_auth
+
+    for name in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET"):
+        monkeypatch.setenv(name, "x" if name != "AZURE_TENANT_ID" else "00000000-0000-0000-0000-000000000000")
+    assert azure_auth.service_principal_configured()
+    assert isinstance(_real_default_credential(), EnvironmentCredential)  # no browser fallback
+
+    monkeypatch.delenv("AZURE_CLIENT_SECRET")
+    assert not azure_auth.service_principal_configured()  # id without a secret: not enough

@@ -110,8 +110,8 @@ body {{ font-family: "Source Sans 3", "Segoe UI", system-ui, sans-serif; }}
 .body--dark .tint-warning  {{ background: {rgba(WARN_HEX, 0.18)}; }}
 .body--dark .tint-negative {{ background: {rgba(FAIL_HEX, 0.16)}; }}
 .body--dark .tint-accent   {{ background: {rgba(accent, 0.20)}; }}
-/* Tab panels sit on the page ground (Quasar paints them white / dark-grey) */
-.q-tab-panels {{ background: transparent !important; }}
+/* The results tabs sit on the page ground (Quasar paints tab panels white / dark-grey) */
+.pbx-results {{ background: transparent !important; }}
 /* The embedded lineage viewer: a sheet edge like the cards */
 .lineage-frame {{ border: 1px solid #e4e1d4; }}
 .body--dark .lineage-frame {{ border-color: #2a2e28; }}

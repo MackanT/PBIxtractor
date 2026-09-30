@@ -13,6 +13,7 @@ token is multi-resource), so Fabric and DevOps do not ask twice.
 import base64
 import email.utils
 import json
+import os
 import shutil
 import threading
 import time
@@ -37,21 +38,40 @@ class ApiError(RuntimeError):
 # ============================================================================
 
 
+def service_principal_configured() -> bool:
+    """A service principal is set in the environment (the variables azure-identity reads)."""
+    has_id = os.environ.get("AZURE_CLIENT_ID") and os.environ.get("AZURE_TENANT_ID")
+    has_proof = os.environ.get("AZURE_CLIENT_SECRET") or os.environ.get(
+        "AZURE_CLIENT_CERTIFICATE_PATH"
+    )
+    return bool(has_id and has_proof)
+
+
 def default_credential(tenant_id: Optional[str] = None):
     """
-    A token credential: Azure CLI login if `az` is available, otherwise an interactive browser
-    login that is remembered (OS-encrypted token cache + account record).
+    A token credential:
+
+    - a service principal from the environment (AZURE_CLIENT_ID + AZURE_TENANT_ID +
+      AZURE_CLIENT_SECRET or AZURE_CLIENT_CERTIFICATE_PATH): for servers and containers, where
+      no one can complete a browser login - then never a browser;
+    - else the Azure CLI login if `az` is available, otherwise an interactive browser login that
+      is remembered (OS-encrypted token cache + account record).
 
     Args:
-        tenant_id: Entra tenant (default: the account's home tenant)
+        tenant_id: Entra tenant (default: the account's home tenant; a service principal
+            uses AZURE_TENANT_ID)
     """
     from azure.identity import (
         AuthenticationRecord,
         AzureCliCredential,
         ChainedTokenCredential,
+        EnvironmentCredential,
         InteractiveBrowserCredential,
         TokenCachePersistenceOptions,
     )
+
+    if service_principal_configured():
+        return EnvironmentCredential()
 
     record = None
     if AUTH_RECORD.is_file():

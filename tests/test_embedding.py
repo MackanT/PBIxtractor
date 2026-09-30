@@ -58,8 +58,9 @@ def _simulate(tmp_path, scenario) -> None:
 def test_embedded_page_has_no_shell_and_no_server_machine_parts(host):
     async def scenario(user):
         await user.open("/")
-        await user.should_see("Document a report")
+        await user.should_see("Create documentation")
         await user.should_see(marker="host_header")
+        await user.should_not_see(marker="page-title")  # the host draws its own section header
         # No shell of our own: the host has the header / navigation
         for marker in ("nav_document", "nav_expand", "dark_toggle"):
             await user.should_not_see(marker=marker)
@@ -113,3 +114,57 @@ def test_prefixed_choices_only_see_their_own_keys():
     choices["fabric_workspace"] = "ws1"
     assert store["pbx.fabric_workspace"] == "ws1" and "fabric_workspace" not in store
     assert choices.get("theme") is None
+
+
+def test_embedded_page_in_a_host_that_switches_sections_client_side(host):
+    """data-platform renders sections with ui.sub_pages: the page is built after the first load."""
+
+    def overview() -> None:
+        ui.label("Host overview")
+
+    def power_bi() -> None:
+        web_ui.build_page()
+
+    def shell() -> None:
+        with ui.header():
+            ui.button("Power BI", on_click=lambda: ui.navigate.to("/powerbi")).mark("to_powerbi")
+        ui.sub_pages({"/": overview, "/powerbi": power_bi})
+
+    async def run() -> None:
+        async with user_simulation() as user:
+            ui.page("/")(shell)
+            ui.page("/powerbi")(shell)
+            web_ui.register(prefix="/pbx", output_root=host / "out", storage_prefix="pbx.")
+            await user.open("/")
+            await user.should_see("Host overview")
+            user.find(marker="to_powerbi").click()
+            await user.should_see("Create documentation")
+            await user.open("/powerbi")  # a deep link / refresh lands on the section too
+            await user.should_see("Create documentation")
+
+    asyncio.run(run())
+
+
+def test_the_file_routes_follow_the_hosts_access_check(host, tmp_path):
+    from fastapi import HTTPException
+
+    catalog = tmp_path / "cat"
+    catalog.mkdir()
+    (catalog / "catalog.html").write_text("<html></html>")
+    web_ui._CATALOG["dir"] = catalog
+    allowed = {"value": False}
+    web_config.configure(embedded=True, access=lambda: allowed["value"])
+    for serve in (lambda: web_ui._serve_catalog_file("catalog.html"),
+                  lambda: web_ui._serve_output_file("any", "x.html")):
+        with pytest.raises(HTTPException) as refused:
+            serve()
+        assert refused.value.status_code == 403
+    allowed["value"] = True
+    assert web_ui._serve_catalog_file("catalog.html").status_code == 200
+
+    def broken():
+        raise RuntimeError("no session")
+
+    web_config.configure(embedded=True, access=broken)  # fails closed
+    with pytest.raises(HTTPException):
+        web_ui._serve_catalog_file("catalog.html")

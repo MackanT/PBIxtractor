@@ -8,7 +8,7 @@ A tool for extracting and documenting Power BI reports with support for:
 - Excel output with color-coded DAX formulas
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .report_extractor import ReportExtractor  # noqa: E402
 

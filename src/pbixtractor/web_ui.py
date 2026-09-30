@@ -81,6 +81,8 @@ _SANDBOX = {"Content-Security-Policy": "sandbox allow-scripts allow-popups allow
 
 def _serve_output_file(token: str, name: str) -> FileResponse:
     """Serve a file from a run's output folder (only folders created by this app)."""
+    if not web_config.may_access():
+        raise HTTPException(status_code=403)
     folder = _OUTPUT_DIRS.get(token)
     path = (folder / name).resolve() if folder else None
     if path is None or path.parent != folder.resolve() or not path.is_file():
@@ -97,6 +99,8 @@ def _serve_catalog_file(path: str) -> FileResponse:
     Serve the catalog: catalog.html, catalog.json and models/<key>/<file> only - never other
     files that happen to be in (or below) the chosen catalog folder.
     """
+    if not web_config.may_access():
+        raise HTTPException(status_code=403)
     folder = _CATALOG["dir"]
     if folder is None:
         raise HTTPException(status_code=404)
@@ -143,6 +147,7 @@ def register(
     output_root: Optional[Path] = None,
     storage_prefix: str = "pbixtractor.",
     local_machine: bool = False,
+    access: Optional[Callable[[], bool]] = None,
 ) -> None:
     """
     Embed PBIxtractor in another NiceGUI app: call once at startup (before ui.run), then call
@@ -155,6 +160,9 @@ def register(
         storage_prefix: Prefix of PBIxtractor's keys in app.storage.general
         local_machine: True only if every user's browser runs on the server's own PC - it
             allows browsing the server's disk, server paths, Power BI Desktop detection, ...
+        access: The host's sign-in/role check, called for every request to the file routes
+            (they are plain HTTP routes, outside the host's page login); False → 403. Show
+            the page itself only to the same users.
     """
     web_config.configure(
         prefix=prefix.rstrip("/"),
@@ -162,6 +170,7 @@ def register(
         storage_prefix=storage_prefix,
         local_machine=local_machine,
         embedded=True,
+        access=access,
     )
     register_routes()
 
@@ -352,7 +361,7 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
             bookmarks_tab = ui.tab("Bookmarks", icon="bookmarks")
             log_count = _log_count(result.logs)
             log_tab = ui.tab(f"Log ({log_count})" if log_count else "Log", icon="article")
-        with ui.tab_panels(tabs, value=lineage_tab).classes("w-full"):
+        with ui.tab_panels(tabs, value=lineage_tab).classes("w-full pbx-results"):
             with ui.tab_panel(lineage_tab).classes("p-0"):
                 lineage_url = _themed(f"/files/{token}/{result.files['lineage'].name}")
                 with ui.row().classes("w-full justify-end"):
@@ -477,7 +486,7 @@ def _themed(path: str) -> str:
 
 # Keeps embedded lineage viewers in the page's light/dark mode, whichever app hosts the page:
 # Quasar marks dark mode with body.body--dark; the viewer (a sandboxed iframe) takes a message
-_THEME_SYNC = """<script>(function () {
+_THEME_SYNC = """(function () {
   if (window.__pbixtractorThemeSync) return;
   window.__pbixtractorThemeSync = true;
   function mode() { return document.body.classList.contains("body--dark") ? "dark" : "light"; }
@@ -490,7 +499,7 @@ _THEME_SYNC = """<script>(function () {
   document.addEventListener("load", function (e) {
     if (e.target.classList && e.target.classList.contains("lineage-frame")) send(e.target);
   }, true);
-})();</script>"""
+})();"""
 
 
 def _catalog_ready() -> bool:
@@ -583,28 +592,37 @@ def index() -> None:
     build_page(on_catalog_change=refresh_nav)
 
 
-def build_page(on_catalog_change: Optional[Callable[[], None]] = None) -> None:
+def build_page(
+    on_catalog_change: Optional[Callable[[], None]] = None, *, title: Optional[bool] = None
+) -> None:
     """
     The documentation page's content: report choice, options, run, results.
 
     Stand-alone it sits in the app shell (index); embedded, call it inside one of the host's
-    pages after register(). It adds no header, drawer or theme of its own.
+    pages after register(). It adds no header, drawer or theme of its own, and embedded it
+    also leaves the page padding and width to the host's content container.
 
     Args:
         on_catalog_change: Called after a run that may have created a catalog (the stand-alone
             rail shows a Catalog entry then); embedded, the page shows its own catalog link
+        title: Show the "Document a report" masthead (default: stand-alone only - a host
+            usually draws its own section header)
     """
+    embedded = web_config.CONFIG.embedded
     local = web_config.CONFIG.local_machine
     tabular_editor = find_tabular_editor()
-    ui.add_body_html(_THEME_SYNC)
+    # Sent as JavaScript once the page is live: a host switching sections client-side
+    # (ui.sub_pages) builds this after the first load, when added <body> HTML never arrives
+    ui.timer(0.01, lambda: ui.run_javascript(_THEME_SYNC), once=True)
 
-    with ui.column().classes("w-full max-w-screen-2xl mx-auto p-4 gap-4"):
-        page_title(
-            "Document a report",
-            "Excel workbooks, JSON and a lineage viewer for a Power BI report and its semantic "
-            "model",
-            icon="description",
-        )
+    with ui.column().classes("w-full gap-4" if embedded else "w-full max-w-screen-2xl mx-auto p-4 gap-4"):
+        if title if title is not None else not embedded:
+            page_title(
+                "Document a report",
+                "Excel workbooks, JSON and a lineage viewer for a Power BI report and its "
+                "semantic model",
+                icon="description",
+            )
 
         @ui.refreshable
         def catalog_link() -> None:
@@ -867,7 +885,7 @@ def build_page(on_catalog_change: Optional[Callable[[], None]] = None) -> None:
             log_view.visible = False
 
     # Results use the full window width: the lineage viewer needs the room
-    result_box = ui.column().classes("w-full px-4 pb-4 gap-3")
+    result_box = ui.column().classes("w-full gap-3" if embedded else "w-full px-4 pb-4 gap-3")
 
     # ---------------- behaviour ----------------
     def on_report_change() -> None:

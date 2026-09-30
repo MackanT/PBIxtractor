@@ -459,9 +459,12 @@ Open, by owner priority:
   inside the owner's private data-platform NiceGUI app (read only via `gh api`; never clone it
   or store its content on this PC). Phase 1 done: theme.py + restyled stand-alone UI.
   Phase 2 done (web_config.py, register/build_page, tests/test_embedding.py, docs/EMBEDDING.md).
-  Open for embedding: Fabric/DevOps sign-in is interactive on the SERVER (hosted needs `az
-  login` there or a PAT); drop-zone/lineage-frame CSS must be added on the host side; tag a
-  release for the host to pin. Phase 3: integration in data-platform
+  Phase 3 (2026-09-30): PBIxtractor side done - build_page(title=) + no padding when embedded,
+  theme sync sent via run_javascript (works in ui.sub_pages hosts), register(access=...) gates
+  the file routes (403, fails closed), azure_auth uses EnvironmentCredential when a service
+  principal is in the environment (never a browser then), version 0.3.0. data-platform side:
+  branch `feat/powerbi-docs` created via the GitHub API (owner opens the PR/merges); it pins
+  `pbixtractor @ git+...@v0.3.0`, so the v0.3.0 tag must exist first. Earlier plan note: integration in data-platform
   (git dependency pinned to a tag + one nav section) - done there, not from here. Later: restyle
   the generated lineage/catalog HTML pages; logo/about page (logo_large.png kept for it).
 - 6b database lineage (lower): connect to Azure SQL / Fabric Warehouse / Lakehouse SQL endpoint

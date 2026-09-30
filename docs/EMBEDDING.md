@@ -30,6 +30,7 @@ web_ui.register(
     output_root="/data/pbixtractor",  # documentation, uploads, downloads (default: <cwd>/output)
     storage_prefix="pbixtractor.",  # its keys in app.storage.general
     local_machine=False,            # see "Server or user PC" below
+    access=user_may_use_it,         # the host's sign-in/role check (see "Access control")
 )
 ```
 
@@ -42,8 +43,10 @@ def _power_bi_section() -> None:
     web_ui.build_page()
 ```
 
-`build_page()` renders into the current container: the page masthead, report choice, options,
-the run button and the results, including the lineage viewer.
+`build_page()` renders into the current container: report choice, options, the run button and
+the results, including the lineage viewer. Embedded it leaves the section title and the page
+padding/width to the host (pass `title=True` for its own "Document a report" masthead). It works
+in hosts that switch sections client-side with `ui.sub_pages`.
 
 ## What the host is expected to provide
 
@@ -52,12 +55,14 @@ the run button and the results, including the lineage viewer.
   `stat-numeral`, `edge-*`, `tint-*`, `font-disp`, and the `Familjen Grotesk` / `Source Sans 3`
   font families. If the host defines them (the data-platform web UI does), the page matches it,
   including a white-label accent. PBIxtractor applies no colours or fonts of its own when embedded.
-  Two classes are PBIxtractor's own and need a rule in the host's CSS for the same look:
-  `drop-zone` (the upload strip) and `lineage-frame` (the viewer's border) - see
-  `pbixtractor/theme.py::theme_css`.
-- **Access control.** The routes and the page have no sign-in of their own. Put the page behind
-  the host's auth and roles. The two routes only serve files of runs made in this server
-  process (random tokens) and the catalog folder in use.
+  Three classes are PBIxtractor's own and need a rule in the host's CSS for the same look:
+  `drop-zone` (the upload strip), `lineage-frame` (the viewer's border) and `pbx-results`
+  (the results tabs on the page ground) - see `pbixtractor/theme.py::theme_css`.
+- **Access control.** PBIxtractor has no sign-in of its own. Show the page only to users who
+  may use it, and pass the same check as `access=`: the two file routes (lineage files and
+  the catalog, which holds model DAX) are plain HTTP routes, so a host's *page* login does not
+  cover them. `access` is called for every request to them (it can read `app.storage.user`);
+  False - or an error - answers 403. The file links also use random per-run tokens.
 - **Light/dark.** The embedded lineage viewer follows the page's dark mode (`body.body--dark`)
   by itself.
 
@@ -79,13 +84,17 @@ if Tabular Editor 2 is installed on the server.
 
 - One documentation run at a time per server process (a second user sees "Waiting for a run in
   another tab").
-- Fabric and Azure DevOps sign-in happens on the server (`azure-identity`): an interactive
-  browser sign-in opens on the server, so a hosted deployment needs `az login` on the server
-  or `AZURE_DEVOPS_PAT` for DevOps.
+- Fabric and Azure DevOps sign-in happens on the server. In a container, set a service
+  principal: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` (or
+  `AZURE_CLIENT_CERTIFICATE_PATH`). PBIxtractor then never tries a browser login. The service
+  principal needs access to the workspaces / DevOps projects, and Fabric's tenant setting
+  "Service principals can use Fabric APIs". A DevOps personal access token in
+  `AZURE_DEVOPS_PAT` works for DevOps too. Without either, sign-in falls back to `az login` on
+  the server, then to an interactive browser login - which only works on a desktop.
 - Run on Windows for Tabular Editor 2; everything else is portable.
 
 ## Checked by tests
 
 `tests/test_embedding.py` embeds PBIxtractor in a minimal host page and checks the prefix, the
-output root, the storage prefix, that no shell/theme is added and that nothing acts on the
-server's machine.
+output root, the storage prefix, that no shell/theme is added, that nothing acts on the
+server's machine, and that it works inside a `ui.sub_pages` host.
