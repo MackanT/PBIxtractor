@@ -100,7 +100,7 @@ def test_html_is_self_contained_and_safe(doc, tmp_path):
     assert "https://" not in html
     # The report name contains "</script>": it must be escaped in the title and the data
     assert "<title>Sample &lt;/script&gt; &amp; Co - lineage</title>" in html
-    assert html.count("</script>") == 2  # only the data block and the code block close
+    assert html.count("</script>") == 3  # only the theme switch, data and code blocks close
 
     start = html.index('<script type="application/json" id="data">') + len(
         '<script type="application/json" id="data">'
@@ -133,3 +133,13 @@ def test_html_has_guide(doc):
     html = render_lineage_html(doc)
     assert 'id="help"' in html and 'id="guide"' in html
     assert "How to read the lineage view" in html
+
+
+def test_page_follows_the_app_theme_and_embeds_its_fonts(doc):
+    from pbixtractor.lineage_html import render_lineage_html
+
+    html = render_lineage_html(doc)
+    assert 'font-family: "Source Sans 3"' in html and "data:font/woff2;base64," in html
+    assert ':root[data-theme="dark"]' in html  # set by ?theme= or the app's toggle message
+    assert 'e.data && e.data.pbixtractorTheme' in html
+    assert "#2563eb" not in html  # the old blue accent is gone

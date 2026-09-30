@@ -335,3 +335,20 @@ def test_bookmark_filter_text():
     assert web_ui._bookmark_filter_text({"captures": ["Display"], "filters": []}) == (
         "(does not capture data)"
     )
+
+
+def test_theme_fonts_are_served_and_the_band_follows_the_accent(sample):
+    from pbixtractor import theme
+
+    async def scenario(user):
+        await user.open("/")
+        await user.should_see("Document a report")
+        for name in ("familjen-grotesk-latin.woff2", "source-sans-3-latin.woff2"):
+            response = await user.http_client.get(f"{theme.FONTS_URL}/{name}")
+            assert response.status_code == 200 and response.content[:4] == b"wOF2"
+
+    _simulate(scenario)
+    # A white-label accent re-derives the header/rail ground; nothing hard-codes the default
+    assert theme.darken("#3f7d5a", 0.55) in theme.theme_css()
+    assert theme.darken("#aa3366", 0.55) in theme.theme_css("#aa3366")
+    assert "#3f7d5a" not in theme.theme_css("#aa3366").replace(theme.OK_HEX, "")

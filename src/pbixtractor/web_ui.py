@@ -37,6 +37,7 @@ from .pipeline import (
     run_extraction,
 )
 from .tabular_editor import add_tabular_editor_location, find_tabular_editor
+from .theme import apply_theme, card_header, page_title, serve_fonts, stat_tile
 from .web_sources import DevOpsPanel, FabricPanel, Fetched, stored_choices
 
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
@@ -120,7 +121,8 @@ def add_host_check(port: int) -> None:
 
 
 def register_routes() -> None:
-    """Add the output file routes (the lineage iframe and the catalog)."""
+    """Add the output file routes (the lineage iframe and the catalog) and the fonts."""
+    serve_fonts()
     app.add_api_route("/files/{token}/{name}", _serve_output_file, methods=["GET"])
     app.add_api_route("/catalog/{path:path}", _serve_catalog_file, methods=["GET"])
 
@@ -243,8 +245,7 @@ def _log_text(logs: str) -> None:
     """Show log text as plain, escaped text (ui.code renders markdown: a report name holding a
     code fence could inject links or images there)."""
     ui.label(logs).classes(
-        "w-full whitespace-pre-wrap break-words font-mono text-sm q-pa-sm rounded "
-        "bg-grey-2 dark:bg-grey-9"
+        "w-full whitespace-pre-wrap break-words font-mono text-sm q-pa-sm rounded tint-neutral"
     ).mark("log_text")
 
 
@@ -259,7 +260,8 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
     with container:
         colour = {"success": "positive", "warnings": "warning", "error": "negative"}[result.status]
         icon = {"success": "check_circle", "warnings": "warning", "error": "error"}[result.status]
-        with ui.card().classes("w-full"):
+        edge = {"success": "edge-ok", "warnings": "edge-warn", "error": "edge-neg"}[result.status]
+        with ui.card().classes(f"w-full {edge}"):
             with ui.row().classes("items-center"):
                 ui.icon(icon, color=colour, size="md")
                 ui.label(
@@ -278,10 +280,9 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
         _OUTPUT_DIRS[token] = options.output_dir
 
         with ui.row().classes("w-full gap-2"):
-            for label, value, stat_colour in _stats(result.report_json):
-                with ui.card().classes("q-pa-sm min-w-[120px]").props("flat bordered"):
-                    ui.label(str(value)).classes(f"text-h5 text-{stat_colour}")
-                    ui.label(label).classes("text-caption text-grey-7")
+            for label, value, tone in _stats(result.report_json):
+                # A count of zero problems needs no colour; plain counts stay neutral
+                stat_tile(value, label, tone=tone if value and tone != "primary" else None)
 
         with ui.row().classes("w-full gap-2 items-center"):
             for kind, path in result.files.items():
@@ -290,19 +291,19 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                     ui.button(
                         "Open catalog",
                         icon="menu_book",
-                        on_click=lambda: ui.navigate.to("/catalog/catalog.html", new_tab=True),
-                    ).props("outline no-caps").mark("open_catalog")
+                        on_click=lambda: ui.navigate.to(_themed("/catalog/catalog.html"), new_tab=True),
+                    ).props("outline color=primary").mark("open_catalog")
                     continue
                 label, file_icon = FILE_LABELS.get(kind, (kind, "download"))
                 ui.button(
                     label, icon=file_icon, on_click=lambda p=path: ui.download.file(p)
-                ).props("outline no-caps")
+                ).props("outline color=primary")
             if hasattr(os, "startfile"):
                 ui.button(
                     "Open folder",
                     icon="folder_open",
                     on_click=lambda: os.startfile(options.output_dir),  # noqa: S606 (local app)
-                ).props("flat no-caps")
+                ).props("flat")
 
         doc = result.report_json
         with ui.tabs().classes("w-full") as tabs:
@@ -314,11 +315,11 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
             log_tab = ui.tab(f"Log ({log_count})" if log_count else "Log", icon="article")
         with ui.tab_panels(tabs, value=lineage_tab).classes("w-full"):
             with ui.tab_panel(lineage_tab).classes("p-0"):
-                lineage_url = f"/files/{token}/{result.files['lineage'].name}"
+                lineage_url = _themed(f"/files/{token}/{result.files['lineage'].name}")
                 with ui.row().classes("w-full justify-end"):
-                    ui.link("Open in a new tab", lineage_url, new_tab=True).classes("text-sm")
+                    ui.link("Open in a new tab", lineage_url, new_tab=True).classes("text-sm text-primary")
                 ui.element("iframe").props(f'src="{lineage_url}"').classes(
-                    "w-full h-[85vh] min-h-[600px] border rounded"
+                    "lineage-frame w-full h-[85vh] min-h-[600px] rounded-xl"
                 )
             with ui.tab_panel(quality_tab):
                 if doc["quality"] is None:
@@ -421,37 +422,131 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                     ui.label("No warnings.").classes("text-grey-7")
 
 
+def _mode() -> str:
+    """The app's current light/dark choice (light by default)."""
+    return "dark" if stored_choices().get("dark_mode") else "light"
+
+
+def _themed(url: str) -> str:
+    """A generated page's URL that opens it in the app's current light/dark mode."""
+    return f"{url}?theme={_mode()}"
+
+
+def _catalog_ready() -> bool:
+    """A catalog page exists (the last one used, or the remembered/default folder)."""
+    if _CATALOG["dir"] is None:
+        known = Path(stored_choices().get("catalog_dir") or default_catalog_dir())
+        if (known / "catalog.html").is_file():
+            _CATALOG["dir"] = known
+    return _CATALOG["dir"] is not None and (Path(_CATALOG["dir"]) / "catalog.html").is_file()
+
+
+def _build_shell():
+    """Stand-alone app shell: header + slim icon rail (one continuous brand band).
+
+    The menu button toggles the rail between icons and icons + labels; it never hides it.
+    Returns the rail's refresh function (the Catalog entry appears once a catalog exists).
+    """
+    remembered = stored_choices()
+    dark = ui.dark_mode(bool(remembered.get("dark_mode", False)))  # light is the default
+    rail = {"expanded": False}
+
+    with ui.header().classes("items-center gap-2 px-3 py-2"):
+        menu_button = (
+            ui.button(icon="menu")
+            .props('flat round dense color=white aria-label="Toggle navigation labels"')
+            .tooltip("Toggle navigation labels")
+            .mark("nav_expand")
+        )
+        ui.label("PBIxtractor").classes("text-lg font-semibold text-white font-disp")
+        ui.label(f"v{__version__}").classes("text-xs text-white opacity-70")
+        ui.space()
+
+        def toggle_dark() -> None:
+            dark.value = not dark.value
+            stored_choices()["dark_mode"] = dark.value
+            # An open lineage viewer switches too (it is sandboxed: a message, no reload)
+            ui.run_javascript(
+                "document.querySelectorAll('iframe.lineage-frame').forEach(f => "
+                f"f.contentWindow && f.contentWindow.postMessage({{pbixtractorTheme: '{_mode()}'}}, '*'))"
+            )
+            dark_button.props(f"icon={'light_mode' if dark.value else 'dark_mode'}")
+
+        dark_button = (
+            ui.button(icon="light_mode" if dark.value else "dark_mode", on_click=toggle_dark)
+            .props('flat round dense color=white aria-label="Light or dark"')
+            .tooltip("Light / dark")
+            .mark("dark_toggle")
+        )
+
+    drawer = (
+        ui.left_drawer(value=True, bordered=False)
+        .props("width=60 behavior=desktop")
+        .classes("rail")
+    )
+
+    @ui.refreshable
+    def nav() -> None:
+        entries = [("description", "Document a report", None)]
+        if _catalog_ready():
+            entries.append(("menu_book", "Catalog", "/catalog/catalog.html"))
+        for icon, label, url in entries:
+            button = ui.button(
+                label if rail["expanded"] else "",
+                icon=icon,
+                on_click=(lambda u=url: ui.navigate.to(_themed(u), new_tab=True)) if url else None,
+            ).props(f'flat color=white aria-label="{label}"')
+            button.classes(
+                ("rail-btn-x" if rail["expanded"] else "rail-btn")
+                + " nav-btn"
+                + ("" if url else " nav-active")
+            ).mark("nav_catalog" if url else "nav_document")
+            if not rail["expanded"]:
+                button.tooltip(label + (" (opens in a new tab)" if url else ""))
+
+    def toggle_rail() -> None:
+        rail["expanded"] = not rail["expanded"]
+        drawer.props(f"width={214 if rail['expanded'] else 60}")
+        if rail["expanded"]:
+            drawer.classes(add="rail-expanded")
+        else:
+            drawer.classes(remove="rail-expanded")
+        menu_button.props(f"icon={'menu_open' if rail['expanded'] else 'menu'}")
+        nav.refresh()
+
+    menu_button.on_click(toggle_rail)
+    with drawer:
+        nav()
+    return nav.refresh
+
+
 def index() -> None:
     """The single page of the app (the root page passed to ui.run)."""
     tabular_editor = find_tabular_editor()
+    apply_theme()
+    refresh_nav = _build_shell()
 
-    with ui.header().classes("items-center justify-between"):
-        with ui.row().classes("items-center gap-2"):
-            ui.icon("insights", size="md")
-            ui.label("PBIxtractor").classes("text-h6")
-            ui.label(f"v{__version__}").classes("text-caption opacity-70")
-        with ui.row().classes("items-center gap-4"):
-            known = Path(stored_choices().get("catalog_dir") or default_catalog_dir())
-            if (known / "catalog.html").is_file():
-                _CATALOG["dir"] = known
-                ui.link("Catalog", "/catalog/catalog.html", new_tab=True).classes(
-                    "text-white text-sm"
-                ).mark("header_catalog")
-            ui.label("Power BI report documentation").classes("text-caption opacity-80")
-
-    with ui.column().classes("w-full max-w-[1400px] mx-auto q-pa-md gap-4"):
+    with ui.column().classes("w-full max-w-screen-2xl mx-auto p-4 gap-4"):
+        page_title(
+            "Document a report",
+            "Excel workbooks, JSON and a lineage viewer for a Power BI report and its semantic "
+            "model",
+            icon="description",
+        )
         with ui.row().classes("w-full gap-4 items-stretch"):
             # ---------------- inputs ----------------
             # basis-0: long help texts wrap instead of pushing the Environment card down
             with ui.card().classes("grow basis-0 min-w-[420px]"):
-                with ui.row().classes("w-full items-center justify-between"):
-                    ui.label("Report").classes("text-subtitle1 text-weight-medium")
+                with ui.row().classes("w-full items-center no-wrap gap-2"):
+                    card_header(
+                        "insert_drive_file", "Report", "A local file, a Fabric workspace or Azure DevOps"
+                    )
                     source = (
                         ui.toggle(
                             {"local": "Local file", "fabric": "Fabric", "devops": "Azure DevOps"},
                             value="local",
                         )
-                        .props("no-caps dense unelevated")
+                        .props("dense unelevated")
                         .mark("source")
                     )
                 with ui.column().classes("w-full gap-2") as local_box:
@@ -514,7 +609,7 @@ def index() -> None:
                             "accepted - use the folder picker for those.",
                             type="warning",
                         ),
-                    ).props('accept=".pbix,.bim" flat bordered').classes("w-full").mark("upload")
+                    ).props('accept=".pbix,.bim" flat').classes("drop-zone").mark("upload")
                 local_box.bind_visibility_from(source, "value", value="local")
 
                 # Remote sources: pick a report; it is downloaded when the documentation runs
@@ -573,7 +668,8 @@ def index() -> None:
 
             # ---------------- environment ----------------
             with ui.card().classes("w-[380px] max-w-full"):
-                ui.label("Environment").classes("text-subtitle1 text-weight-medium")
+                with ui.row().classes("w-full items-center no-wrap gap-2"):
+                    card_header("settings_suggest", "Environment", "What this PC adds to a run")
                 with ui.row().classes("items-center no-wrap"):
                     if tabular_editor:
                         ui.icon("check_circle", color="positive")
@@ -598,7 +694,7 @@ def index() -> None:
                             .classes("grow")
                             .mark("te_folder")
                         )
-                        ui.button("Save", on_click=save_location).props("flat dense no-caps")
+                        ui.button("Save", on_click=save_location).props("flat dense")
                 desktop_box = ui.column().classes("gap-1")
 
                 refresh_state = {"seq": 0}
@@ -643,15 +739,16 @@ def index() -> None:
                                 ).classes("text-sm")
 
                 ui.button("Refresh", icon="refresh", on_click=lambda: refresh_desktop()).props(
-                    "flat dense no-caps"
+                    "flat dense"
                 )
                 ui.timer(0.05, lambda: refresh_desktop(), once=True)  # after the page is sent
 
         # ---------------- run ----------------
         with ui.card().classes("w-full"):
             with ui.row().classes("w-full items-center"):
+                # Copper: the page's one primary action
                 run_button = ui.button("Create documentation", icon="play_arrow").props(
-                    "unelevated no-caps"
+                    "unelevated color=secondary"
                 )
                 step_label = ui.label("").classes("text-grey-7")
             progress_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
@@ -660,7 +757,7 @@ def index() -> None:
             log_view.visible = False
 
     # Results use the full window width: the lineage viewer needs the room
-    result_box = ui.column().classes("w-full q-px-md q-pb-md gap-3")
+    result_box = ui.column().classes("w-full px-4 pb-4 gap-3")
 
     # ---------------- behaviour ----------------
     def on_report_change() -> None:
@@ -823,6 +920,7 @@ def index() -> None:
         # The live log is only for following the run; the result shows the same messages
         log_view.visible = False
         _render_result(result_box, result, options)
+        refresh_nav()  # the Catalog entry appears after the first run that adds to one
         ui.notify(
             result.message if result.ok else f"Failed: {result.message}",
             type={"success": "positive", "warnings": "warning", "error": "negative"}[result.status],
@@ -865,7 +963,7 @@ def start(port: int = 8081, open_browser: bool = True, host: Optional[str] = Non
         port=port,
         reload=False,
         show=False,  # opened above, unless a tab reconnects
-        dark=None,  # follow the system theme
+        dark=False,  # light by default; the header toggle switches (and remembers)
         favicon=DATA_DIR / "logo.ico",
         show_welcome_message=True,
     )

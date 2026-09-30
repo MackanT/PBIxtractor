@@ -100,7 +100,9 @@ src/pbixtractor/
                     exits the process) → visual_mapper, visual_type_list, known_functions;
                     ReportExtractor (readers.read_report → ReportContext + PageExtractor);
                     extract_reports(paths) for model mode.
-  web_ui.py         NiceGUI app: index() root page (report/model/output inputs, server-side
+  web_ui.py         NiceGUI app: _build_shell() (pine header + 60px icon rail, menu toggles
+                    labels, light/dark toggle remembered in stored_choices; Catalog rail entry
+                    once a catalog exists) + index() root page (report/model/output inputs, server-side
                     PathPicker dialog, options, TE/Desktop status) → run_extraction in
                     run.io_bound; progress/log via a queue drained by ui.timer. Results:
                     stat cards, download buttons, tabs Lineage (iframe of <name>_lineage.html
@@ -124,6 +126,15 @@ src/pbixtractor/
                     run.io_bound (psutil takes seconds), debounced 0.5 s while typing a path.
                     Catalog option (switch + folder, default output/_catalog, remembered via
                     stored_choices()); header link "Catalog" → /catalog/.
+  theme.py          Visual style ("field-station", shared with the data-platform web UI that
+                    PBIxtractor will be embedded in): colour tokens (sap accent, copper = the one
+                    primary action/attention, rust/lichen/glacier status, bone/bark grounds),
+                    theme_css(accent) (header+rail band = darken(accent, .55)), apply_theme()
+                    (stand-alone only - embedded pages reuse the host's identical class names),
+                    serve_fonts() at /pbixtractor-fonts (Familjen Grotesk + Source Sans 3, OFL,
+                    bundled in data/fonts with licences; never a CDN), page_title (masthead),
+                    card_header, stat_tile (eyebrow + numeral + edge-*), empty_state. Pages use
+                    Quasar colour names / these classes, never hex. Light is the default.
   config.py         load_config() → Config(visual_mapper, supported_visual_types (derived:
                     standard_visuals + special_visuals), data_types, extract_types,
                     function_names). extract_type(visual_type): standard | button | skip.
@@ -430,6 +441,14 @@ Navigator/Hallbarhet/Rowico). A full audit (security, extraction correctness, re
 hygiene) was fixed on 2026-09-30; see git history for details.
 
 Open, by owner priority:
+- Module + stand-alone (owner, 2026-09-30): PBIxtractor must work stand-alone AND as a module
+  inside the owner's private data-platform NiceGUI app (read only via `gh api`; never clone it
+  or store its content on this PC). Phase 1 done: theme.py + restyled stand-alone UI.
+  Phase 2: split web_ui into build_page() (content only) / register(app, prefix) (routes under
+  a prefix, prefixed storage keys, configurable output root; no host check - the host has auth)
+  / start() (stand-alone shell), plus a test host app. Phase 3: integration in data-platform
+  (git dependency pinned to a tag + one nav section) - done there, not from here. Later: restyle
+  the generated lineage/catalog HTML pages; logo/about page (logo_large.png kept for it).
 - 6b database lineage (lower): connect to Azure SQL / Fabric Warehouse / Lakehouse SQL endpoint
   with an Entra token (`azure-identity` + `mssql-python` or `pyodbc` + ODBC Driver 18), read
   `sys.sql_modules` / `sys.sql_expression_dependencies`, parse with `sqlglot.lineage` → view →

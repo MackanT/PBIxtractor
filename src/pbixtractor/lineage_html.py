@@ -14,6 +14,8 @@ import json
 from html import escape
 from pathlib import Path
 
+from .design import PAGE_THEME_SCRIPT, page_css
+
 # Flow direction for each lineage edge type: True = same as the JSON edge, False = reversed.
 # The viewer's edges always point from "data" to "report": source -> table -> column ->
 # measure -> visual -> page.
@@ -228,8 +230,11 @@ def render_lineage_html(doc: dict) -> str:
     # No "<" at all inside the data block: neither "</script>" nor "<!--<script" (which puts
     # the HTML parser in an escaped state) can then end or swallow it. Still valid JSON.
     payload = payload.replace("<", "\\u003c")
-    return _TEMPLATE.replace("__TITLE__", escape(f"{data['report']} - lineage")).replace(
-        "__DATA__", payload
+    return (
+        _TEMPLATE.replace("__TITLE__", escape(f"{data['report']} - lineage"))
+        .replace("__THEME_SCRIPT__", PAGE_THEME_SCRIPT)
+        .replace("__THEME__", page_css())
+        .replace("__DATA__", payload)  # last: the data must not be searched for placeholders
     )
 
 
@@ -244,35 +249,23 @@ _TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
+__THEME_SCRIPT__
 <style>
-:root {
-  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5f6b7a; --border: #d9dee5;
-  --accent: #2563eb; --edge: #9aa5b4; --edge-hi: #1d4ed8; --shadow: 0 1px 2px rgba(0,0,0,.06);
-  --source: #7c3aed; --table: #0f766e; --column: #0891b2; --measure: #d97706;
-  --visual: #2563eb; --page: #475569; --unused: #dc2626;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #11151c; --panel: #181e27; --text: #e6e9ee; --muted: #9aa5b4; --border: #2b3442;
-    --accent: #60a5fa; --edge: #4b5667; --edge-hi: #93c5fd; --shadow: none;
-    --source: #a78bfa; --table: #2dd4bf; --column: #22d3ee; --measure: #fbbf24;
-    --visual: #60a5fa; --page: #94a3b8; --unused: #f87171;
-  }
-}
+__THEME__
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-  font: 13px/1.4 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  font-size: 13.5px; line-height: 1.4; }
 #app { display: grid; grid-template-columns: 290px 1fr 360px; height: 100vh; }
 aside, #details { background: var(--panel); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; min-height: 0; }
 #details { border-right: 0; border-left: 1px solid var(--border); }
 header { padding: 14px 16px 10px; border-bottom: 1px solid var(--border); }
-h1 { font-size: 15px; margin: 0 0 2px; }
-h2 { font-size: 14px; margin: 0; word-break: break-word; }
+h1 { font-size: 17px; margin: 0 0 2px; }
+h2 { font-size: 15px; margin: 0; word-break: break-word; }
 .muted { color: var(--muted); }
 .section { padding: 10px 16px; border-bottom: 1px solid var(--border); }
 input[type=search] { width: 100%; padding: 7px 9px; border: 1px solid var(--border);
-  border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px;
   border: 1px solid var(--border); border-radius: 999px; cursor: pointer; user-select: none; }
@@ -288,15 +281,15 @@ main { position: relative; min-width: 0; min-height: 0; }
   align-items: center; flex-wrap: wrap; z-index: 2; pointer-events: none; }
 #toolbar > * { pointer-events: auto; }
 .btn, select { background: var(--panel); color: var(--text); border: 1px solid var(--border);
-  border-radius: 6px; padding: 5px 9px; font: inherit; cursor: pointer; box-shadow: var(--shadow); }
+  border-radius: 8px; padding: 5px 9px; font: inherit; cursor: pointer; box-shadow: var(--shadow); }
 .btn:disabled { opacity: .45; cursor: default; }
 #toolbar .group { display: inline-flex; }
 #toolbar .group .btn { border-radius: 0; margin-left: -1px; }
-#toolbar .group .btn:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
-#toolbar .group .btn:last-child { border-radius: 0 6px 6px 0; }
+#toolbar .group .btn:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
+#toolbar .group .btn:last-child { border-radius: 0 8px 8px 0; }
 #app.wide { grid-template-columns: 1fr !important; }
 #app.wide aside, #app.wide #details { display: none !important; }
-#status { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+#status { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
   padding: 5px 9px; box-shadow: var(--shadow); }
 svg { width: 100%; height: 100%; display: block; cursor: grab; }
 svg.dragging { cursor: grabbing; }
@@ -305,8 +298,8 @@ svg.dragging { cursor: grabbing; }
 .node .type { fill: var(--muted); font-size: 10px; }
 .node { cursor: pointer; }
 .node.selected rect { stroke-width: 3; }
-.node.marked rect:first-of-type { stroke: var(--accent); stroke-width: 3.5; }
-.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.node.marked rect:first-of-type { stroke: var(--attn); stroke-width: 3.5; }
+.btn.primary { background: var(--accent); color: var(--on-color); border-color: var(--accent); }
 .node.unused rect { stroke-dasharray: 5 3; }
 .node.dim { opacity: .25; }
 .edge { fill: none; stroke: var(--edge); stroke-width: 1.2; }
@@ -320,14 +313,14 @@ svg.dragging { cursor: grabbing; }
 .kv dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
 .kv dd { margin: 2px 0 0; white-space: pre-wrap; word-break: break-word; }
 pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid var(--border);
-  border-radius: 6px; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 Consolas, monospace; }
+  border-radius: 8px; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 Consolas, monospace; }
 .links a { color: var(--accent); cursor: pointer; display: block; padding: 1px 0; }
 .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
-  color: #fff; margin-right: 6px; }
+  color: var(--on-color); margin-right: 6px; }
 #guide { position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,.45); display: none;
   align-items: flex-start; justify-content: center; overflow: auto; padding: 40px 16px; }
 #guide.open { display: flex; }
-#guide .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+#guide .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
   max-width: 760px; width: 100%; padding: 20px 24px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
 #guide h2 { font-size: 17px; margin-bottom: 4px; }
 #guide h3 { font-size: 13px; margin: 18px 0 6px; text-transform: uppercase; letter-spacing: .04em;

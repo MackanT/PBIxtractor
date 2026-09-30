@@ -150,7 +150,8 @@ def test_catalog_page_embeds_data_safely(sample):
     _run(sample, catalog)
     html = (catalog / "catalog.html").read_text(encoding="utf-8")
     assert html.startswith("<!doctype html>")
-    assert html.count("</script>") == 2  # the data block cannot close the script early
+    # theme switch + data block + code: the data block cannot close the script early
+    assert html.count("</script>") == 3
     assert "https://" not in html and "http://" not in html  # fully offline
     start = html.index('id="data">') + len('id="data">')
     data = json.loads(html[start : html.index("</script>", start)])

@@ -110,7 +110,7 @@ class FabricPanel:
                 .mark("fabric_workspace")
             )
             ui.button("Sign in / load", icon="login", on_click=self.load_workspaces).props(
-                "flat no-caps"
+                "flat"
             ).mark("fabric_load")
         self.report = (
             ui.select({}, label="Report", with_input=True, on_change=self._report_changed)
@@ -205,7 +205,7 @@ class DevOpsPanel:
                 .mark("devops_org")
             )
             ui.button("Sign in / load", icon="login", on_click=self.load_projects).props(
-                "flat no-caps"
+                "flat"
             ).mark("devops_load")
         with ui.row().classes("w-full no-wrap gap-2"):
             self.project = (

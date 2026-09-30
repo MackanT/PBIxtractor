@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import __version__
+from .design import PAGE_THEME_SCRIPT, page_css
 
 SEPARATOR = " › "  # report_extractor.PREFIX_SEPARATOR: "<report> › <page>" in model mode
 CATALOG_HTML = "catalog.html"
@@ -300,7 +301,12 @@ def rebuild_catalog(catalog_dir: Path) -> Path:
     )
     # No "<" inside the data block (see lineage_html.render_lineage_html): still valid JSON
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
-    html = _TEMPLATE.replace("__TITLE__", escape("PBIxtractor catalog")).replace("__DATA__", payload)
+    html = (
+        _TEMPLATE.replace("__TITLE__", escape("PBIxtractor catalog"))
+        .replace("__THEME_SCRIPT__", PAGE_THEME_SCRIPT)
+        .replace("__THEME__", page_css())
+        .replace("__DATA__", payload)  # last: the data must not be searched for placeholders
+    )
     (catalog_dir / CATALOG_HTML).write_text(html, encoding="utf-8")
     return catalog_dir / CATALOG_HTML
 
@@ -315,35 +321,23 @@ _TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
+__THEME_SCRIPT__
 <style>
-:root {
-  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5f6b7a; --border: #d9dee5;
-  --accent: #2563eb; --shadow: 0 1px 2px rgba(0,0,0,.06);
-  --model: #be185d; --report: #7c3aed; --page: #475569; --source: #6d28d9; --table: #0f766e;
-  --column: #0891b2; --measure: #d97706; --unused: #dc2626;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #11151c; --panel: #181e27; --text: #e6e9ee; --muted: #9aa5b4; --border: #2b3442;
-    --accent: #60a5fa; --shadow: none;
-    --model: #f472b6; --report: #a78bfa; --page: #94a3b8; --source: #c4b5fd; --table: #2dd4bf;
-    --column: #22d3ee; --measure: #fbbf24; --unused: #f87171;
-  }
-}
+__THEME__
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-  font: 13px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  font-size: 13.5px; line-height: 1.45; }
 #app { display: grid; grid-template-columns: 400px 1fr; height: 100vh; }
 aside { background: var(--panel); border-right: 1px solid var(--border); display: flex;
   flex-direction: column; min-height: 0; }
 header { padding: 14px 16px 10px; border-bottom: 1px solid var(--border); }
-h1 { font-size: 15px; margin: 0 0 2px; }
+h1 { font-size: 17px; margin: 0 0 2px; }
 h2 { font-size: 17px; margin: 0 0 4px; word-break: break-word; }
 h3 { font-size: 12px; margin: 18px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .muted { color: var(--muted); }
 .section { padding: 10px 16px; border-bottom: 1px solid var(--border); }
 input[type=search], select { width: 100%; padding: 7px 9px; border: 1px solid var(--border);
-  border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--border);
   border-radius: 999px; cursor: pointer; user-select: none; }
@@ -359,12 +353,12 @@ input[type=search], select { width: 100%; padding: 7px 9px; border: 1px solid va
   overflow: hidden; text-overflow: ellipsis; }
 .result .hit { color: var(--muted); font-size: 11px; }
 main { overflow: auto; padding: 20px 28px 40px; min-width: 0; }
-.badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; color: #fff;
+.badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; color: var(--on-color);
   margin-right: 6px; vertical-align: 2px; }
 .warn { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   border: 1px solid var(--unused); color: var(--unused); margin-left: 6px; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;
   cursor: pointer; box-shadow: var(--shadow); }
 .card:hover { border-color: var(--accent); }
 .card .muted { overflow-wrap: anywhere; }
@@ -374,12 +368,12 @@ dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; ma
 dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; word-break: break-word; }
 pre { margin: 4px 0; padding: 10px; background: var(--panel); border: 1px solid var(--border);
-  border-radius: 6px; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 Consolas, monospace; }
+  border-radius: 8px; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 Consolas, monospace; }
 .links a, a.item { color: var(--accent); cursor: pointer; text-decoration: none; }
 .links a:hover, a.item:hover { text-decoration: underline; }
 ul.list { list-style: none; padding: 0; margin: 0; columns: 2 320px; }
 ul.list li { padding: 2px 0; break-inside: avoid; }
-.btn { display: inline-block; padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px;
+.btn { display: inline-block; padding: 5px 10px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--panel); color: var(--text); text-decoration: none; margin: 4px 6px 0 0; }
 .btn:hover { border-color: var(--accent); }
 @media (max-width: 800px) { #app { grid-template-columns: 1fr; grid-template-rows: 50vh 50vh; }
@@ -555,7 +549,9 @@ ul.list li { padding: 2px 0; break-inside: avoid; }
     var main = $("main"), box = el("div");
     var lineage = safeLink(e.links.lineage), workbook = safeLink(e.links.workbook);
     if (lineage) { var a = el("a", "btn", "Open in the lineage viewer ↗");
-      a.href = lineage + (node ? "#" + encodeURIComponent(node) : ""); a.target = "_blank"; box.appendChild(a); }
+      var mode = document.documentElement.dataset.theme;  // keep the catalog's light/dark
+      a.href = lineage + (mode ? "?theme=" + mode : "") + (node ? "#" + encodeURIComponent(node) : "");
+      a.target = "_blank"; box.appendChild(a); }
     if (workbook) { var w = el("a", "btn", "Workbook ⭳"); w.href = workbook; box.appendChild(w); }
     main.appendChild(box);
   }
