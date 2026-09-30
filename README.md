@@ -163,13 +163,13 @@ uv run --frozen ruff check src/ tests/
 - ✅ Reading reports from Fabric workspaces and Azure DevOps repositories (web UI + CLI)
 - ✅ All reports on one semantic model documented together; row counts from the Power BI service
 - ✅ Catalog: search measures, DAX and usage across models
-- 🔄 Bookmark filter/slicer state
+- ✅ Bookmarks: the filters and slicer selections they apply (changed ones marked)
 - 🔄 Source database lineage (views → base tables)
 - 🔄 Documenting a whole workspace into the catalog
 
 ## Known Issues
 
-- Bookmarks: the filter/slicer state a bookmark captures is not listed yet.
+- Bookmarks: cross-highlight selections and drill state are not listed.
 - Tooltip/drillthrough page detection is not yet tested on real reports.
 - Without Tabular Editor 2, DAX dependencies come from text matching (can miss unqualified
   references and match text in comments).

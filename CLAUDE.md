@@ -145,7 +145,9 @@ src/pbixtractor/
   documentation.py  Analysis stage, no file output: build_documentation() → Documentation
                     (report_info, filter_strings, pages: {page: [PageItem]}, model, objects
                     [OBJECT_COLUMNS], relations, unused_columns/measures, exact deps, BPA,
-                    live stats, page_info, bookmarks (incl. used_by buttons), interactivity
+                    live stats, page_info, bookmarks (incl. used_by buttons and filters: BookmarkFilter
+                    with changed True/False vs the saved report state, None when the page/
+                    visual is gone; empty when Data is not captured), interactivity
                     {(page, visual id): notes}; depends_on(table, name)). Needs the
                     ReportDefinition (ReportExtractor.report) for page/bookmark details.
                     Also parse_tsv_object_name,
@@ -285,7 +287,11 @@ src/pbixtractor/
                     hidden). PageDefinition: hidden, page_type (Tooltip/Drillthrough, only
                     from string names), interactions (VisualInteraction source/target/kind).
                     ReportDefinition.bookmark_details: BookmarkDefinition (captures data/
-                    display/page, target_visuals, hidden_visuals, group). All format-specific
+                    display/page, target_visuals, hidden_visuals, group, filters:
+                    CapturedFilter(level All Pages|This Page|Visual|Slicer, page, visual, raw
+                    filter-pane entry) from explorationState filters.byExpr (entries with a
+                    condition) and slicer selections objects.merge.general[].properties.filter;
+                    slicer_selection() reads the same spot of a visual). All format-specific
                     JSON knowledge lives here; zip files are read on demand.
   extractors.py     Helpers: clean_literal, get_aliases/resolve_field (resolve fields via the
                     query's From aliases), iter_field_refs, ReportContext (page + bookmark
@@ -376,8 +382,11 @@ src/pbixtractor/
   `SalesBudgets[Total Sales Budget OC]`). Always use `resolve_field()`. The queryRef is
   only for matching projection roles / columnProperties and hierarchy columns.
 - Tooltip/drillthrough page detection is untested on real files (no sample uses them);
-  legacy numeric pageBinding types are ignored on purpose. Bookmark captured filter/slicer
-  state is not listed yet (only capture options and hidden visuals).
+  legacy numeric pageBinding types are ignored on purpose.
+- Bookmark filter state (2026-09-30): only the owner's two reports were checked; none of their
+  data-capturing bookmarks changes a filter (the "changed" path is unit-tested only). Not read:
+  cross-highlight selections (`visualContainers.*.highlight`) and drill state. With "Selected
+  visuals", page/report filters are still listed (assumed applied - not verified in Desktop).
 - Old `Input/*.csv` files (from the removed DearPyGUI "User Input" tab) are not read; only
   `Input/TabularEditorLocations.txt` is.
 - Text-matching dependency fallback order is set-based (not stable across runs). The data
@@ -421,7 +430,6 @@ Navigator/Hallbarhet/Rowico). A full audit (security, extraction correctness, re
 hygiene) was fixed on 2026-09-30; see git history for details.
 
 Open, by owner priority:
-- Bookmark captured filter/slicer state (middle).
 - 6b database lineage (lower): connect to Azure SQL / Fabric Warehouse / Lakehouse SQL endpoint
   with an Entra token (`azure-identity` + `mssql-python` or `pyodbc` + ODBC Driver 18), read
   `sys.sql_modules` / `sys.sql_expression_dependencies`, parse with `sqlglot.lineage` → view →
