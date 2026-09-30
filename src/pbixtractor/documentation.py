@@ -17,8 +17,9 @@ import pandas as pd
 
 from .constants import REPORT_COLUMNS
 from .dax import find_columns, find_measures
+from .extractors import FilterExtractor
 from .live_model import LiveStatistics
-from .readers import ReportDefinition
+from .readers import BookmarkDefinition, ReportDefinition, slicer_selection
 from .semantic_model import SemanticModel
 from .tabular_editor import BpaViolation, Dependency
 from .utils import find_nth_occurrence
@@ -102,6 +103,28 @@ class PageInfo:
 
 
 @dataclass
+class BookmarkFilter:
+    """A filter condition or slicer selection that a bookmark applies."""
+
+    level: str  # "All Pages", "This Page", "Visual" or "Slicer"
+    where: str  # "All pages", the page, or the visual's label
+    field: str  # Table[Field]
+    operator: str
+    value: str
+    # Differs from the report's saved state; None: nothing to compare with (the page or
+    # visual no longer exists)
+    changed: Optional[bool] = None
+
+    @property
+    def text(self) -> str:
+        """One line, e.g. "Slicer (a1b2) on Sales, selection: Dates[Year] = 2024 (changed)"."""
+        kind = {"Visual": ", visual filter", "Slicer": ", selection"}.get(self.level, "")
+        note = {True: " (changed)", None: " (page/visual no longer exists)"}.get(self.changed, "")
+        condition = f"{self.field} {self.operator} {self.value}".replace("  ", " ")
+        return f"{self.where}{kind}: {condition}{note}"
+
+
+@dataclass
 class BookmarkInfo:
     """A bookmark, what it captures, and which buttons use it."""
 
@@ -114,6 +137,8 @@ class BookmarkInfo:
     hidden_visuals: list[str] = field(default_factory=list)  # labels of visuals it hides
     used_by: list[str] = field(default_factory=list)  # "Page (visual id)" of buttons using it
     broken: bool = False  # recorded on a page that no longer exists
+    # Filters/slicer selections it applies (empty when it does not capture "Data")
+    filters: list[BookmarkFilter] = field(default_factory=list)
 
 
 @dataclass
@@ -711,9 +736,82 @@ def build_bookmarks(
                     for v in bookmark.hidden_visuals
                 ],
                 used_by=list(dict.fromkeys(used_by)),
+                filters=(
+                    _bookmark_filters(bookmark, report, labels, by_id)
+                    if bookmark.captures_data
+                    else []
+                ),
             )
         )
     return bookmarks
+
+
+def _bookmark_filters(
+    bookmark: BookmarkDefinition,
+    report: ReportDefinition,
+    labels: dict[tuple[str, str], str],
+    by_id: dict[str, str],
+) -> list[BookmarkFilter]:
+    """
+    The filter/slicer state a bookmark applies, each compared with the report's saved state.
+
+    With "Selected visuals" only the state of those visuals is applied, so other visuals' state
+    is left out; filter-pane state of the page and report is kept.
+    """
+    describer = FilterExtractor(config=None)
+    pages = {page.name: page for page in report.pages}
+
+    def conditions(entries: list[dict]) -> dict[str, tuple[str, str]]:
+        """Table[Field] -> (operator, value) of filter-pane entries."""
+        return {
+            f"{f.table_name}[{f.val_name}]": (f.operator, f.value)
+            for f in describer.extract_filters(entries, "", "")
+        }
+
+    result = []
+    for captured in bookmark.filters:
+        page = pages.get(captured.page)
+        page_name = page.display_name if page else captured.page
+        visual = None
+        if captured.visual:
+            if bookmark.target_visuals and captured.visual not in bookmark.target_visuals:
+                continue
+            visual = next((v for v in page.visuals if v.name == captured.visual), None) if page else None
+            where = labels.get((page_name, captured.visual)) or by_id.get(
+                captured.visual, f"{captured.visual} on {page_name}"
+            )
+        else:
+            where = page_name if captured.level == "This Page" else "All pages"
+
+        if captured.level == "All Pages":
+            saved = report.filters
+        elif captured.level == "This Page":
+            saved = page.filters if page else None
+        elif visual is None:
+            saved = None
+        elif captured.level == "Slicer":
+            selection = slicer_selection(visual.objects)
+            saved = [selection] if selection else []
+        else:
+            saved = visual.filters
+        saved_conditions = conditions(saved) if saved is not None else None
+
+        for field_name, (operator, value) in conditions([captured.filter]).items():
+            result.append(
+                BookmarkFilter(
+                    level=captured.level,
+                    where=where,
+                    field=field_name,
+                    operator=operator,
+                    value=value,
+                    changed=(
+                        None
+                        if saved_conditions is None
+                        else saved_conditions.get(field_name) != (operator, value)
+                    ),
+                )
+            )
+    return result
 
 
 def resolve_hierarchy_columns(report_info: pd.DataFrame, model: SemanticModel) -> pd.DataFrame:

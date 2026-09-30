@@ -186,6 +186,13 @@ class PathPicker(ui.dialog):
 # ============================================================================
 
 
+def _bookmark_filter_text(bookmark: dict) -> str:
+    """The filters/slicer selections a bookmark applies, one per line; changed ones marked."""
+    if "Data" not in bookmark["captures"]:
+        return "(does not capture data)"
+    return "\n".join(f["text"] for f in bookmark.get("filters", []))
+
+
 def _stats(report_json: dict) -> list[tuple[str, object, str]]:
     """Headline numbers for the result: (label, value, colour)."""
     pages = report_json["report"]["pages"]
@@ -222,7 +229,9 @@ def _table(rows: list[dict], columns: list[tuple[str, str]], empty: str) -> None
     ui.table(
         rows=rows,
         columns=[
-            {"name": key, "label": label, "field": key, "align": "left", "sortable": True}
+            # pre-line: multi-line values (e.g. a bookmark's filters) keep their line breaks
+            {"name": key, "label": label, "field": key, "align": "left", "sortable": True,
+             "style": "white-space: pre-line"}
             for key, label in columns
         ],
         row_key="_id",
@@ -390,6 +399,7 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                             "page": b["page"] or "",
                             "captures": ", ".join(b["captures"]),
                             "applies_to": b["applies_to"],
+                            "filters": _bookmark_filter_text(b),
                             "used_by": ", ".join(b["used_by"]) or "(not used by any button)",
                         }
                         for b in doc["report"].get("bookmarks", [])
@@ -399,6 +409,7 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                         ("page", "Page"),
                         ("captures", "Captures"),
                         ("applies_to", "Applies to"),
+                        ("filters", "Filters and slicers"),
                         ("used_by", "Used by buttons"),
                     ],
                     "No bookmarks.",

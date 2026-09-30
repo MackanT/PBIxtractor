@@ -77,6 +77,16 @@ class PageDefinition:
 
 
 @dataclass
+class CapturedFilter:
+    """One filter condition or slicer selection a bookmark stores."""
+
+    level: str  # "All Pages", "This Page", "Visual" (its filter pane) or "Slicer" (selection)
+    page: str = ""  # page (section) name; "" for "All Pages"
+    visual: str = ""  # visual name for "Visual" and "Slicer"
+    filter: dict = field(default_factory=dict)  # filter-pane entry: {"filter": {From, Where}, ...}
+
+
+@dataclass
 class BookmarkDefinition:
     """A bookmark and what it captures."""
 
@@ -89,6 +99,9 @@ class BookmarkDefinition:
     captures_page: bool = True  # navigates to its page ("Current page" option)
     target_visuals: list[str] = field(default_factory=list)  # "Selected visuals"; empty = all
     hidden_visuals: list[str] = field(default_factory=list)  # visuals/groups it hides
+    # Filter/slicer state it stores (whether or not "Data" is on: applied only when it is).
+    # Filter-pane entries without a condition only list the field and are left out.
+    filters: list[CapturedFilter] = field(default_factory=list)
 
 
 @dataclass
@@ -138,11 +151,26 @@ def _bookmark(data: dict, group: str = "") -> BookmarkDefinition:
     state = data.get("explorationState") or {}
     options = data.get("options") or {}
     hidden = []
-    for section in (state.get("sections") or {}).values():
+    captured = [
+        CapturedFilter("All Pages", filter=f) for f in _conditions(state.get("filters"))
+    ]
+    for section_name, section in (state.get("sections") or {}).items():
+        captured += [
+            CapturedFilter("This Page", section_name, filter=f)
+            for f in _conditions(section.get("filters"))
+        ]
         for visual_name, container in (section.get("visualContainers") or {}).items():
-            display = (container.get("singleVisual") or {}).get("display") or {}
+            single = container.get("singleVisual") or {}
+            display = single.get("display") or {}
             if display.get("mode") == "hidden":
                 hidden.append(visual_name)
+            captured += [
+                CapturedFilter("Visual", section_name, visual_name, f)
+                for f in _conditions(container.get("filters"))
+            ]
+            selection = slicer_selection((single.get("objects") or {}).get("merge") or {})
+            if selection:
+                captured.append(CapturedFilter("Slicer", section_name, visual_name, selection))
         for group_name, container in (section.get("visualContainerGroups") or {}).items():
             if (container or {}).get("isHidden"):
                 hidden.append(group_name)
@@ -156,7 +184,24 @@ def _bookmark(data: dict, group: str = "") -> BookmarkDefinition:
         captures_page=not options.get("suppressActiveSection", False),
         target_visuals=list(options.get("targetVisualNames") or []),
         hidden_visuals=hidden,
+        filters=captured,
     )
+
+
+def _conditions(filters: Optional[dict]) -> list[dict]:
+    """Filter-pane entries of a bookmark's {"byExpr": [...]} that hold a condition."""
+    entries = (filters or {}).get("byExpr") or []
+    return [f for f in entries if isinstance(f, dict) and f.get("filter")]
+
+
+def slicer_selection(objects: dict) -> Optional[dict]:
+    """A slicer's selection (objects.general[].properties.filter) as a filter-pane entry, or
+    None. Same place in a visual's saved objects and in a bookmark's captured objects."""
+    for general in objects.get("general") or []:
+        selection = (((general or {}).get("properties") or {}).get("filter") or {}).get("filter")
+        if selection:
+            return {"filter": selection}
+    return None
 
 
 # ============================================================================

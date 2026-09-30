@@ -128,6 +128,18 @@ def _report_section(documentation: Documentation) -> dict:
                 "captures": [c for c in b.captures.split(", ") if c],
                 "applies_to": b.applies_to,
                 "hides": b.hidden_visuals,
+                "filters": [
+                    {
+                        "level": f.level,
+                        "where": f.where,
+                        "field": f.field,
+                        "operator": f.operator,
+                        "value": f.value,
+                        "changed": f.changed,
+                        "text": f.text,
+                    }
+                    for f in b.filters
+                ],
                 "used_by": b.used_by,
                 **({"broken": True} if b.broken else {}),
             }

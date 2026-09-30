@@ -118,6 +118,8 @@ def extract_reports(paths: list[Path]) -> tuple[list, list, ReportDefinition]:
         for bookmark in report.bookmark_details:
             bookmark.name = id_prefix + bookmark.name
             bookmark.page = id_prefix + bookmark.page if bookmark.page else ""
+            for captured in bookmark.filters:
+                captured.page = id_prefix + captured.page if captured.page else ""
         bookmarks = {id_prefix + key: value for key, value in report.bookmarks.items()}
         if merged is None:
             merged = ReportDefinition(format=report.format)
