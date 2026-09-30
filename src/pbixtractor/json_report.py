@@ -20,6 +20,7 @@ from .documentation import (
     field_display_name,
     is_missing_target,
 )
+from .m_sources import NATIVE_SQL
 from .model_sheets import STORAGE_MODES
 
 SCHEMA_VERSION = 1
@@ -105,6 +106,7 @@ def _report_section(documentation: Documentation) -> dict:
                 "applies_to": b.applies_to,
                 "hides": b.hidden_visuals,
                 "used_by": b.used_by,
+                **({"broken": True} if b.broken else {}),
             }
             for b in documentation.bookmarks
         ],
@@ -326,7 +328,7 @@ def _lineage_section(documentation: Documentation, dependencies: list[dict]) -> 
             field_node(table.name, measure.name)
         for partition in table.partitions:
             for source in partition.source_summary()[1].split(", "):
-                if source and source not in ("calculated table", "native SQL query"):
+                if source and source not in ("calculated table", NATIVE_SQL):
                     edge(table_id, node(f"source:{source}", "source", source), "loads_from")
 
     for rel in model.relationships:

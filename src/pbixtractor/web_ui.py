@@ -8,18 +8,23 @@ output files can be downloaded. The extraction itself runs in a background threa
 (pipeline.run_extraction) while progress and log messages stream into the page.
 """
 
+import asyncio
 import os
 import queue
+import re
 import secrets
+import time
+import webbrowser
 from collections import Counter
 from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
-from nicegui import app, run, ui
+from nicegui import app, background_tasks, events, run, ui
 
 from . import __version__
+from .azure_auth import ApiError
 from .data import DATA_DIR
 from .live_model import find_local_instances
 from .pipeline import (
@@ -31,9 +36,16 @@ from .pipeline import (
     run_extraction,
 )
 from .tabular_editor import add_tabular_editor_location, find_tabular_editor
+from .web_sources import DevOpsPanel, FabricPanel
 
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
 _OUTPUT_DIRS: dict[str, Path] = {}
+
+UPLOAD_SUFFIXES = (".pbix", ".bim")
+UPLOAD_FOLDER = Path("output") / "_uploads"  # dropped files are copied here (CWD-relative)
+# After a restart the open tab reconnects on its own (socket.io retries at most every 5 s, then
+# the page reloads because the new server does not know it); only open a new tab if none does
+BROWSER_GRACE_SECONDS = 7
 
 FILE_LABELS = {
     "workbook": ("Documentation workbook", "table_view"),
@@ -126,7 +138,9 @@ def _stats(report_json: dict) -> list[tuple[str, object, str]]:
     pages = report_json["report"]["pages"]
     items = [item for page in pages for item in page["items"]]
     measures = sum(len(t["measures"]) for t in report_json["model"]["tables"])
-    unused_bookmarks = sum(1 for b in report_json["report"].get("bookmarks", []) if not b["used_by"])
+    bookmarks = report_json["report"].get("bookmarks", [])
+    unused_bookmarks = sum(1 for b in bookmarks if not b["used_by"])
+    broken_bookmarks = sum(1 for b in bookmarks if b.get("broken"))
     broken = sum(1 for i in items if i.get("broken"))
     quality = Counter(v["severity"] for v in report_json["quality"] or [])
     stats = [
@@ -140,6 +154,8 @@ def _stats(report_json: dict) -> list[tuple[str, object, str]]:
         ("Broken buttons", broken, "negative" if broken else "positive"),
         ("Unused bookmarks", unused_bookmarks, "warning" if unused_bookmarks else "positive"),
     ]
+    if broken_bookmarks:
+        stats.append(("Broken bookmarks", broken_bookmarks, "negative"))
     if report_json["quality"] is not None:
         stats.append(("BPA high", quality.get("High", 0), "negative"))
         stats.append(("BPA medium", quality.get("Medium", 0), "warning"))
@@ -159,6 +175,11 @@ def _table(rows: list[dict], columns: list[tuple[str, str]], empty: str) -> None
         row_key="_id",
         pagination=25,
     ).classes("w-full").props("dense flat wrap-cells")
+
+
+def _log_count(logs: str) -> int:
+    """Number of log messages (a message can span several lines, e.g. Tabular Editor output)."""
+    return len(re.findall(r"^(?:DEBUG|INFO|WARNING|ERROR|CRITICAL): ", logs or "", re.MULTILINE))
 
 
 def _render_result(container: ui.element, result: ExtractionResult, options: ExtractionOptions):
@@ -210,14 +231,15 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
             quality_tab = ui.tab("Model quality", icon="rule")
             unused_tab = ui.tab("Unused", icon="block")
             bookmarks_tab = ui.tab("Bookmarks", icon="bookmarks")
-            log_tab = ui.tab("Log", icon="article")
+            log_count = _log_count(result.logs)
+            log_tab = ui.tab(f"Log ({log_count})" if log_count else "Log", icon="article")
         with ui.tab_panels(tabs, value=lineage_tab).classes("w-full"):
             with ui.tab_panel(lineage_tab).classes("p-0"):
                 lineage_url = f"/files/{token}/{result.files['lineage'].name}"
                 with ui.row().classes("w-full justify-end"):
                     ui.link("Open in a new tab", lineage_url, new_tab=True).classes("text-sm")
                 ui.element("iframe").props(f'src="{lineage_url}"').classes(
-                    "w-full h-[78vh] border rounded"
+                    "w-full h-[85vh] min-h-[600px] border rounded"
                 )
             with ui.tab_panel(quality_tab):
                 if doc["quality"] is None:
@@ -332,33 +354,85 @@ def index() -> None:
     with ui.column().classes("w-full max-w-[1400px] mx-auto q-pa-md gap-4"):
         with ui.row().classes("w-full gap-4 items-stretch"):
             # ---------------- inputs ----------------
-            with ui.card().classes("grow min-w-[420px]"):
-                ui.label("Report").classes("text-subtitle1 text-weight-medium")
-
-                def picker_button(target: ui.input, suffixes, report_folders=False):
-                    async def pick() -> None:
-                        current = Path(target.value) if target.value else Path.home()
-                        chosen = await PathPicker(
-                            current.parent if current.suffix else current,
-                            suffixes,
-                            report_folders,
+            # basis-0: long help texts wrap instead of pushing the Environment card down
+            with ui.card().classes("grow basis-0 min-w-[420px]"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label("Report").classes("text-subtitle1 text-weight-medium")
+                    source = (
+                        ui.toggle(
+                            {"local": "Local file", "fabric": "Fabric", "devops": "Azure DevOps"},
+                            value="local",
                         )
-                        if chosen:
-                            target.value = str(chosen)
+                        .props("no-caps dense unelevated")
+                        .mark("source")
+                    )
+                with ui.column().classes("w-full gap-2") as local_box:
 
-                    ui.button(icon="folder_open", on_click=pick).props("flat round")
+                    def picker_button(target: ui.input, suffixes, report_folders=False):
+                        async def pick() -> None:
+                            current = Path(target.value) if target.value else Path.home()
+                            chosen = await PathPicker(
+                                current.parent if current.suffix else current,
+                                suffixes,
+                                report_folders,
+                            )
+                            if chosen:
+                                target.value = str(chosen)
 
-                with ui.row().classes("w-full items-center no-wrap"):
-                    report_input = ui.input(
-                        "Report (.pbix, .pbip or .Report folder)",
-                        placeholder=r"C:\Reports\Sales.pbix",
-                    ).classes("grow").mark("report")
-                    picker_button(report_input, REPORT_SUFFIXES, report_folders=True)
-                with ui.row().classes("w-full items-center no-wrap"):
-                    model_input = ui.input(
-                        "Model (.bim or TMDL model.tmdl) - found automatically for most reports"
-                    ).classes("grow").mark("model")
-                    picker_button(model_input, (".bim", ".tmdl"))
+                        ui.button(icon="folder_open", on_click=pick).props("flat round")
+
+                    with ui.row().classes("w-full items-center no-wrap"):
+                        report_input = ui.input(
+                            "Report (.pbix, .pbip or .Report folder)",
+                            placeholder=r"C:\Reports\Sales.pbix",
+                        ).classes("grow").mark("report")
+                        picker_button(report_input, REPORT_SUFFIXES, report_folders=True)
+                    with ui.row().classes("w-full items-center no-wrap"):
+                        model_input = ui.input(
+                            "Model (.bim or TMDL model.tmdl) - found automatically for most reports"
+                        ).classes("grow").mark("model")
+                        picker_button(model_input, (".bim", ".tmdl"))
+
+                    # Drag & drop: the browser never reveals a dropped file's path, so the file is
+                    # copied to output/_uploads and that copy is documented
+                    last_model_upload = {"time": 0.0}
+
+                    async def on_upload(event: events.UploadEventArguments) -> None:
+                        name = Path(event.file.name).name
+                        suffix = Path(name).suffix.lower()
+                        if suffix not in UPLOAD_SUFFIXES:
+                            ui.notify(f"{name}: drop a .pbix report or a .bim model.", type="warning")
+                            return
+                        target = Path.cwd() / UPLOAD_FOLDER / name
+                        await event.file.save(target)
+                        if suffix == ".bim":
+                            model_input.value = str(target)
+                            last_model_upload["time"] = time.monotonic()
+                        else:
+                            # A new report: find its model again, unless one came in the same drop
+                            if time.monotonic() - last_model_upload["time"] > 30:
+                                model_input.value = ""
+                            report_input.value = str(target)
+                        ui.notify(f"{name} copied to {target.parent}", type="positive")
+
+                    ui.upload(
+                        label="…or drop a .pbix and/or .bim file here",
+                        multiple=True,
+                        auto_upload=True,
+                        on_upload=on_upload,
+                    ).props('accept=".pbix,.bim" flat bordered').classes("w-full").mark("upload")
+                local_box.bind_visibility_from(source, "value", value="local")
+
+                # Remote sources: pick a report; it is downloaded when the documentation runs
+                def suggest_output(name: str) -> None:
+                    output_input.value = str(Path.cwd() / "output" / name)
+
+                remote = {}
+                for key, panel_class in (("fabric", FabricPanel), ("devops", DevOpsPanel)):
+                    with ui.column().classes("w-full gap-2") as box:
+                        remote[key] = panel_class(on_choose=suggest_output)
+                    box.bind_visibility_from(source, "value", value=key)
+
                 output_input = ui.input("Output folder").classes("w-full").mark("output")
 
                 with ui.expansion("Options", icon="tune").classes("w-full"):
@@ -453,7 +527,8 @@ def index() -> None:
             log_view = ui.log(max_lines=400).classes("w-full h-40")
             log_view.visible = False
 
-        result_box = ui.column().classes("w-full gap-3")
+    # Results use the full window width: the lineage viewer needs the room
+    result_box = ui.column().classes("w-full q-px-md q-pb-md gap-3")
 
     # ---------------- behaviour ----------------
     def on_report_change() -> None:
@@ -472,19 +547,52 @@ def index() -> None:
 
     report_input.on_value_change(lambda _: on_report_change())
 
+    async def download_remote_report(panel) -> Optional[tuple[Path, Path]]:
+        """Fetch the chosen Fabric/DevOps report (progress in the step label); None on error."""
+        step_label.text = "Downloading the report…"
+        messages: queue.Queue = queue.Queue()
+
+        def show_progress() -> None:
+            while not messages.empty():
+                step_label.text = messages.get_nowait()
+
+        timer = ui.timer(0.2, show_progress)
+        run_button.disable()
+        try:
+            return await run.io_bound(panel.fetch, messages.put)
+        except (ApiError, ValueError, OSError) as error:
+            ui.notify(f"Download failed: {error}", type="negative", multi_line=True, timeout=20000)
+            return None
+        finally:
+            timer.cancel()
+            run_button.enable()
+            step_label.text = ""
+
     async def start_run() -> None:
-        report = Path((report_input.value or "").strip('"'))
-        model_value = (model_input.value or "").strip('"')
-        if not report_input.value or not report.exists():
-            ui.notify("Choose an existing report first.", type="warning")
-            return
-        model = Path(model_value) if model_value else find_model_for_report(report)
-        if model is None or not model.exists():
-            ui.notify(
-                "Choose the model (.bim, or model.tmdl of a TMDL model) that belongs to the report.",
-                type="warning",
-            )
-            return
+        if source.value != "local":
+            panel = remote[source.value]
+            if not panel.ready():
+                ui.notify("Choose a report first.", type="warning")
+                return
+            result_box.clear()
+            fetched = await download_remote_report(panel)
+            if fetched is None:
+                return
+            report, model = fetched
+        else:
+            report = Path((report_input.value or "").strip('"'))
+            model_value = (model_input.value or "").strip('"')
+            if not report_input.value or not report.exists():
+                ui.notify("Choose an existing report first.", type="warning")
+                return
+            model = Path(model_value) if model_value else find_model_for_report(report)
+            if model is None or not model.exists():
+                ui.notify(
+                    "Choose the model (.bim, or model.tmdl of a TMDL model) that belongs to the "
+                    "report.",
+                    type="warning",
+                )
+                return
 
         options = ExtractionOptions(
             report_path=report,
@@ -529,6 +637,8 @@ def index() -> None:
             progress_bar.visible = False
 
         step_label.text = ""
+        # The live log is only for following the run; the result shows the same messages
+        log_view.visible = False
         _render_result(result_box, result, options)
         ui.notify(
             result.message if result.ok else f"Failed: {result.message}",
@@ -538,16 +648,36 @@ def index() -> None:
     run_button.on_click(start_run)
 
 
+async def _open_browser_unless_reconnected(url: str, connected: asyncio.Event) -> None:
+    """Open a browser tab, unless a tab from before a restart reconnects within the grace time."""
+    try:
+        await asyncio.wait_for(connected.wait(), timeout=BROWSER_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        webbrowser.open(url)
+
+
 def start(port: int = 8081, open_browser: bool = True, host: Optional[str] = None) -> None:
-    """Start the web UI (blocks until stopped)."""
+    """
+    Start the web UI (blocks until stopped).
+
+    With open_browser, a tab is opened only when no existing tab connects within a few seconds:
+    after a restart the open tab reconnects by itself, so no duplicate tab appears.
+    """
     register_routes()
+    if open_browser:
+        connected = asyncio.Event()
+        app.on_connect(connected.set)
+        url = f"http://127.0.0.1:{port}/"
+        app.on_startup(
+            lambda: background_tasks.create(_open_browser_unless_reconnected(url, connected))
+        )
     ui.run(
         index,
         title="PBIxtractor",
         host=host or "127.0.0.1",
         port=port,
         reload=False,
-        show=open_browser,
+        show=False,  # opened above, unless a tab reconnects
         dark=None,  # follow the system theme
         favicon=DATA_DIR / "logo.ico",
         show_welcome_message=True,

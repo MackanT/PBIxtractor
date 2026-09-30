@@ -112,6 +112,7 @@ class BookmarkInfo:
     applies_to: str = ""  # "All visuals" or "N selected visuals"
     hidden_visuals: list[str] = field(default_factory=list)  # labels of visuals it hides
     used_by: list[str] = field(default_factory=list)  # "Page (visual id)" of buttons using it
+    broken: bool = False  # recorded on a page that no longer exists
 
 
 @dataclass
@@ -597,12 +598,16 @@ def build_page_info(
 
 
 def build_bookmarks(
-    report: ReportDefinition, report_info: pd.DataFrame, pages: dict[str, list[PageItem]]
+    report: ReportDefinition,
+    report_info: pd.DataFrame,
+    pages: dict[str, list[PageItem]],
+    logger: Optional[logging.Logger] = None,
 ) -> list[BookmarkInfo]:
     """
     Bookmarks with their capture options, hidden visuals and the buttons that use them.
 
-    Buttons are matched on the bookmark's display name (what the button rows hold).
+    Buttons are matched on the bookmark's display name (what the button rows hold). A bookmark
+    recorded on a deleted page gets page "(missing page: <id>)" and broken=True.
     """
     labels = _visual_labels(pages)
     page_names = {page.name: page.display_name for page in report.pages}
@@ -623,12 +628,25 @@ def build_bookmarks(
             f"{row['Page']} ({row['Visual ID']})"
             for _, row in button_rows[button_rows["Name"] == bookmark.display_name].iterrows()
         ]
+        broken = bool(bookmark.page) and bookmark.page not in page_names
+        if broken:
+            page = f"(missing page: {bookmark.page})"
+            if logger:
+                logger.warning(
+                    f"Bookmark {bookmark.display_name} was recorded on a page that no longer "
+                    f"exists: {bookmark.page}"
+                )
+        elif bookmark.captures_page:
+            page = page_names[bookmark.page] if bookmark.page else ""
+        else:
+            page = ""
         bookmarks.append(
             BookmarkInfo(
                 name=bookmark.name,
                 display_name=bookmark.display_name,
                 group=bookmark.group,
-                page=page_names.get(bookmark.page, bookmark.page) if bookmark.captures_page else "",
+                page=page,
+                broken=broken,
                 captures=", ".join(captures),
                 applies_to=(
                     f"{len(bookmark.target_visuals)} selected visuals"
@@ -732,6 +750,6 @@ def build_documentation(
         bpa_violations=bpa_violations,
         live_statistics=live_statistics,
         page_info=build_page_info(report, pages, filter_strings) if report else [],
-        bookmarks=build_bookmarks(report, report_info, pages) if report else [],
+        bookmarks=build_bookmarks(report, report_info, pages, logger) if report else [],
         interactivity=build_interactivity(report, pages) if report else {},
     )
