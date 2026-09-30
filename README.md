@@ -146,14 +146,13 @@ ruff check src/ tests/
 
 ## Roadmap
 
-See [docs/IMPROVEMENT_PLAN.md](docs/IMPROVEMENT_PLAN.md) for planned enhancements:
-
-- ✅ Modular package structure (v0.2.0)
-- 🔄 Azure DevOps integration (v0.3.0)
-- 🔄 .pbir format support (v0.3.0)
-- 🔄 Plugin architecture for visual types (v0.4.0)
-- 🔄 HTML/JSON/Markdown output formats (v0.5.0)
-- 🔄 Similar measure detection (v0.6.0)
+- ✅ Modular package structure, YAML visual-type configuration
+- ✅ Legacy `.pbix` layout and PBIR / PBIP reports; `.bim` and TMDL models
+- ✅ JSON output and an interactive HTML lineage viewer; web UI and CLI
+- ✅ Source tables from M queries and native SQL
+- 🔄 Reading reports from Fabric workspaces and Azure DevOps repositories
+- 🔄 Bookmark filter/slicer state
+- 🔄 Source database lineage (views → base tables)
 
 ## Known Issues
 

@@ -1,17 +1,15 @@
 """Tests for the ReportExtractor class"""
 
-import pytest
-from pathlib import Path
 
 
 class TestReportExtractor:
     """Test suite for ReportExtractor"""
-    
+
     def test_import(self):
         """Test that we can import the ReportExtractor class"""
         from pbixtractor import ReportExtractor
         assert ReportExtractor is not None
-    
+
     def test_version(self):
         """Test that version is defined"""
         from pbixtractor import __version__
