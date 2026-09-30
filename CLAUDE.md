@@ -2,7 +2,8 @@
 
 ## Project Overview
 PBIxtractor generates documentation for Power BI reports. It reads a `.pbix` (report
-layout) plus a `.bim` (semantic model, read directly; Tabular Editor 2 optional) and writes
+layout) plus the semantic model (`.bim` or TMDL folder, read directly; Tabular Editor 2
+optional) and writes
 Excel workbooks
 with a visual inventory per page, filters, colour-coded DAX, relationships (PNG graph),
 measure dependencies, unused columns/measures, model tables/columns (sources, storage mode),
@@ -39,7 +40,9 @@ $env:PBIXTRACTOR_SAMPLE_PBIX = "C:\...\Reports V1\Invoices.pbix"
 ```
 Output goes to `./output/<report name>/` (CWD-relative, gitignored) unless `-o` / the UI's output
 folder says otherwise. The model is auto-found next to the report (`find_model_for_report`:
-`<name>.bim`, `<name>.SemanticModel/model.bim`, `<name>.Dataset/model.bim`); `extract` exits 2
+`<name>.bim`, then the PBIP model folder from `<name>.Report/definition.pbir`
+(`datasetReference.byPath`), `<name>.SemanticModel`, `<name>.Dataset` - each as model.bim or
+TMDL `definition/`); `extract` exits 2
 when there is none. By default the model is read
 from the `.bim` on every run; a `documentation.tsv` is only used with `USE_TABULAR_EDITOR`.
 Real test reports (local only, never commit):
@@ -112,12 +115,25 @@ src/pbixtractor/
                     helpers per sheet type (_write_relations, _write_objects, _write_page_sheet,
                     _write_pages_sheet, _write_dependencies_sheet).
   relationship_graph.py save_relationship_graph() → PNG (networkx spring layout).
-  semantic_model.py read_model(.bim or folder with model.bim) → SemanticModel (tables, columns,
+  semantic_model.py model_source(path) → the .bim file or TMDL definition folder (accepts
+                    .SemanticModel folders and model.tmdl too; the pipeline passes it to
+                    Tabular Editor, which loads both). read_model(path) → SemanticModel
+                    (tables, columns,
                     measures, hierarchies+levels, partitions incl. Direct Lake entity, relationships
                     with cardinality/direction/active, shared expressions, roles/RLS).
                     model_to_dataset() → DataFrame identical to TE's TSV (verified on Invoices:
                     all 459 objects match; only DAX whitespace differs). structurally_used_columns():
-                    relationship keys, sort-by and hierarchy-level columns. TMDL not supported yet.
+                    relationship keys, sort-by and hierarchy-level columns. Hierarchy levels are
+                    sorted by `ordinal` (the .bim array order is not the level order).
+  tmdl.py           TMDL folder → TMSL dict (same shape as a .bim) → parse_model(), so
+                    both formats share one reader. parse_tmdl(): indentation tree (tabs),
+                    `key: value` properties (".." with "" escapes), bare flags = true,
+                    `///` descriptions, `= expr` inline / multi-line (two tabs deeper than
+                    the object) / ``` fenced, `ref table X` at top level of model.tmdl =
+                    table order. Verified against Tabular Editor 2.29 -TMDL exports of AW
+                    (0 differences) and Invoices: only calculated columns with an inferred
+                    type lack dataType in TMDL (DataType "Unknown"). Test fixture:
+                    tests/sample_tmdl.py (TE export of the sample BIM).
   tabular_editor.py find_tabular_editor(); run_script() (write C# script with %FOLDER%, run
                     TE2 -S, collect output files); run_best_practice_analyzer() runs TE's
                     Analyzer in a script → (violations, rule errors) with rules from
@@ -256,7 +272,7 @@ src/pbixtractor/
   extraction test runs on all three and must give identical rows. Real reports are only used
   locally via `PBIXTRACTOR_SAMPLE_PBIX`.
 - Plan order: Step 0 (fix regressions, done) → 1 typed model + local readers (done for
-  reports: readers.py, and for .bim models: semantic_model.py; TMDL still TODO) →
+  reports: readers.py; models: semantic_model.py (.bim) + tmdl.py (TMDL, done 2026-09-29)) →
   model extras (done 2026-09-29: unused measures, model sheets, BPA, exact dependencies,
   live statistics) → 2 modular handlers/writers (run_cmd split into documentation.py /
   excel_report.py / dax.py / relationship_graph.py, config.py + extract_types handler

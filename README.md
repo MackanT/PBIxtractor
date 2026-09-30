@@ -53,8 +53,9 @@ pbixtractor
 pbixtractor web --port 8090 --no-browser
 ```
 
-Pick a report (`.pbix`, `.pbip` or a `.Report` folder). The model (`<name>.bim` or the PBIP
-`<name>.SemanticModel`) is found automatically when it sits next to the report. After a run the
+Pick a report (`.pbix`, `.pbip` or a `.Report` folder). The model is found automatically:
+`<name>.bim` next to the report, or a PBIP project's semantic model as `model.bim` or TMDL
+(the `definition` folder newer Power BI Desktop versions write). After a run the
 page shows the lineage viewer inline, the Best Practice Analyzer findings, unused objects,
 bookmarks and download links for all output files. Everything runs locally.
 
@@ -63,6 +64,7 @@ bookmarks and download links for all output files. Everything runs locally.
 ```powershell
 pbixtractor extract C:\Reports\Sales.pbix                  # model: Sales.bim next to it
 pbixtractor extract Sales.pbix --model Model.bim -o out\Sales --no-tabular-editor
+pbixtractor extract Sales.pbip                              # PBIP: model.bim or TMDL
 pbixtractor extract --help
 ```
 
@@ -102,7 +104,8 @@ pbixtractor/
 │       ├── web_ui.py         # Web UI (NiceGUI)
 │       ├── pipeline.py       # run_extraction(): the whole documentation run
 │       ├── readers.py        # .pbix / PBIR / PBIP report readers
-│       ├── semantic_model.py # .bim model reader
+│       ├── semantic_model.py # model reader (.bim)
+│       ├── tmdl.py           # TMDL model folders (newer PBIP projects)
 │       └── data/             # data.yaml (visual types, DAX functions), BPA rules
 ├── tests/                    # Test suite
 ├── docs/                     # Documentation
