@@ -8,6 +8,7 @@
 Used by the command line (cli.py) and the web UI (web_ui.py).
 """
 
+import json
 import subprocess
 import threading
 import time
@@ -26,7 +27,7 @@ from .live_model import collect_live_statistics
 from .logger import capture_logs, get_logger
 from .relationship_graph import save_relationship_graph
 from .report_extractor import ReportExtractor, known_functions, visual_mapper, visual_type_list
-from .semantic_model import model_to_dataset, read_model
+from .semantic_model import model_source, model_to_dataset, read_model
 from .tabular_editor import (
     drop_redundant_table_refs,
     export_dependencies,
@@ -49,7 +50,7 @@ class ExtractionOptions:
     """Everything one documentation run needs."""
 
     report_path: Path  # .pbix, .pbip or <name>.Report folder
-    model_path: Path  # .bim, or a folder containing model.bim
+    model_path: Path  # .bim, TMDL folder / model.tmdl, or <name>.SemanticModel folder
     output_dir: Path  # all output files go here
     name: str = ""  # base name of the output files (default: report file name)
     description_tag: str = DESCRIPT_TAG  # delimiter of descriptions embedded in DAX
@@ -92,29 +93,42 @@ def find_model_for_report(report_path: str | Path) -> Optional[Path]:
     """
     Guess the model file that belongs to a report.
 
-    Looks for <name>.bim next to the report, then for a PBIP project's
-    <name>.SemanticModel/model.bim (or <name>.Dataset/model.bim).
+    Looks for <name>.bim next to the report, then for a PBIP project's semantic model: the
+    folder the report's definition.pbir points to, or <name>.SemanticModel / <name>.Dataset;
+    each as model.bim or TMDL (definition/*.tmdl).
 
     Args:
         report_path: .pbix, .pbip or .Report folder
 
     Returns:
-        Path to the .bim (or model folder), or None
+        Path to the .bim or TMDL definition folder, or None
     """
     path = Path(report_path)
     name = report_name(path)
-    candidates = [
-        path.with_name(f"{name}.bim"),
-        path.with_name(f"{name}.SemanticModel") / "model.bim",
-        path.with_name(f"{name}.Dataset") / "model.bim",
-    ]
-    return next((candidate for candidate in candidates if candidate.is_file()), None)
+    if path.with_name(f"{name}.bim").is_file():
+        return path.with_name(f"{name}.bim")
+
+    folders = []
+    pbir = path.with_name(f"{name}.Report") / "definition.pbir"
+    try:
+        reference = json.loads(pbir.read_bytes().decode("utf-8-sig"))["datasetReference"]["byPath"]
+        folders.append((pbir.parent / reference["path"]).resolve())
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # no PBIP report folder, or the model is not referenced by path
+    folders += [path.with_name(f"{name}.SemanticModel"), path.with_name(f"{name}.Dataset")]
+    for folder in folders:
+        try:
+            return model_source(folder)
+        except FileNotFoundError:
+            continue
+    return None
 
 
-def _tabular_editor_analysis(model, options: ExtractionOptions, progress):
+def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, progress):
     """
     Optional, local Tabular Editor analysis: Best Practice Analyzer and exact DAX dependencies on
-    the .bim, plus live statistics if the report is open in Power BI Desktop.
+    the model (source: .bim file or TMDL folder, both loaded by Tabular Editor 2), plus live
+    statistics if the report is open in Power BI Desktop.
 
     Returns:
         (bpa_violations, exact_dependencies, live_statistics); each None when unavailable
@@ -133,7 +147,7 @@ def _tabular_editor_analysis(model, options: ExtractionOptions, progress):
 
     progress("Best Practice Analyzer", 0.2)
     try:
-        bpa_violations, rule_errors = run_best_practice_analyzer(tabular_editor, options.model_path)
+        bpa_violations, rule_errors = run_best_practice_analyzer(tabular_editor, source)
         if rule_errors:
             logger.warning(
                 f"{len(rule_errors)} Best Practice Analyzer rule(s) could not be evaluated: "
@@ -145,7 +159,7 @@ def _tabular_editor_analysis(model, options: ExtractionOptions, progress):
     progress("Exact DAX dependencies", 0.35)
     try:
         exact_dependencies = drop_redundant_table_refs(
-            export_dependencies(tabular_editor, options.model_path)
+            export_dependencies(tabular_editor, source)
         )
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
         logger.warning(f"Exact dependency export failed, using DAX text matching: {e}")
@@ -227,12 +241,13 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
     #    from here, even when Tabular Editor provides the TSV)
     progress("Reading the model", 0.05)
     try:
-        model = read_model(options.model_path)
-    except (OSError, ValueError, NotImplementedError) as e:
-        return ExtractionResult("error", f"Could not read the model file {options.model_path}: {e}")
+        source = model_source(options.model_path)  # the .bim file or TMDL folder
+        model = read_model(source)
+    except (OSError, ValueError) as e:
+        return ExtractionResult("error", f"Could not read the model {options.model_path}: {e}")
 
     bpa_violations, exact_dependencies, live_statistics = _tabular_editor_analysis(
-        model, options, progress
+        model, source, options, progress
     )
 
     # Measure data types are only known by a live model (the .bim usually lacks them)
@@ -247,7 +262,7 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         tabular_editor = find_tabular_editor()
         if tabular_editor is None:
             return ExtractionResult("error", "Tabular Editor 2 not found (needed for the TSV export).")
-        tsv_path = export_documentation_tsv(tabular_editor, options.model_path, out / "documentation.tsv")
+        tsv_path = export_documentation_tsv(tabular_editor, source, out / "documentation.tsv")
         dataset = pd.read_csv(tsv_path, sep="\t", header=0)
         files["tsv"] = tsv_path
     else:

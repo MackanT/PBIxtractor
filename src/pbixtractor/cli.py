@@ -17,7 +17,9 @@ Examples:
   pbixtractor                                     Start the web UI
   pbixtractor extract C:/Reports/Sales.pbix       Document a report (model: Sales.bim next to it)
   pbixtractor extract Sales.pbix --model Model.bim -o out/Sales --no-tabular-editor
-  pbixtractor extract C:/Reports/Sales.pbip       PBIP project (model from Sales.SemanticModel)
+  pbixtractor extract C:/Reports/Sales.pbip       PBIP project (model.bim or TMDL, found via
+                                                  the report's definition.pbir)
+  pbixtractor extract Sales.pbix --model Sales.SemanticModel/definition     TMDL model
 """
 
 
@@ -40,7 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument(
         "--model",
         type=Path,
-        help=".bim file or folder with model.bim (default: <name>.bim or <name>.SemanticModel)",
+        help=".bim file, TMDL folder (or its model.tmdl), or <name>.SemanticModel folder "
+        "(default: <name>.bim next to the report, or the PBIP project's semantic model)",
     )
     extract.add_argument(
         "-o", "--output", type=Path, help="output folder (default: output/<name>)"
@@ -74,7 +77,7 @@ def run_extract(args: argparse.Namespace) -> int:
     if model is None:
         print(
             f"No model found for {args.report}: expected {report_name(args.report)}.bim next to "
-            "it (or a PBIP .SemanticModel folder). Pass it with --model.",
+            "it (or a PBIP .SemanticModel folder with model.bim or TMDL). Pass it with --model.",
             file=sys.stderr,
         )
         return 2

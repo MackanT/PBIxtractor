@@ -88,7 +88,7 @@ def test_run_extraction_errors(sample):
             tabular_editor_analysis=False,
         )
     )
-    assert result.status == "error" and "model file" in result.message
+    assert result.status == "error" and "Could not read the model" in result.message
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows file locking")

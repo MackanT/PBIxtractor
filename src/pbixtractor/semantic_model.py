@@ -7,7 +7,8 @@ hidden flags, partitions with their M queries, shared expressions, roles).
     model = read_model("Model.bim")
     dataset = model_to_dataset(model)   # same columns as Tabular Editor's documentation.tsv
 
-TMDL (the folder format used by newer PBIP projects) is not supported yet.
+TMDL folders (the format of newer PBIP projects) are read through tmdl.py into the same
+structure, so both formats give the same SemanticModel.
 """
 
 import json
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+from .tmdl import find_tmdl_folder, read_tmdl_folder
 
 # Columns of Tabular Editor's ExportProperties TSV, as consumed by run_cmd()
 DATASET_COLUMNS = [
@@ -263,29 +266,42 @@ class SemanticModel:
 # ============================================================================
 
 
-def read_model(path: str | Path) -> SemanticModel:
+def model_source(path: str | Path) -> Path:
     """
-    Read a semantic model from a .bim file (or a folder containing model.bim).
+    The concrete model a path points to: a .bim file or a TMDL definition folder.
 
     Args:
-        path: .bim file, or a <name>.SemanticModel / <name>.Dataset folder
+        path: .bim file; <name>.SemanticModel / <name>.Dataset folder (model.bim or TMDL
+            definition/); a TMDL definition folder; or a .tmdl file in it (e.g. model.tmdl)
+
+    Returns:
+        The .bim file or the folder holding the .tmdl files (Tabular Editor accepts both)
+    """
+    path = Path(path)
+    if path.is_file() and path.suffix.lower() != ".tmdl":
+        return path
+    if path.is_dir() and (path / "model.bim").is_file():
+        return path / "model.bim"
+    folder = find_tmdl_folder(path)
+    if folder is not None:
+        return folder
+    raise FileNotFoundError(f"No model.bim or TMDL model (definition/*.tmdl) found in {path}")
+
+
+def read_model(path: str | Path) -> SemanticModel:
+    """
+    Read a semantic model from a .bim file or a TMDL folder.
+
+    Args:
+        path: See model_source()
 
     Returns:
         SemanticModel
     """
-    path = Path(path)
-    if path.is_dir():
-        bim = path / "model.bim"
-        if not bim.is_file():
-            if (path / "definition").is_dir():
-                raise NotImplementedError(
-                    f"{path.name} uses the TMDL format, which is not supported yet. "
-                    "Save the model as .bim (e.g. from Tabular Editor) instead."
-                )
-            raise FileNotFoundError(f"No model.bim found in {path}")
-        path = bim
-
-    database = json.loads(path.read_bytes().decode("utf-8-sig"))
+    source = model_source(path)
+    if source.is_dir():
+        return parse_model(read_tmdl_folder(source))
+    database = json.loads(source.read_bytes().decode("utf-8-sig"))
     return parse_model(database)
 
 
@@ -483,7 +499,8 @@ def model_to_dataset(model: SemanticModel) -> pd.DataFrame:
             SourceColumn=column.source_column,
             Expression=column.expression,
             FormatString=column.format_string,
-            DataType=DATA_TYPES.get(column.data_type, column.data_type),
+            # Missing for calculated columns with an inferred type in TMDL (isDataTypeInferred)
+            DataType=DATA_TYPES.get(column.data_type, column.data_type) or "Unknown",
             DisplayFolder=column.display_folder,
         )
 

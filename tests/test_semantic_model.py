@@ -247,9 +247,9 @@ def test_read_model_from_file_and_folder(tmp_path):
     assert read_model(tmp_path).name == "SampleModel"  # e.g. a <name>.SemanticModel folder
 
 
-def test_tmdl_folder_gives_clear_error(tmp_path):
-    (tmp_path / "definition").mkdir()
-    with pytest.raises(NotImplementedError, match="TMDL"):
+def test_folder_without_model_gives_clear_error(tmp_path):
+    (tmp_path / "definition").mkdir()  # empty: neither model.bim nor .tmdl files
+    with pytest.raises(FileNotFoundError, match="TMDL"):
         read_model(tmp_path)
 
 

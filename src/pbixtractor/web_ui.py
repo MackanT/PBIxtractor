@@ -356,9 +356,9 @@ def index() -> None:
                     picker_button(report_input, REPORT_SUFFIXES, report_folders=True)
                 with ui.row().classes("w-full items-center no-wrap"):
                     model_input = ui.input(
-                        "Model (.bim) - found automatically when next to the report"
+                        "Model (.bim or TMDL model.tmdl) - found automatically for most reports"
                     ).classes("grow").mark("model")
-                    picker_button(model_input, (".bim",))
+                    picker_button(model_input, (".bim", ".tmdl"))
                 output_input = ui.input("Output folder").classes("w-full").mark("output")
 
                 with ui.expansion("Options", icon="tune").classes("w-full"):
@@ -480,7 +480,10 @@ def index() -> None:
             return
         model = Path(model_value) if model_value else find_model_for_report(report)
         if model is None or not model.exists():
-            ui.notify("Choose the model (.bim) that belongs to the report.", type="warning")
+            ui.notify(
+                "Choose the model (.bim, or model.tmdl of a TMDL model) that belongs to the report.",
+                type="warning",
+            )
             return
 
         options = ExtractionOptions(
