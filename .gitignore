@@ -176,7 +176,10 @@ temp_*/
 # Web UI state (remembered Fabric/DevOps choices)
 .nicegui/
 
-# Legacy folders (will be removed during migration)
+# Catalog folders hold client model documentation (default: output/_catalog)
+catalog/
+
+# Local run configuration: regression.json, TabularEditorLocations.txt (may name client files)
 Input/
 PBIxtractor/PBIxtractor/
 *.bat

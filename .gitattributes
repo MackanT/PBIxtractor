@@ -1,0 +1,8 @@
+# Text files are stored with LF in the repository (as they already are) and checked out with
+# the platform's line endings
+* text=auto
+
+*.png binary
+*.ico binary
+*.pbix binary
+*.xlsx binary
