@@ -287,6 +287,13 @@ main { position: relative; min-width: 0; min-height: 0; }
 #toolbar > * { pointer-events: auto; }
 .btn, select { background: var(--panel); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 9px; font: inherit; cursor: pointer; box-shadow: var(--shadow); }
+.btn:disabled { opacity: .45; cursor: default; }
+#toolbar .group { display: inline-flex; }
+#toolbar .group .btn { border-radius: 0; margin-left: -1px; }
+#toolbar .group .btn:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+#toolbar .group .btn:last-child { border-radius: 0 6px 6px 0; }
+#app.wide { grid-template-columns: 1fr !important; }
+#app.wide aside, #app.wide #details { display: none !important; }
 #status { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
   padding: 5px 9px; box-shadow: var(--shadow); }
 svg { width: 100%; height: 100%; display: block; cursor: grab; }
@@ -296,6 +303,8 @@ svg.dragging { cursor: grabbing; }
 .node .type { fill: var(--muted); font-size: 10px; }
 .node { cursor: pointer; }
 .node.selected rect { stroke-width: 3; }
+.node.marked rect:first-of-type { stroke: var(--accent); stroke-width: 3.5; }
+.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .node.unused rect { stroke-dasharray: 5 3; }
 .node.dim { opacity: .25; }
 .edge { fill: none; stroke: var(--edge); stroke-width: 1.2; }
@@ -313,6 +322,29 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 .links a { color: var(--accent); cursor: pointer; display: block; padding: 1px 0; }
 .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   color: #fff; margin-right: 6px; }
+#guide { position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,.45); display: none;
+  align-items: flex-start; justify-content: center; overflow: auto; padding: 40px 16px; }
+#guide.open { display: flex; }
+#guide .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  max-width: 760px; width: 100%; padding: 20px 24px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+#guide h2 { font-size: 17px; margin-bottom: 4px; }
+#guide h3 { font-size: 13px; margin: 18px 0 6px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--muted); }
+#guide p, #guide li { margin: 4px 0; }
+#guide ul { margin: 4px 0; padding-left: 18px; }
+#guide .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0 4px; }
+#guide .flow span.step { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
+  border: 1px solid var(--border); border-radius: 6px; }
+#guide table { border-collapse: collapse; width: 100%; }
+#guide td { padding: 5px 8px; border-top: 1px solid var(--border); vertical-align: top; }
+#guide td:first-child { white-space: nowrap; font-weight: 600; }
+#guide .sample { display: inline-block; width: 34px; height: 0; vertical-align: middle;
+  border-top: 2px solid var(--edge); margin-right: 6px; }
+#guide .sample.dashed { border-top-style: dashed; }
+#guide .box { display: inline-block; width: 26px; height: 14px; vertical-align: middle;
+  border: 1.5px solid var(--measure); border-radius: 4px; margin-right: 6px; }
+#guide .box.unused { border: 1.5px dashed var(--unused); }
+#guide .close { float: right; }
 @media (max-width: 1100px) { #app { grid-template-columns: 260px 1fr; } #details { display: none; }
   #app.show-details #details { display: flex; position: fixed; right: 0; top: 0; bottom: 0;
   width: min(360px, 100vw); z-index: 5; } }
@@ -336,18 +368,110 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   </aside>
   <main>
     <div id="toolbar">
+      <span class="group">
+        <button class="btn" id="back" title="Back (Alt+Left)" aria-label="Back">←</button>
+        <button class="btn" id="forward" title="Forward (Alt+Right)" aria-label="Forward">→</button>
+      </span>
+      <button class="btn" id="levelUp">⤴ Up a level</button>
+      <button class="btn" id="overview" title="The whole system: sources → tables → pages">⌂ Overview</button>
       <select id="direction" aria-label="Direction">
         <option value="both">Upstream + downstream</option>
         <option value="up">Upstream only (built from)</option>
         <option value="down">Downstream only (used by)</option>
       </select>
-      <button class="btn" id="fit">Fit</button>
+      <span class="group">
+        <button class="btn" id="zoomOut" title="Zoom out" aria-label="Zoom out">−</button>
+        <button class="btn" id="fit" title="Show the whole graph">Fit</button>
+        <button class="btn" id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
+      </span>
+      <button class="btn" id="panels" title="Hide or show the side panels for a bigger graph">⇔ Panels</button>
+      <button class="btn" id="help" title="How to read this view">? Guide</button>
       <span id="status"></span>
     </div>
     <svg id="canvas" aria-label="Lineage graph"><g id="viewport"><g id="edges"></g><g id="nodes"></g></g></svg>
     <div id="empty">Select an item on the left to see its lineage.</div>
   </main>
   <section id="details"><div class="body" id="detailsBody"></div></section>
+</div>
+<div id="guide" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+  <div class="card">
+    <button class="btn close" id="guideClose">Close</button>
+    <h2 id="guideTitle">How to read the lineage view</h2>
+    <p class="muted">Lineage shows where the numbers in the report come from, and what would be
+      affected if something in the model changes.</p>
+
+    <h3>Data flows left to right</h3>
+    <div class="flow" id="guideFlow"></div>
+    <p>Each column in the graph is one step. Measures can take several columns: a measure built on
+      other measures sits to the right of the measures it uses.</p>
+    <table>
+      <tr><td>Source</td><td>Where a table loads its data from: a database view/table, a Lakehouse
+        table (Direct Lake) or another Power Query source.</td></tr>
+      <tr><td>Table</td><td>A table in the semantic model.</td></tr>
+      <tr><td>Column</td><td>A column in a model table (loaded from the source or calculated with DAX).</td></tr>
+      <tr><td>Measure</td><td>A DAX calculation. Arrows into it are the columns and measures its DAX uses.</td></tr>
+      <tr><td>Visual</td><td>A chart, table, card, slicer or button on a report page. Arrows into it
+        are the fields it shows or is filtered by.</td></tr>
+      <tr><td>Page</td><td>A report page and the visuals on it.</td></tr>
+    </table>
+
+    <h3>Overview and moving around</h3>
+    <ul>
+      <li><b>⌂ Overview</b> (the start view): the whole system at a glance - sources → tables →
+        pages. A table feeds a page when a visual on the page uses its columns or measures (also
+        through other measures). Tables that feed no page have a dashed red border.</li>
+      <li><b>← →</b>: back and forward through what you looked at (also Alt+← / Alt+→).</li>
+      <li><b>⤴ Up a level</b>: from a column or measure to its table, from a visual to its page,
+        and from a table, page or source to the overview.</li>
+      <li><b>− Fit +</b>: zoom out, show everything, zoom in (the mouse wheel zooms too).</li>
+      <li><b>⇔ Panels</b>: hide the side panels for a bigger graph (click again to bring them back).</li>
+    </ul>
+
+    <h3>Selecting an item</h3>
+    <ul>
+      <li><b>Click</b> an item in the graph to mark it: its lines are highlighted and its details
+        appear on the right - the graph stays as it is. Click empty space to unmark.</li>
+      <li><b>Double-click</b> (or Enter, or "Open its lineage" on the right) to open the item's own
+        lineage.</li>
+      <li><b>Upstream</b> (to the left) = what the item is <b>built from</b>.</li>
+      <li><b>Downstream</b> (to the right) = what <b>uses</b> it, i.e. what can break if it changes
+        or is removed.</li>
+      <li>The drop-down at the top switches between both directions, upstream only and downstream only.</li>
+    </ul>
+
+    <h3>Lines and borders</h3>
+    <table>
+      <tr><td><span class="sample"></span>Solid line</td><td>Uses / contains / depends on.</td></tr>
+      <tr><td><span class="sample dashed"></span>Dashed line</td><td>The field is used as a
+        <b>filter</b> on the visual (in its filter pane), not shown in it.</td></tr>
+      <tr><td><span class="box"></span>Solid border</td><td>Normal item; the colour is its type.</td></tr>
+      <tr><td><span class="box unused"></span>Dashed red border</td><td><b>Unused</b> column or
+        measure: no visual, filter, DAX, relationship, sort-by or hierarchy uses it - a candidate
+        for removal.</td></tr>
+      <tr><td>Thick border</td><td>The item whose lineage is shown.</td></tr>
+      <tr><td>Thick blue border</td><td>The marked item (single click).</td></tr>
+    </table>
+
+    <h3>The three panels</h3>
+    <ul>
+      <li><b>Left</b>: search, show/hide item types, and "Only unused columns/measures". Click an
+        item to open its lineage.</li>
+      <li><b>Middle</b>: the graph. Drag to move, scroll to zoom, hover an item to highlight its
+        lines; click to mark, double-click to open.</li>
+      <li><b>Right</b>: details of the marked (or shown) item - DAX, data type, storage mode,
+        rows/size when the report was open in Power BI Desktop - and "Built from" / "Used by"
+        lists; clicking an entry there opens its lineage.</li>
+    </ul>
+
+    <h3>Worth knowing</h3>
+    <ul>
+      <li><b>⚠</b> before a button: it points to a bookmark or page that no longer exists.</li>
+      <li>"dependencies by text matching" at the top left: Tabular Editor was not used, so
+        dependencies are found by searching the DAX text and can be incomplete.</li>
+      <li>Very large lineages show only the nearest 600 items (the status bar says so).</li>
+      <li>Relationships between tables are not drawn here - see the relationships sheet in the workbook.</li>
+    </ul>
+  </div>
 </div>
 <script type="application/json" id="data">__DATA__</script>
 <script>
@@ -367,7 +491,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     up[e[1]].push({ id: e[0], type: e[2] });
   });
 
-  var state = { selected: null, direction: "both", types: {}, query: "", unusedOnly: false,
+  var state = { selected: null, marked: null, direction: "both", types: {}, query: "", unusedOnly: false,
                 scale: 1, tx: 0, ty: 0 };
   TYPES.forEach(function (t) { state.types[t] = true; });
 
@@ -450,7 +574,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   }
 
   // Layered layout: layer = data flow position; order within a layer by barycenter of neighbours
-  function layout(ids) {
+  function layout(ids, upAdj, downAdj) {
     var present = {}; ids.forEach(function (id) { present[id] = true; });
     var layers = {};
     ids.forEach(function (id) { var l = byId[id].layer; (layers[l] = layers[l] || []).push(id); });
@@ -474,7 +598,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       }
     }
     index();
-    for (var i = 0; i < 2; i++) { sweep(keys.slice(1), up); sweep(keys.slice(0, -1).reverse(), down); }
+    for (var i = 0; i < 2; i++) { sweep(keys.slice(1), upAdj); sweep(keys.slice(0, -1).reverse(), downAdj); }
     var tallest = Math.max.apply(null, keys.map(function (k) { return layers[k].length; }));
     var xy = {};
     keys.forEach(function (k, column) {
@@ -486,11 +610,49 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     return xy;
   }
 
+  // ---------- overview: sources -> tables -> pages ----------
+  // A table feeds a page when anything upstream of the page's visuals belongs to it (also
+  // through measures in other tables). Built once, on first use.
+  var overview = null;
+  function buildOverview() {
+    if (overview) return overview;
+    var ids = DATA.nodes.filter(function (n) {
+      return n.type === "source" || n.type === "table" || n.type === "page";
+    }).map(function (n) { return n.id; });
+    var oUp = {}, oDown = {}, feeds = {};
+    ids.forEach(function (id) { oUp[id] = []; oDown[id] = []; });
+    function link(a, b, type) { oDown[a].push({ id: b, type: type }); oUp[b].push({ id: a, type: type }); }
+    DATA.edges.forEach(function (e) {
+      if (byId[e[0]] && byId[e[1]] && byId[e[0]].type === "source" && byId[e[1]].type === "table") link(e[0], e[1], e[2]);
+    });
+    ids.forEach(function (pageId) {
+      if (byId[pageId].type !== "page") return;
+      Object.keys(walk(pageId, up)).forEach(function (id) {
+        if (byId[id].type === "table") { link(id, pageId, "uses"); feeds[id] = true; }
+      });
+    });
+    var unused = {};
+    ids.forEach(function (id) { if (byId[id].type === "table" && !feeds[id]) unused[id] = true; });
+    overview = { ids: ids, up: oUp, down: oDown, unused: unused };
+    return overview;
+  }
+
   function renderGraph() {
     var edgesG = $("edges"), nodesG = $("nodes");
     edgesG.textContent = ""; nodesG.textContent = "";
-    if (!state.selected) { $("empty").style.display = "flex"; $("status").textContent = ""; return; }
+    var view = current();
+    if (!view) { $("empty").style.display = "flex"; $("status").textContent = ""; return; }
     $("empty").style.display = "none";
+
+    if (view.kind === "overview") {
+      var ov = buildOverview(), n = Object.keys(ov.unused).length;
+      $("status").textContent = "Overview: " + DATA.stats.source + " sources → " + DATA.stats.table +
+        " tables → " + DATA.stats.page + " pages" +
+        (n ? " · " + n + (n === 1 ? " table feeds" : " tables feed") + " no page" : "") +
+        " · click: details, double-click: lineage";
+      draw(ov.ids, ov.up, ov.down, null, ov.unused);
+      return;
+    }
 
     var ids = lineage(state.selected);
     var truncated = ids.length > MAX_NODES;
@@ -509,16 +671,21 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       }
       ids = Object.keys(keep);
     }
-    var present = {}; ids.forEach(function (id) { present[id] = true; });
-    var xy = layout(ids);
     var counts = {}; ids.forEach(function (id) { var t = byId[id].type; counts[t] = (counts[t] || 0) + 1; });
     $("status").textContent = ids.length + " items: " + TYPES.filter(function (t) { return counts[t]; })
       .map(function (t) { return counts[t] + " " + TYPE_LABEL[t].toLowerCase(); }).join(", ") +
       (truncated ? " (nearest " + MAX_NODES + " shown)" : "");
+    draw(ids, up, down, state.selected, null);
+  }
 
+  // Draw nodes and edges (edges from downAdj); unusedSet marks extra "unused" nodes
+  function draw(ids, upAdj, downAdj, selectedId, unusedSet) {
+    var edgesG = $("edges"), nodesG = $("nodes");
+    var present = {}; ids.forEach(function (id) { present[id] = true; });
+    var xy = layout(ids, upAdj, downAdj);
     var edgeEls = [];
     ids.forEach(function (id) {
-      down[id].forEach(function (n) {
+      downAdj[id].forEach(function (n) {
         if (!present[n.id]) return;
         var a = xy[id], b = xy[n.id];
         var x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
@@ -532,26 +699,46 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 
     ids.forEach(function (id) {
       var n = byId[id], p = xy[id];
-      var g = el("g", { "class": "node" + (id === state.selected ? " selected" : "") + (n.unused ? " unused" : ""),
+      var unused = n.unused || !!(unusedSet && unusedSet[id]);
+      var g = el("g", { "class": "node" + (id === selectedId ? " selected" : "") + (unused ? " unused" : ""),
                         transform: "translate(" + p.x + "," + p.y + ")", tabindex: "0" });
-      g.appendChild(el("rect", { width: NODE_W, height: NODE_H, stroke: n.unused ? "var(--unused)" : color(n.type) }));
+      g.appendChild(el("rect", { width: NODE_W, height: NODE_H, stroke: unused ? "var(--unused)" : color(n.type) }));
       g.appendChild(el("rect", { width: 5, height: NODE_H, fill: color(n.type), stroke: "none" }));
       var label = n.label.length > 30 ? n.label.slice(0, 29) + "…" : n.label;
       g.appendChild(el("text", { x: 12, y: 15 }, label));
       g.appendChild(el("text", { x: 12, y: 28, "class": "type" },
         TYPE_LABEL[n.type] + (n.group ? " · " + (n.group.length > 26 ? n.group.slice(0, 25) + "…" : n.group) : "")));
-      g.appendChild(el("title", {}, TYPE_LABEL[n.type] + ": " + n.label + (n.group ? "\n" + n.group : "") + (n.unused ? "\nUnused" : "")));
-      g.addEventListener("click", function (ev) { ev.stopPropagation(); select(id); });
-      g.addEventListener("keydown", function (ev) { if (ev.key === "Enter") select(id); });
-      g.addEventListener("mouseenter", function () { highlight(id, edgeEls); });
-      g.addEventListener("mouseleave", function () { highlight(null, edgeEls); });
+      g.appendChild(el("title", {}, TYPE_LABEL[n.type] + ": " + n.label + (n.group ? "\n" + n.group : "") +
+        (n.unused ? "\nUnused" : unused ? "\nFeeds no report page" : "")));
+      // Click: mark it and show its details; double-click (or Enter): open its lineage
+      g.addEventListener("click", function (ev) { ev.stopPropagation(); mark(id); });
+      g.addEventListener("dblclick", function (ev) { ev.stopPropagation(); select(id); });
+      g.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") select(id);
+        else if (ev.key === " ") { ev.preventDefault(); mark(id); }
+      });
+      g.addEventListener("mouseenter", function () { highlight(id); });
+      g.addEventListener("mouseleave", function () { highlight(state.marked); });
+      g.dataset.id = id;
       nodesG.appendChild(g);
     });
+    shownEdges = edgeEls;
     fit();
   }
 
-  function highlight(id, edgeEls) {
-    edgeEls.forEach(function (p) {
+  // ---------- marking (single click) ----------
+  var shownEdges = [];
+  function mark(id) {
+    state.marked = id;
+    document.querySelectorAll(".node").forEach(function (g) {
+      g.classList.toggle("marked", !!id && g.dataset.id === id && id !== state.selected);
+    });
+    highlight(id);
+    renderDetails();
+  }
+
+  function highlight(id) {
+    shownEdges.forEach(function (p) {
       var on = id && (p.dataset.from === id || p.dataset.to === id);
       p.classList.toggle("hi", !!on);
       p.classList.toggle("dim", !!id && !on);
@@ -559,14 +746,49 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   }
 
   // ---------- details ----------
+  function linkList(title, ids) {
+    var box = html("div", "kv");
+    box.appendChild(html("dt", null, title + " (" + ids.length + ")"));
+    var dd = html("dd", "links");
+    ids.slice(0, 200).forEach(function (id) {
+      var target = byId[id];
+      var a = html("a", null, TYPE_LABEL[target.type] + ": " + target.label + (target.group ? " (" + target.group + ")" : ""));
+      a.addEventListener("click", function () { select(id); });
+      dd.appendChild(a);
+    });
+    if (!ids.length) dd.appendChild(html("span", "muted", "-"));
+    box.appendChild(dd);
+    return box;
+  }
+
   function renderDetails() {
     var body = $("detailsBody"); body.textContent = "";
-    var n = byId[state.selected];
+    var view = current();
+    if (view && view.kind === "overview" && !state.marked) {
+      var ov = buildOverview();
+      body.appendChild(html("h2", null, "System overview"));
+      body.appendChild(html("p", "muted", "Where the data comes from (sources), the model tables it " +
+        "lands in, and the report pages that use each table. Click an item for its details, " +
+        "double-click it to open its full lineage."));
+      var byLabel = function (a, b) { return byId[a].label.localeCompare(byId[b].label); };
+      body.appendChild(linkList("Tables that feed no report page", Object.keys(ov.unused).sort(byLabel)));
+      body.appendChild(linkList("Pages", ov.ids.filter(function (id) { return byId[id].type === "page"; })));
+      body.appendChild(linkList("Sources", ov.ids.filter(function (id) { return byId[id].type === "source"; }).sort(byLabel)));
+      return;
+    }
+    var n = byId[state.marked || state.selected];
     if (!n) { body.appendChild(html("p", "muted", "Nothing selected.")); return; }
     var badge = html("span", "badge", TYPE_LABEL[n.type]); badge.style.background = color(n.type);
     var title = html("h2"); title.appendChild(badge); title.appendChild(document.createTextNode(n.label));
     body.appendChild(title);
     if (n.group) body.appendChild(html("div", "muted", n.group));
+    if (n.id !== state.selected) {
+      var open = html("button", "btn primary", "Open its lineage");
+      open.style.marginTop = "10px";
+      open.title = "Same as double-clicking the item";
+      open.addEventListener("click", function () { select(n.id); });
+      body.appendChild(open);
+    }
     var dl = html("dl"); dl.style.marginTop = "12px";
     Object.keys(n.details).forEach(function (key) {
       var box = html("div", "kv");
@@ -578,25 +800,59 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     });
     body.appendChild(dl);
     [["Built from", up], ["Used by", down]].forEach(function (pair) {
-      var items = pair[1][n.id];
-      var box = html("div", "kv");
-      box.appendChild(html("dt", null, pair[0] + " (" + items.length + ")"));
-      var dd = html("dd", "links");
-      items.slice(0, 200).forEach(function (m) {
-        var target = byId[m.id]; if (!target) return;
-        var a = html("a", null, TYPE_LABEL[target.type] + ": " + target.label + (target.group ? " (" + target.group + ")" : ""));
-        a.addEventListener("click", function () { select(m.id); });
-        dd.appendChild(a);
-      });
-      if (!items.length) dd.appendChild(html("span", "muted", "-"));
-      box.appendChild(dd); body.appendChild(box);
+      var ids = pair[1][n.id].map(function (m) { return m.id; }).filter(function (id) { return byId[id]; });
+      body.appendChild(linkList(pair[0], ids));
     });
   }
 
-  function select(id) {
-    state.selected = id;
-    renderResults(); renderGraph(); renderDetails();
-    $("app").classList.add("show-details");
+  // ---------- views and history ----------
+  // A view is {kind: "overview"} or {kind: "item", id}; back/forward move through them
+  var views = [], at = -1;
+  function current() { return views[at]; }
+  function show(view) {
+    var cur = current();
+    if (!(cur && cur.kind === view.kind && cur.id === view.id)) {
+      views = views.slice(0, at + 1);
+      views.push(view);
+      at = views.length - 1;
+    }
+    render();
+  }
+  function render() {
+    var view = current();
+    state.selected = view && view.kind === "item" ? view.id : null;
+    state.marked = null;
+    renderResults(); renderGraph(); renderDetails(); updateButtons();
+    if (state.selected) $("app").classList.add("show-details");
+    // Keep the address in sync (#<item id>) so a view can be linked to, without adding history
+    try {
+      history.replaceState(null, "", state.selected ? "#" + encodeURIComponent(state.selected) : location.pathname + location.search);
+    } catch (e) { /* not allowed for this document: links to items just do not update */ }
+  }
+  function select(id) { show({ kind: "item", id: id }); }
+  function back() { if (at > 0) { at--; render(); } }
+  function forward() { if (at < views.length - 1) { at++; render(); } }
+
+  // One level up: column/measure -> its table, visual -> its page, anything else -> overview
+  function parentOf(view) {
+    if (!view || view.kind !== "item") return null;
+    var n = byId[view.id];
+    if ((n.type === "column" || n.type === "measure") && byId["table:" + n.group]) return { kind: "item", id: "table:" + n.group };
+    if (n.type === "visual" && byId["page:" + n.group]) return { kind: "item", id: "page:" + n.group };
+    return { kind: "overview" };
+  }
+  function levelUp() { var parent = parentOf(current()); if (parent) show(parent); }
+
+  function updateButtons() {
+    var view = current(), parent = parentOf(view);
+    $("back").disabled = at <= 0;
+    $("forward").disabled = at >= views.length - 1;
+    $("levelUp").disabled = !parent;
+    $("levelUp").title = !parent ? "Already at the overview" : parent.kind === "overview"
+      ? "Zoom out one level: the system overview"
+      : "Zoom out one level: " + TYPE_LABEL[byId[parent.id].type].toLowerCase() + " " + byId[parent.id].label;
+    $("overview").disabled = !!view && view.kind === "overview";
+    $("direction").disabled = !view || view.kind === "overview";
   }
 
   // ---------- pan & zoom ----------
@@ -623,6 +879,22 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     apply();
   }
   $("fit").addEventListener("click", function () { fit(true); });
+  function zoomBy(factor) {
+    var mx = svg.clientWidth / 2, my = svg.clientHeight / 2;
+    var s = Math.max(0.05, Math.min(4, state.scale * factor));
+    state.tx = mx - (mx - state.tx) * (s / state.scale); state.ty = my - (my - state.ty) * (s / state.scale);
+    state.scale = s; apply();
+  }
+  $("zoomIn").addEventListener("click", function () { zoomBy(1.25); });
+  $("zoomOut").addEventListener("click", function () { zoomBy(0.8); });
+  $("back").addEventListener("click", back);
+  $("forward").addEventListener("click", forward);
+  $("levelUp").addEventListener("click", levelUp);
+  $("overview").addEventListener("click", function () { show({ kind: "overview" }); });
+  $("panels").addEventListener("click", function () {
+    $("app").classList.toggle("wide");
+    requestAnimationFrame(function () { fit(); });
+  });
   svg.addEventListener("wheel", function (e) {
     e.preventDefault();
     var r = svg.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
@@ -630,18 +902,55 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     state.tx = mx - (mx - state.tx) * (s / state.scale); state.ty = my - (my - state.ty) * (s / state.scale);
     state.scale = s; apply();
   }, { passive: false });
-  var drag = null;
-  svg.addEventListener("mousedown", function (e) { drag = { x: e.clientX - state.tx, y: e.clientY - state.ty }; svg.classList.add("dragging"); });
-  window.addEventListener("mousemove", function (e) { if (!drag) return; state.tx = e.clientX - drag.x; state.ty = e.clientY - drag.y; apply(); });
+  var drag = null, dragged = false;
+  svg.addEventListener("mousedown", function (e) {
+    drag = { x: e.clientX - state.tx, y: e.clientY - state.ty, startX: e.clientX, startY: e.clientY };
+    dragged = false;
+    svg.classList.add("dragging");
+  });
+  window.addEventListener("mousemove", function (e) {
+    if (!drag) return;
+    if (Math.abs(e.clientX - drag.startX) + Math.abs(e.clientY - drag.startY) > 4) dragged = true;
+    state.tx = e.clientX - drag.x; state.ty = e.clientY - drag.y; apply();
+  });
+  // A click on empty space (not a drag) clears the marked item
+  svg.addEventListener("click", function () { if (!dragged && state.marked) mark(null); });
   window.addEventListener("mouseup", function () { drag = null; svg.classList.remove("dragging"); });
-  window.addEventListener("resize", function () { if (state.selected) fit(); });
-  window.addEventListener("keydown", function (e) { if (e.key === "Escape") $("app").classList.remove("show-details"); });
+  window.addEventListener("resize", function () { if (current()) fit(); });
+  window.addEventListener("keydown", function (e) {
+    if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); back(); return; }
+    if (e.altKey && e.key === "ArrowRight") { e.preventDefault(); forward(); return; }
+    if (e.key !== "Escape") return;
+    if ($("guide").classList.contains("open")) showGuide(false); else $("app").classList.remove("show-details");
+  });
 
-  // ---------- start: the page with the most visuals ----------
-  renderResults();
-  var startPage = DATA.nodes.filter(function (n) { return n.type === "page"; })
-    .sort(function (a, b) { return up[b.id].length - up[a.id].length; })[0];
-  if (startPage) select(startPage.id); else renderDetails();
+  // ---------- guide ----------
+  TYPES.forEach(function (t, i) {
+    if (i) $("guideFlow").appendChild(html("span", "muted", "→"));
+    var step = html("span", "step"), dot = html("span", "dot");
+    dot.style.background = color(t);
+    step.appendChild(dot); step.appendChild(document.createTextNode(TYPE_LABEL[t]));
+    $("guideFlow").appendChild(step);
+  });
+  function showGuide(open) {
+    $("guide").classList.toggle("open", open);
+    if (open) $("guideClose").focus();
+  }
+  $("help").addEventListener("click", function () { showGuide(true); });
+  $("guideClose").addEventListener("click", function () { showGuide(false); });
+  $("guide").addEventListener("click", function (e) { if (e.target === $("guide")) showGuide(false); });
+  // Open the guide automatically the first time (storage can be blocked, e.g. file:// in some browsers)
+  try {
+    if (!localStorage.getItem("pbixtractor.lineageGuideSeen")) {
+      showGuide(true);
+      localStorage.setItem("pbixtractor.lineageGuideSeen", "1");
+    }
+  } catch (e) { /* no storage: the Guide button still works */ }
+
+  // ---------- start: the system overview, then the linked item (#<item id>) if any ----------
+  var linked = decodeURIComponent(location.hash.slice(1));  // read before render() resets it
+  show({ kind: "overview" });
+  if (linked && byId[linked]) select(linked);
 })();
 </script>
 </body>
