@@ -326,3 +326,12 @@ def test_log_count_counts_messages_not_lines():
     logs = "WARNING: first\nWARNING: Tabular Editor failed:\n  details\n  more\nERROR: last\n"
     assert web_ui._log_count(logs) == 3
     assert web_ui._log_count("") == 0
+
+
+def test_bookmark_filter_text():
+    captured = {"captures": ["Data", "Display"], "filters": [{"text": "Sales: T[C] = 1"},
+                                                             {"text": "All pages: T[D] = 2 (changed)"}]}
+    assert web_ui._bookmark_filter_text(captured) == "Sales: T[C] = 1\nAll pages: T[D] = 2 (changed)"
+    assert web_ui._bookmark_filter_text({"captures": ["Display"], "filters": []}) == (
+        "(does not capture data)"
+    )

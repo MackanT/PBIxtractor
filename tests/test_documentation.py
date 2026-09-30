@@ -321,6 +321,88 @@ def test_bookmark_on_deleted_page_is_broken(model, report, caplog):
     assert not any(b.broken for b in documentation.bookmarks[1:])
 
 
+def _in_filter(table: str, column: str, *values: str, negate: bool = False) -> dict:
+    """A filter-pane entry: table[column] in values (or not in)."""
+    condition = {
+        "In": {
+            "Expressions": [
+                {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": column}}
+            ],
+            "Values": [[{"Literal": {"Value": v}}] for v in values],
+        }
+    }
+    if negate:
+        condition = {"Not": {"Expression": condition}}
+    return {
+        "filter": {
+            "Version": 2,
+            "From": [{"Name": "t", "Entity": table, "Type": 0}],
+            "Where": [{"Condition": condition}],
+        }
+    }
+
+
+def _slicer_objects(selection: dict) -> dict:
+    return {"general": [{"properties": {"filter": selection}}]}
+
+
+def test_bookmark_filter_and_slicer_state():
+    from pbixtractor.documentation import build_bookmarks
+    from pbixtractor.readers import PageDefinition, ReportDefinition, VisualDefinition, _bookmark
+
+    warehouse = _in_filter("Warehouses", "Code", "'D1'", negate=True)
+    report = ReportDefinition(
+        format="legacy",
+        pages=[
+            PageDefinition(
+                "S1",
+                "Sales",
+                visuals=[
+                    VisualDefinition(
+                        "slc1", "slicer", objects=_slicer_objects(_in_filter("Dates", "Year", "2023L"))
+                    )
+                ],
+                filters=[warehouse],
+            )
+        ],
+    )
+    state = {
+        "activeSection": "S1",
+        "filters": {"byExpr": [_in_filter("Dates", "Is Future", "false")]},
+        "sections": {
+            "S1": {
+                # the saved page filter again, and a pane card without a condition (left out)
+                "filters": {"byExpr": [warehouse, {"name": "f", "type": "Categorical"}]},
+                "visualContainers": {
+                    "slc1": {"singleVisual": {"objects": {"merge": _slicer_objects(
+                        _in_filter("Dates", "Year", "2024L"))}}},
+                    "gone1": {"filters": {"byExpr": [_in_filter("Sales", "Channel", "'Web'")]}},
+                },
+            }
+        },
+    }
+    report.bookmark_details = [
+        _bookmark({"name": "B1", "displayName": "Year 2024", "explorationState": state}),
+        _bookmark({"name": "B2", "displayName": "No data", "explorationState": state,
+                   "options": {"suppressData": True}}),
+        _bookmark({"name": "B3", "displayName": "Slicer only", "explorationState": state,
+                   "options": {"targetVisualNames": ["slc1"]}}),
+    ]
+    report_info = pd.DataFrame(columns=REPORT_COLUMNS)
+
+    b1, b2, b3 = build_bookmarks(report, report_info, {})
+    assert [f.text for f in b1.filters] == [
+        "All pages: Dates[Is Future] = False (changed)",  # the report has no such filter
+        "Sales: Warehouses[Code] <> D1",  # same as the page's saved filter
+        "slc1 on Sales, selection: Dates[Year] = 2024 (changed)",  # saved selection is 2023
+        "gone1 on Sales, visual filter: Sales[Channel] = Web (page/visual no longer exists)",
+    ]
+    assert [f.level for f in b1.filters] == ["All Pages", "This Page", "Slicer", "Visual"]
+    assert b2.filters == []  # "Data" not captured: its stored state is never applied
+    # "Selected visuals": only those visuals' state (plus report and page filters)
+    assert [f.level for f in b3.filters] == ["All Pages", "This Page", "Slicer"]
+
+
 def test_resolve_hierarchy_columns(model):
     report_info = pd.DataFrame(
         [
