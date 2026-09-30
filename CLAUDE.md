@@ -14,13 +14,14 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
 ## Stack
 - Python ≥3.11, packaged with `uv` (src-layout, setuptools backend), version in
   `pyproject.toml` **and** `src/pbixtractor/__init__.py` (keep in sync)
-- NiceGUI (>=2.24, 3.x installed) web UI on http://localhost:8081 (`web_ui.py`, default).
+- NiceGUI (>=3.0) web UI on http://localhost:8081 (`web_ui.py`, default).
   The DearPyGUI desktop UI (extractor.py, --ui/--test) was removed on 2026-09-29.
 - pandas, xlsxwriter (rich-text cells), networkx + matplotlib (relationship PNG)
-- jsonpath-ng (`jsonpath_ng.ext`) for layout JSON queries, pydantic for row models
-- Optional: Tabular Editor 2 CLI (Windows-only), called via `subprocess`:
-  - Tabular Editor analysis (default on; `--no-tabular-editor`): Best Practice Analyzer (`-A`), exact DAX
-    dependencies (`-S` script using `DependsOn`) and live statistics — all local/offline.
+- pydantic for row models (the jsonpath-ng dependency was removed 2026-09-30: nothing used it)
+- Optional: Tabular Editor 2 CLI (Windows-only, ≥2.29), called via `subprocess`:
+  - Tabular Editor analysis (default on; `--no-tabular-editor`): Best Practice Analyzer (a `-S`
+    script calling the Analyzer, not `-A`), exact DAX dependencies (`-S` script using
+    `DependsOn`) and live statistics — all local/offline.
   - TSV export (default off; `--tabular-editor-tsv`): old `documentation.tsv` export; runs FormatDax, which
     sends DAX to daxformatter.com.
 - sqlglot (native SQL in partitions), azure-identity (Fabric / DevOps sign-in)
@@ -34,6 +35,8 @@ uv run --frozen pbixtractor             # web UI (NiceGUI) on :8081, opens the b
 uv run --frozen pbixtractor web --port 8090 --no-browser
 uv run --frozen pbixtractor extract "C:\...\Sales.pbix" [--model X.bim] [-o out] [--no-tabular-editor]
 uv run --frozen --extra dev pytest -q   # tests (`--with pytest` does NOT work here: å in path)
+.venv\Scripts\python.exe -m pytest -q -m "not tabular_editor"   # without the slow real-TE tests
+# Plain `uv sync` removes pytest/ruff from the venv: always `uv sync --extra dev`
 
 # Optional smoke test against a real report kept outside the repo (never commit client data)
 $env:PBIXTRACTOR_SAMPLE_PBIX = "C:\...\Reports V1\Invoices.pbix"
@@ -43,8 +46,8 @@ folder says otherwise. The model is auto-found next to the report (`find_model_f
 `<name>.bim`, then the PBIP model folder from `<name>.Report/definition.pbir`
 (`datasetReference.byPath`), `<name>.SemanticModel`, `<name>.Dataset` - each as model.bim or
 TMDL `definition/`); `extract` exits 2
-when there is none. By default the model is read
-from the `.bim` on every run; a `documentation.tsv` is only used with `USE_TABULAR_EDITOR`.
+when there is none. The model is read from the `.bim` / TMDL on every run; a
+`documentation.tsv` is only used with `--tabular-editor-tsv` (ExtractionOptions.tabular_editor_tsv).
 Real test reports (local only, never commit; the paths below are on the owner's first PC - on
 another machine, list its reports in `Input/regression.json`, see "Refactoring safety net"):
 - `…/_Arbete/Rowico/…/Reports V1/` (client data): `Invoices.pbix` + `Invoices.bim` (legacy
@@ -72,12 +75,17 @@ done on request.
 src/pbixtractor/
   cli.py            argparse: no command → web UI; `web [--port] [--no-browser]`;
                     `devops list ORG [PROJECT [REPO]] [--history PATH]`, `devops fetch URL
-                    [--version branch|tag:x|commit:x] [-o]`;
-                    `extract [report | --fabric WS/REPORT | --devops URL [--version]] [--tenant] [--model] [-o] [--name]
-                    [--no-tabular-editor] [--tabular-editor-tsv] [--description-tag]
-                    [--no-log-file] [-q]` (exit 0 ok/warnings, 1 error, 2 no model/bad args);
-                    `fabric list [WS]`, `fabric fetch WS/REPORT [-o]` (default download folder
-                    output/_fabric/<ws>; with extract -o: <o>/source).
+                    [--ref branch|tag:x|commit:x] [-o]`;
+                    `extract [report | --fabric WS/REPORT | --devops URL [--ref]] [--tenant] [--model] [-o] [--name]
+                    [--all-reports] [--all-workspaces] [--also REPORT] [--catalog FOLDER]
+                    [--no-service-statistics] [--no-tabular-editor] [--tabular-editor-tsv]
+                    [--description-tag] [--no-log-file] [-q]` (exit 0 ok/warnings, 1 error,
+                    2 no model/bad args); `fabric list [WS]`, `fabric fetch WS/REPORT [-o]`
+                    (default download folder output/_fabric/<ws>; with extract -o: <o>/source);
+                    `catalog list|remove|rebuild FOLDER [KEY]`. `--ref` was `--version` (still
+                    accepted); top-level `pbixtractor --version` prints the program version.
+                    Fetch errors (ApiError/ValueError/OSError) → "ERROR: ..." + exit 1; anything
+                    else keeps its traceback on purpose (a bug).
   pipeline.py       The orchestration, no globals: run_extraction(ExtractionOptions,
                     progress(step, fraction), on_log(level, msg)) → ExtractionResult(status
                     success|warnings|error, message, files {workbook, data_workbook, json,
@@ -85,11 +93,13 @@ src/pbixtractor/
                     Steps: model → TE analysis (BPA, deps, live stats) → dataset →
                     ReportExtractor → build_documentation → graph → workbooks → JSON + lineage.
                     One run at a time (_RUN_LOCK: shared logger/TE/Excel); any captured log
-                    record → "warnings" (+ logs/log_data_*.txt). report_name(),
-                    find_model_for_report().
-  report_extractor.py CONFIG = config.load_config() (sys.exit on failure) → visual_mapper,
-                    visual_type_list, known_functions; ReportExtractor (readers.read_report →
-                    ReportContext + PageExtractor).
+                    record → "warnings" (+ logs/log_data_<date>_<time>.txt, never overwritten).
+                    ReportReadError (encrypted/unreadable report) → error without traceback.
+                    report_name(), find_model_for_report(), model_name().
+  report_extractor.py CONFIG = config.load_config() (RuntimeError on failure; importing never
+                    exits the process) → visual_mapper, visual_type_list, known_functions;
+                    ReportExtractor (readers.read_report → ReportContext + PageExtractor);
+                    extract_reports(paths) for model mode.
   web_ui.py         NiceGUI app: index() root page (report/model/output inputs, server-side
                     PathPicker dialog, options, TE/Desktop status) → run_extraction in
                     run.io_bound; progress/log via a queue drained by ui.timer. Results:
@@ -102,6 +112,18 @@ src/pbixtractor/
                     never expose a dropped file's path). start() opens a browser tab only if no
                     tab connects within BROWSER_GRACE_SECONDS (7 s): after a restart the old
                     tab reconnects and reloads by itself, so no duplicate tabs.
+                    Security (it is a local server, but browsers can reach it): add_host_check()
+                    middleware answers 421 unless Host is 127.0.0.1/localhost/::1 (DNS
+                    rebinding); /files and /catalog pages get CSP `sandbox allow-scripts
+                    allow-popups allow-downloads` (opaque origin: generated pages cannot call
+                    the app); /catalog serves only catalog.html, catalog.json and
+                    models/<key>/<file> (checked on the resolved path); logs render as escaped
+                    text (_log_text), uploads capped at MAX_UPLOAD_BYTES (2 GB).
+                    One download + run at a time across tabs (_JOB_LOCK; a second tab shows
+                    "Waiting for a run in another tab"). Power BI Desktop detection runs in
+                    run.io_bound (psutil takes seconds), debounced 0.5 s while typing a path.
+                    Catalog option (switch + folder, default output/_catalog, remembered via
+                    stored_choices()); header link "Catalog" → /catalog/.
   config.py         load_config() → Config(visual_mapper, supported_visual_types (derived:
                     standard_visuals + special_visuals), data_types, extract_types,
                     function_names). extract_type(visual_type): standard | button | skip.
@@ -132,7 +154,10 @@ src/pbixtractor/
                     when no exact deps), highlight_dax() → rich-text segments.
   excel_report.py   create_formats(), write_main_workbook(), write_data_workbook(); shared
                     helpers per sheet type (_write_relations, _write_objects, _write_page_sheet,
-                    _write_pages_sheet, _write_dependencies_sheet).
+                    _write_pages_sheet, _write_dependencies_sheet). _Workbook/_Worksheet: text
+                    over Excel's 32,767-character cell limit ends in TRUNCATED_MARKER and logs a
+                    warning (xlsxwriter cuts plain text silently and drops a too-long rich
+                    string altogether). WORKBOOK_OPTIONS: no strings_to_formulas/_urls.
   relationship_graph.py save_relationship_graph() → PNG (networkx spring layout).
   m_sources.py      m_sources(M, queries, name) → (connector, source objects): Schema/Item,
                     Name (single-db connectors), Lakehouse Id/ItemKind, native SQL
@@ -144,8 +169,12 @@ src/pbixtractor/
   azure_auth.py     Shared sign-in + REST: get_credential(tenant) (one per process; AzureCli
                     if `az` exists, else InteractiveBrowserCredential with DPAPI cache + account
                     record ~/.pbixtractor/auth_record.json; one login serves Fabric and DevOps),
-                    RestClient(api, scope, credential | pat) .request(method, url, body, raw)
-                    with 429 retries, ApiError, FABRIC_SCOPE / DEVOPS_SCOPE.
+                    RestClient(api, scope, credential | pat) .request(method, url, body, raw):
+                    https only (except localhost), retries 429/5xx/network errors (MAX_ATTEMPTS
+                    5, Retry-After seconds or date, max 120 s), no Authorization header on a
+                    redirect to another host, a 203/HTML answer = "sign-in page" error.
+                    error_text() reads Fabric and Power BI error bodies. ApiError, FABRIC_SCOPE /
+                    POWERBI_SCOPE / DEVOPS_SCOPE; default_credential() lives here.
   devops.py         Azure DevOps git: DevOpsClient(org) (PAT from AZURE_DEVOPS_PAT if set):
                     projects, repositories (defaultBranch), branches, files, find_reports
                     (*.Report/definition.pbir), commits(path) for the version picker,
@@ -153,17 +182,26 @@ src/pbixtractor/
                     .Report folder + the model folder its pbir byPath points to, keeping repo
                     paths under output/_devops/<project>/<repo>/<version>; byConnection reports
                     → error pointing to Fabric. parse_devops_url() takes browser URLs
-                    (?path=...&version=GB|GT|GC...). Works for encrypted-label reports (git
-                    holds plain PBIP).
+                    (?path=...&version=GB|GT|GC...; also the short /org/_git/Repo form). Works
+                    for encrypted-label reports (git holds plain PBIP). Safety: only
+                    dev.azure.com / *.visualstudio.com over https (more hosts:
+                    PBIXTRACTOR_DEVOPS_HOSTS=a,b); repo paths via safe_repo_path() and
+                    _resolve_repo_path() (no "..", ":" or "\"; a pbir byPath may not leave the
+                    repo); zips checked for containment and MAX_ARCHIVE_BYTES (2 GB unpacked);
+                    a non-zip answer (usually a sign-in page) → ApiError.
   service_stats.py  Statistics for a model in the Power BI service via FabricClient.execute_query
                     (Power BI executeQueries, POWERBI_SCOPE). That API accepts plain DAX ONLY -
                     INFO functions and DMVs are rejected (HTTP 400, Microsoft docs; confirmed on
                     the owner's tenant) - so: row counts (one COUNTROWS UNION query, DirectQuery
                     tables and calc groups skipped) + distinct values (COLUMNSTATISTICS()). No
                     sizes / measure types (LiveStatistics.has_sizes False → writers leave size
-                    columns empty); those need the XMLA endpoint (not built) or Desktop. Pipeline
-                    uses it when options.service_model is set or <report>.fabric_source.json lies
-                    next to the report; Desktop stats with sizes win over it.
+                    columns empty); those would need the XMLA endpoint, which is NOT planned (a
+                    report may live in a Pro workspace). Pipeline uses it when
+                    options.service_model is set or <report>.fabric_source.json lies next to the
+                    report; it then replaces Desktop statistics (a downloaded report only matches
+                    a Desktop model by name, possibly another copy). DirectQuery tables are
+                    found with SemanticModel.partition_mode() (partition "default" → the
+                    model's defaultMode).
   Model mode        ExtractionOptions.extra_reports: report_extractor.extract_reports() prefixes
                     page/bookmark display names "<report> › " (before extraction, so button
                     targets match) and page/bookmark ids "<n>:" (after), merges into one
@@ -182,7 +220,11 @@ src/pbixtractor/
                     catalog.html (search names/DAX, filters, details, "Loaded by" across models).
                     Key from origin (source_identity): fabric-<model id> | devops-<proj>-<repo>-
                     <hash> | file-<name>-<hash>; same model again replaces the entry (latest only).
-                    CLI `catalog list|remove|rebuild FOLDER`. Web UI serves it at /catalog/.
+                    CLI `catalog list|remove|rebuild FOLDER`. Web UI serves it at /catalog/
+                    (default folder output/_catalog). All writes/removals go through _inside()
+                    (a crafted key cannot leave the catalog folder); the page only links
+                    models/... (safeLink) and embeds JSON with "<" as <. Reports that
+                    could not be downloaded are listed per entry ("not_included").
                     Known gap: source names are not database-qualified (Name navigation gives
                     "vw_x", Schema/Item "dbo.vw_x") - cross-model source matching needs server/db
                     (with 6b).
@@ -196,9 +238,9 @@ src/pbixtractor/
                     polling), fetch_report() → <report>.Report + <model>.SemanticModel (TMDL)
                     + fabric_source.json; definition.pbir rewritten to byPath. Model found via
                     semanticmodelid in the pbir connection string (other workspace by name).
-                    default_credential(): AzureCliCredential if `az` exists, else
-                    InteractiveBrowserCredential with DPAPI token cache + account record in
-                    ~/.pbixtractor/. getDefinition needs Contributor (read+write) on the item.
+                    Sign-in via azure_auth.get_credential(). getDefinition needs Contributor
+                    (read+write) on the item. reports_on_model(not_searched=...) records
+                    workspaces it could not search (→ FetchedReport.skipped).
   semantic_model.py model_source(path) → the .bim file or TMDL definition folder (accepts
                     .SemanticModel folders and model.tmdl too; the pipeline passes it to
                     Tabular Editor, which loads both). read_model(path) → SemanticModel
@@ -256,9 +298,12 @@ src/pbixtractor/
                     list), visual_type_metadata (standard_visuals, special_visuals,
                     button_types), extract_types (visual type → standard/button/skip).
   constants.py      DEFAULT_COLORS (DAX highlight colours), DESCRIPT_TAG, REPORT_COLUMNS.
-  logger.py         setup_logger(capture=True) → LogCapture buffer; capture_logs(callback)
-                    context manager (per run, used by the pipeline) + CallbackHandler.
-  utils/__init__.py write_to_excel (rich strings), is_excel_open_with_file (psutil), etc.
+  logger.py         setup_logger()/get_logger() (console handler); capture_logs(callback)
+                    context manager (per run, used by the pipeline) + CallbackHandler; captures
+                    only the calling thread's records (parallel tabs keep their logs apart).
+  utils/__init__.py write_to_excel (rich strings), is_excel_open_with_file (tries to open the
+                    file for writing), excel_sheet_name, safe_name (file names from service
+                    names; also avoids CON/NUL/...; fabric.safe_name = devops.safe_name = it).
 ```
 
 ### Data flow
@@ -338,17 +383,17 @@ src/pbixtractor/
 - Text-matching dependency fallback order is set-based (not stable across runs). The data
   workbook's "dependencies" sheet headers (MeasureName, Dependent, ...) are unchanged on purpose
   (possible downstream consumers).
-- Windows-only: backslash path joins, PowerShell launch of TE2, Excel-open check.
-- Editing tip: shell heredocs/sed mangle backslash escapes (\t, \n) in Python/C# code —
-  write patch scripts with the file tool instead. Files may have CRLF endings (autocrlf).
+- Windows-only: Tabular Editor 2 and Power BI Desktop detection (the rest is portable).
+- Editing tip: shell heredocs/sed mangle backslash escapes (\t, \n, \x00) in Python/C# code —
+  write patch scripts with the file tool instead. Line endings: .gitattributes `text=auto`
+  (LF in the repo, CRLF in the Windows checkout).
 
 ## Direction (agreed with owner, 2026-09-29)
 - Must support **both** report formats: classic `.pbix` (`Report/Layout`) and PBIP/PBIR
   (`definition/pages/*/visuals/*/visual.json`), plus PBIR-Legacy `report.json`.
   Both readers produce the same typed report model.
 - Must be able to read reports/models **remotely** (Fabric workspace / Azure DevOps git),
-  e.g. via Semantic Link (`semantic-link` / `semantic-link-labs`) or the Fabric REST
-  `getDefinition` API, not only from local files.
+  via the Fabric REST `getDefinition` API and the DevOps git API (built), not only local files.
 - Source databases are mostly **Azure SQL DB / Fabric (Warehouse, Lakehouse SQL endpoint)**
   → prefer Entra-token auth (`azure-identity`) + `mssql-python`/`pyodbc`; Postgres is secondary.
 - Committed tests use one hand-built, anonymised sample report written in three formats
@@ -366,73 +411,39 @@ src/pbixtractor/
   NiceGUI web UI with the viewer embedded (done 2026-09-29; DearPyGUI removed) →
   1b DevOps/Fabric readers → 6 SQL/Fabric source lineage (sqlglot).
 
-## Next steps (handoff 2026-09-30)
-Work moves to the owner's second PC, which has access to Fabric/DevOps and the source databases.
-Everything local-file based is done (both report formats, .bim + TMDL, web UI, CLI). Open:
+## Status and open items (2026-09-30)
+Done: both report formats, .bim + TMDL, CLI + web UI, 1b Fabric + Azure DevOps fetch (UI pickers
+and CLI; Fabric download verified on Navigator), model mode (all reports on one model), service
+statistics (plain DAX after the tenant rejected INFO functions with HTTP 400; the plain-DAX
+version is tested with fakes only, not yet re-run on the tenant), catalog
+step 1, 6a (native SQL via sqlglot; Name-navigation / query-reference / entered data verified on
+Navigator/Hallbarhet/Rowico). A full audit (security, extraction correctness, remote/pipeline/UI,
+hygiene) was fixed on 2026-09-30; see git history for details.
 
-**Status 2026-09-30 (second PC, uncommitted):** 1b Fabric + Azure DevOps fetch built
-(fabric.py, devops.py, azure_auth.py, CLI `fabric`/`devops`/`extract --fabric|--devops`, web UI
-source toggle Local file / Fabric / Azure DevOps via web_sources.py). Tested against fake APIs,
-a local HTTP server and NiceGUI user simulation; NOT yet run against a real tenant/org (no `az`
-here; first call opens a browser login). Fabric getDefinition is blocked for reports with an
-encrypting sensitivity label (Microsoft docs) - DevOps (git) is the route for those.
-Fabric download verified by the owner on Navigator (2026-09-30). Service statistics and model
-mode are built and tested with fakes, not yet on the real tenant. Tests: tests/conftest.py
-blocks real sign-in (azure_auth.get_credential raises) - pass fake clients/credentials. 6a done (m_sources.py); no
-local model has native SQL, so that part is covered by unit tests only; the Name-navigation,
-query-reference and entered-data parts were verified on the Navigator/Hallbarhet/Rowico models.
-6b (database connection) not started. Also: broken bookmarks (recorded on a deleted page),
-Log (N) tab count, lineage viewer guide overlay, Purview-encrypted .pbix error,
-listSlicer/textSlicer/pageNavigator in data.yaml.
+Open, by owner priority:
+- Bookmark captured filter/slicer state (middle).
+- 6b database lineage (lower): connect to Azure SQL / Fabric Warehouse / Lakehouse SQL endpoint
+  with an Entra token (`azure-identity` + `mssql-python` or `pyodbc` + ODBC Driver 18), read
+  `sys.sql_modules` / `sys.sql_expression_dependencies`, parse with `sqlglot.lineage` → view →
+  base table/column edges + a "sources" sheet. Read-only account with VIEW DEFINITION suffices.
+  Source names are not database-qualified yet (needed for cross-model matching).
+- Catalog step 2: document a whole workspace (not prio 1); cross-model impact after 6b.
+- Excel → lineage viewer links (low). Web UI polish (run history, model tab, JSON search).
+- Not planned: XMLA sizes for service models (reports may live in Pro workspaces).
 
-**1b Remote reports/models (Fabric workspace, Azure DevOps).** Design: a fetch step that
-materialises a PBIP layout in a temp/output folder (`<name>.Report/` + `<name>.SemanticModel/`)
-and then runs the unchanged local pipeline on it - readers.py/tmdl.py already read that layout.
-- Azure DevOps: PBIP projects in a git repo already work after `git clone` (point the tool at
-  the .pbip / .Report folder). Optional: fetch items via the DevOps REST API instead of cloning.
-- Fabric: REST `POST /v1/workspaces/{ws}/reports/{id}/getDefinition` and
-  `.../semanticModels/{id}/getDefinition` (`?format=TMSL` for a .bim, default TMDL); long-running
-  (202 → poll the operation, then fetch the result); response = definition parts (path +
-  base64 payload) → write them to disk. Auth: `azure-identity` (InteractiveBrowserCredential or
-  AzureCliCredential), scope `https://api.fabric.microsoft.com/.default`. Check the required
-  item permissions in the Fabric docs (getDefinition has needed write access to the item).
-  Semantic Link (`sempy` / `semantic-link-labs`) is mainly for Fabric notebooks; a local tool
-  should use REST. Also list workspaces/reports so the web UI can offer a picker.
-- CLI/web UI: e.g. `pbixtractor extract --fabric <workspace>/<report>`; tokens never stored in
-  the repo.
+Tests: tests/conftest.py blocks real sign-in (get_credential raises, AZURE_DEVOPS_PAT removed),
+allows only local sockets, and points NiceGUI storage at a temp folder - pass fake
+clients/credentials. Web UI tests poll (`_wait_for`) instead of fixed sleeps.
 
-**6 SQL/Fabric source lineage.** Today `Partition.source_summary()` already gives connector +
-source objects (M `Sql.Database` navigation, Direct Lake `schemaName.entityName`), shown as
-source nodes in the lineage graph.
-- 6a (offline, no database needed): parse native SQL in partitions (`Value.NativeQuery`,
-  `Sql.Database(..., [Query=...])`) with `sqlglot` (dialect `tsql`) → source tables/columns.
-- 6b (needs the database): connect to Azure SQL / Fabric Warehouse / Lakehouse SQL endpoint with
-  an Entra token (`azure-identity` + `mssql-python` or `pyodbc` + ODBC Driver 18), read view
-  definitions (`sys.sql_modules`, `sys.sql_expression_dependencies`), parse with
-  `sqlglot.lineage` → view → base table/column edges in the lineage graph + a "sources" sheet.
-  Read-only account with VIEW DEFINITION is enough. (psycopg was dropped 2026-09-30; add a
-  Postgres driver back only if Postgres sources appear.)
-
-**Checklist for the new PC:** clone `ft_v2`; `uv sync --extra dev`; Tabular Editor 2 (optional,
-found in Program Files or set in the web UI); create `Input/regression.json` with that PC's test
-reports and run `tools/regress.py --save-baseline` before the first change; for 1b/6: Fabric
-workspace access, a DevOps repo with a PBIP project, SQL endpoint + database, ODBC Driver 18.
-
-**Second PC status (2026-09-30):** cloned to `C:\Users\MarcusToftås\Documents\PBIxtractor`, synced,
-`Input/regression.json` = Invoices (legacy .pbix + .bim) and Hallbarhet (PBIP: PBIR + TMDL,
-`Projects\Frontend\gold_workspaces\hallbarhet_rapportering_gold\Hallbarhet_New.Report`); baseline saved.
+This PC (`C:\Users\MarcusToftås\Documents\PBIxtractor`): `Input/regression.json` = Invoices
+(legacy .pbix + .bim) and Hallbarhet (PBIP: PBIR + TMDL,
+`Projects\Frontend\gold_workspaces\hallbarhet_rapportering_gold\Hallbarhet_New.Report`).
 - `uv` is not on PATH in PowerShell: use `~\.local\bin\uv.exe`. `uv sync` error 396 = the uv cache
   holds cloud placeholders → `uv cache clean <packages from uv.lock>`, then sync again.
-- Tabular Editor must be ≥2.29: 2.21 failed the BPA script (CS1545 on `AnalyzerResult`
-  properties) and TMDL loading (`source`, `ref cultureInfo`). Upgraded to 2.29 on 2026-09-30;
-  all tests pass and the baseline was re-saved with TE analysis.
+- Tabular Editor must be ≥2.29 (2.21 failed the BPA script and TMDL loading).
 - Many client .pbix files here are **Purview-encrypted** (start with `.pfile`, e.g. Castellum
-  Navigator) → "File is not a zip file"; they cannot be read. A clear error message is an open item.
-
-Smaller open items (no remote access needed): Excel → lineage viewer hyperlink; web UI polish
-(remember last paths, run history, model tab, JSON search); list the filter/slicer state that
-bookmarks capture. (The old plan docs describing removed code were deleted 2026-09-30; they
-remain in git history. docs/ADD_VISUAL_TYPES.md is still current.)
+  Navigator): they cannot be read; the run fails with a clear ReportReadError (no traceback).
+  Use Fabric or DevOps for those.
 
 ## Checking the HTML viewer
 No Node.js here, but headless Edge works (run from PowerShell; bash paths fail):
@@ -468,5 +479,5 @@ pipeline and CLI on the anonymised sample data.
 
 ## Branches
 - `main`: legacy single-file `PB-Ixtractor.py` (has working button/bookmark logic).
-- `ft_v2` (current): src-layout refactor, YAML config, JSONPath extractors.
+- `ft_v2` (current): src-layout refactor, YAML config, typed readers/extractors.
 - Remote: https://github.com/MackanT/PBIxtractor

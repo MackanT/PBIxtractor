@@ -2,7 +2,9 @@
 
 **Power BI Report Documentation Generator**
 
-PBIxtractor extracts metadata and documentation from Power BI (.pbix) files, generating comprehensive Excel reports with:
+PBIxtractor documents Power BI reports (.pbix, PBIP/PBIR) and their semantic models (.bim, TMDL) -
+from local files, a Fabric workspace or an Azure DevOps repository - as Excel workbooks, JSON and an
+offline HTML lineage viewer, with:
 - Color-coded DAX formulas (syntax highlighting)
 - Relationship diagrams
 - Visual inventory per page
@@ -25,14 +27,12 @@ PBIxtractor extracts metadata and documentation from Power BI (.pbix) files, gen
 
 ```powershell
 # Clone the repository
-git clone https://github.com/yourusername/pbixtractor.git
-cd pbixtractor/PBIxtractor
+git clone https://github.com/MackanT/PBIxtractor.git
+cd PBIxtractor
 
-# Install in editable mode with uv
-uv pip install -e .
-
-# Or install with dev dependencies
-uv pip install -e ".[dev]"
+# Create the environment (with the test/lint tools)
+uv sync --extra dev
+uv run --frozen pbixtractor
 ```
 
 ### Using pip
@@ -53,7 +53,8 @@ pbixtractor
 pbixtractor web --port 8090 --no-browser
 ```
 
-Pick a report (`.pbix`, `.pbip` or a `.Report` folder). The model is found automatically:
+Pick a report (`.pbix`, `.pbip` or a `.Report` folder; drag & drop works too), or choose one
+from a Fabric workspace or an Azure DevOps repository. The model is found automatically:
 `<name>.bim` next to the report, or a PBIP project's semantic model as `model.bim` or TMDL
 (the `definition` folder newer Power BI Desktop versions write). After a run the
 page shows the lineage viewer inline, the Best Practice Analyzer findings, unused objects,
@@ -66,7 +67,21 @@ pbixtractor extract C:\Reports\Sales.pbix                  # model: Sales.bim ne
 pbixtractor extract Sales.pbix --model Model.bim -o out\Sales --no-tabular-editor
 pbixtractor extract Sales.pbip                              # PBIP: model.bim or TMDL
 pbixtractor extract --help
+
+# From the Power BI service / Azure DevOps (sign-in opens a browser, or uses `az login`)
+pbixtractor fabric list                                     # your workspaces
+pbixtractor extract --fabric "Sales WS/Sales"              # download + document
+pbixtractor extract --fabric "Sales WS/Sales" --all-reports  # every report on its model
+pbixtractor extract --devops "https://dev.azure.com/org/Proj/_git/Repo?path=/Sales.Report"
+pbixtractor devops fetch "<url>" --ref commit:a1b2c3d       # only download an older version
+
+# Catalog: one searchable page over every documented model
+pbixtractor extract Sales.pbix --catalog output\_catalog
+pbixtractor catalog list output\_catalog
 ```
+
+Reports with an encrypting sensitivity label cannot be downloaded from Fabric (and encrypted
+.pbix files cannot be read); use the PBIP project in Azure DevOps for those.
 
 Output (default `output\<report name>\`): `<name>.xlsx`, `<name>_data.xlsx`, `<name>.json`,
 `<name>_lineage.html` (offline lineage viewer) and `<name>_Relationships.png`.
@@ -100,11 +115,13 @@ pbixtractor/
 ├── src/
 │   └── pbixtractor/          # Main package
 │       ├── __init__.py       # Package initialization
-│       ├── cli.py            # Command line (extract, web)
+│       ├── cli.py            # Command line (extract, web, fabric, devops, catalog)
 │       ├── web_ui.py         # Web UI (NiceGUI)
 │       ├── pipeline.py       # run_extraction(): the whole documentation run
 │       ├── readers.py        # .pbix / PBIR / PBIP report readers
 │       ├── semantic_model.py # model reader (.bim)
+│       ├── fabric.py / devops.py # download from Fabric / Azure DevOps
+│       ├── catalog.py        # catalog over many models
 │       ├── tmdl.py           # TMDL model folders (newer PBIP projects)
 │       └── data/             # data.yaml (visual types, DAX functions), BPA rules
 ├── tests/                    # Test suite
@@ -124,24 +141,17 @@ syntax highlighting. See `docs/ADD_VISUAL_TYPES.md`.
 ### Running Tests
 
 ```powershell
-# Install dev dependencies
-uv pip install -e ".[dev]"
-
-# Run tests
-pytest tests/ -v
-
-# With coverage
-pytest tests/ --cov=pbixtractor --cov-report=html
+uv sync --extra dev
+uv run --frozen pytest -q
+uv run --frozen pytest -q -m "not tabular_editor"   # skip the tests that run Tabular Editor 2
+uv run --frozen pytest --cov=pbixtractor --cov-report=html
 ```
 
 ### Code Formatting
 
 ```powershell
-# Format with black
-black src/ tests/
-
-# Lint with ruff
-ruff check src/ tests/
+uv run --frozen black src/ tests/
+uv run --frozen ruff check src/ tests/
 ```
 
 ## Roadmap
@@ -150,18 +160,20 @@ ruff check src/ tests/
 - ✅ Legacy `.pbix` layout and PBIR / PBIP reports; `.bim` and TMDL models
 - ✅ JSON output and an interactive HTML lineage viewer; web UI and CLI
 - ✅ Source tables from M queries and native SQL
-- 🔄 Reading reports from Fabric workspaces and Azure DevOps repositories
+- ✅ Reading reports from Fabric workspaces and Azure DevOps repositories (web UI + CLI)
+- ✅ All reports on one semantic model documented together; row counts from the Power BI service
+- ✅ Catalog: search measures, DAX and usage across models
 - 🔄 Bookmark filter/slicer state
 - 🔄 Source database lineage (views → base tables)
+- 🔄 Documenting a whole workspace into the catalog
 
 ## Known Issues
 
-See [docs/RESTRUCTURE_PLAN.md](docs/RESTRUCTURE_PLAN.md) for migration notes.
-
-From the original ReadMe.txt:
-- Buttons/bookmarks: Not always connected correctly
-- Hierarchies: Sometimes missed
-- Non-visual elements (shapes, images): Inconsistently documented
+- Bookmarks: the filter/slicer state a bookmark captures is not listed yet.
+- Tooltip/drillthrough page detection is not yet tested on real reports.
+- Without Tabular Editor 2, DAX dependencies come from text matching (can miss unqualified
+  references and match text in comments).
+- Tabular Editor 2 and Power BI Desktop detection are Windows-only.
 
 ## License
 
@@ -184,4 +196,4 @@ For issues and questions, please use the [GitHub Issues](https://github.com/Mack
 
 Created by Marcus Toftås
 
-Built with: pandas, xlsxwriter, matplotlib, networkx, NiceGUI
+Built with: pandas, xlsxwriter, matplotlib, networkx, NiceGUI, sqlglot, azure-identity

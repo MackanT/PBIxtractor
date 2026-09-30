@@ -1,7 +1,11 @@
-# Adding New Visual Types to PBI-Ixtractor
+# Adding New Visual Types to PBIxtractor
 
 ## Overview
-Visual type configuration is now fully modular and managed through the `data.yaml` file. No Python code changes are needed to add new visual types.
+Visual type configuration lives in `data.yaml`. No Python code changes are needed to add new visual types.
+
+Custom visuals from AppSource (types like `PowerApps_PBI_CV_<guid>` or `<name><13 digits>`) need no
+configuration: they are recognised automatically, shown as "<Name> (custom visual)" and their
+fields are read generically with the roles their author defined.
 
 ## YAML Configuration Structure
 
@@ -28,7 +32,7 @@ visual_type_metadata:
     - pieChart
     # ... add more here ...
   
-  # Button types (legacy)
+  # Button types (item type "Button", display name as is)
   button_types:
     - Bookmark
     - PageNavigation
@@ -127,14 +131,14 @@ special_visuals:
 After modifying `data.yaml`, run the extraction:
 
 ```powershell
-uv run pbixtractor extract "C:\Reports\MyReport.pbix"
+uv run --frozen pbixtractor extract "C:\Reports\MyReport.pbix"
 ```
 
 If you see a warning like:
 ```
-Unknown visual type: visualTypeName on <page>. Extracting fields generically - add it to data.yaml.
-New Visual type not yet supported: visualTypeName
+Unknown visual type: visualTypeName (first on <page>). Extracting fields generically - add it to data.yaml.
 ```
+(logged once per visual type and run)
 
 the visual's fields were still documented, but it has no display name yet: add it to
 `standard_visuals` or `special_visuals` (and to `extract_types` if it is not a normal
@@ -152,6 +156,7 @@ The display names are handled by the `VisualTypeMapper` class in `src/pbixtracto
 1. Loads configuration from `data.yaml`
 2. Checks `special_visuals` for custom mappings
 3. Falls back to auto-generated names for `standard_visuals`
-4. Returns `(item_type, display_name)` tuple for each visual type
+4. Recognises custom visuals (`custom_visual_name()`)
+5. Returns `(item_type, display_name)` tuple for each visual type
 
 This modular approach means **no Python code changes** are needed when Power BI introduces new visual types - just update the YAML configuration.
