@@ -169,8 +169,11 @@ class _ZipFiles:
 
     def __init__(self, path: Path):
         self._path = path
-        with zipfile.ZipFile(path, "r") as zip_file:
-            self._names = zip_file.namelist()
+        try:
+            with zipfile.ZipFile(path, "r") as zip_file:
+                self._names = zip_file.namelist()
+        except zipfile.BadZipFile as exc:
+            raise ValueError(_not_a_zip_message(path)) from exc
 
     def names(self) -> list[str]:
         return list(self._names)
@@ -179,6 +182,20 @@ class _ZipFiles:
         # Read on demand: the zip also holds the (large) DataModel, which we never load
         with zipfile.ZipFile(self._path, "r") as zip_file:
             return zip_file.read(name)
+
+
+def _not_a_zip_message(path: Path) -> str:
+    """Explain why a .pbix cannot be opened as a zip file."""
+    with open(path, "rb") as file:
+        header = file.read(16)
+    if b".pfile" in header:
+        # Microsoft Purview / Information Protection wraps labelled files in a .pfile container
+        return (
+            f"{path.name} is encrypted by a sensitivity label (Microsoft Purview) and cannot be "
+            "read. Save an unprotected copy from Power BI Desktop (or remove the label) and try "
+            "again."
+        )
+    return f"{path.name} is not a valid .pbix file (not a zip archive)."
 
 
 class _FolderFiles:
