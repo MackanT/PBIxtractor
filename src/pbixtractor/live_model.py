@@ -197,6 +197,11 @@ class LiveStatistics:
     def model_size(self) -> int:
         return sum(self.table_sizes.values())
 
+    @property
+    def has_sizes(self) -> bool:
+        """False when only row counts / distinct values are known (e.g. from executeQueries)."""
+        return bool(self.table_sizes)
+
 
 def _rows(tsv: str) -> list[dict[str, str]]:
     return list(csv.DictReader(io.StringIO(tsv), delimiter="\t", quoting=csv.QUOTE_NONE))
@@ -213,32 +218,47 @@ def build_statistics(files: dict[str, str]) -> LiveStatistics:
     """
     Aggregate the raw rows dumped by the statistics script.
 
-    Column size follows VertiPaq Analyzer: dictionary + data segments in the table's main
-    storage table + the column's attribute hierarchy (H$<table id>$<column id>).
-    Table size is all storage of the table (also user hierarchies U$ and relationships R$).
-
     Args:
         files: File name (without extension) -> TSV content, e.g. {"segments": "..."}
 
     Returns:
         LiveStatistics
     """
-    stats = LiveStatistics()
-    stats.tables = {row["Table"] for row in _rows(files.get("tables", ""))}
+    return statistics_from_rows({name: _rows(tsv) for name, tsv in files.items()})
 
-    for row in _rows(files.get("measures", "")):
+
+def statistics_from_rows(rows: dict[str, list[dict]]) -> LiveStatistics:
+    """
+    Aggregate raw query rows (from Power BI Desktop or the Power BI service).
+
+    Column size follows VertiPaq Analyzer: dictionary + data segments in the table's main
+    storage table + the column's attribute hierarchy (H$<table id>$<column id>).
+    Table size is all storage of the table (also user hierarchies U$ and relationships R$).
+
+    Args:
+        rows: Query name -> rows; names and columns as in the statistics script:
+            tables (Table), measures (Table, Measure, DataType), storage_tables,
+            storage_columns, segments, column_statistics (Table Name, Column Name, Cardinality)
+
+    Returns:
+        LiveStatistics
+    """
+    stats = LiveStatistics()
+    stats.tables = {row["Table"] for row in rows.get("tables", [])}
+
+    for row in rows.get("measures", []):
         stats.measure_types[(row["Table"], row["Measure"])] = row["DataType"]
 
     # Main storage table per model table = the one without an H$/U$/R$ prefix
     main_table_id = {}
-    for row in _rows(files.get("storage_tables", "")):
+    for row in rows.get("storage_tables", []):
         if not row["TableId"].startswith(("H$", "U$", "R$")):
             main_table_id[row["Table"]] = row["TableId"]
             stats.table_rows[row["Table"]] = _int(row["Rows"])
 
     # Data columns: (storage table id, storage column id) -> model column
     storage_key = {}
-    for row in _rows(files.get("storage_columns", "")):
+    for row in rows.get("storage_columns", []):
         dictionary_size = _int(row["DictionarySize"])
         # Every dictionary counts towards the table, including the hidden row-number column
         stats.table_sizes[row["Table"]] = stats.table_sizes.get(row["Table"], 0) + dictionary_size
@@ -254,7 +274,7 @@ def build_statistics(files: dict[str, str]) -> LiveStatistics:
         f"H${table_id}${column_id}": col for (table_id, column_id), col in storage_key.items()
     }
 
-    for row in _rows(files.get("segments", "")):
+    for row in rows.get("segments", []):
         size = _int(row["UsedSize"])
         stats.table_sizes[row["Table"]] = stats.table_sizes.get(row["Table"], 0) + size
         if (row["TableId"], row["ColumnId"]) in storage_key:
@@ -262,10 +282,12 @@ def build_statistics(files: dict[str, str]) -> LiveStatistics:
         elif row["TableId"] in hierarchy_owner:
             hierarchy_owner[row["TableId"]].hierarchy_size += size
 
-    for row in _rows(files.get("column_statistics", "")):
+    for row in rows.get("column_statistics", []):
         key = (row.get("Table Name", ""), row.get("Column Name", ""))
-        if key in stats.columns:
-            stats.columns[key].distinct_values = _int(row.get("Cardinality"))
+        if key[1].startswith("RowNumber-"):
+            continue
+        column = stats.columns.setdefault(key, ColumnStatistics(*key))
+        column.distinct_values = _int(row.get("Cardinality"))
 
     return stats
 

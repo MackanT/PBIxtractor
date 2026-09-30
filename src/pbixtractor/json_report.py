@@ -166,7 +166,9 @@ def _model_section(documentation: Documentation) -> dict:
                         ),
                         "size_bytes": getattr(
                             column_stats.get((table.name, c.name)), "total_size", None
-                        ),
+                        )
+                        if stats and stats.has_sizes
+                        else None,
                     }
                     for c in table.columns
                 ],
@@ -208,7 +210,7 @@ def _model_section(documentation: Documentation) -> dict:
         "name": model.name or None,
         "compatibility_level": model.compatibility_level,
         "culture": model.culture or None,
-        "size_bytes": stats.model_size if stats else None,
+        "size_bytes": stats.model_size if stats and stats.has_sizes else None,
         "tables": tables,
         "relationships": [
             {

@@ -85,6 +85,7 @@ def model_column_rows(model: SemanticModel, stats: Optional[LiveStatistics] = No
     for column in model.all_columns:
         live = stats.columns.get((column.table, column.name)) if stats else None
         table_size = stats.table_sizes.get(column.table, 0) if stats else 0
+        sized = live if live and stats.has_sizes else None  # sizes may be unknown
         rows.append(
             [
                 column.table,
@@ -100,8 +101,8 @@ def model_column_rows(model: SemanticModel, stats: Optional[LiveStatistics] = No
                 column.format_string,
                 column.display_folder,
                 live.distinct_values if live else None,
-                round(live.total_size / 1000, 1) if live else None,
-                _share(live.total_size, table_size) if live else None,
+                round(sized.total_size / 1000, 1) if sized else None,
+                _share(sized.total_size, table_size) if sized else None,
                 column.description,
             ]
         )
