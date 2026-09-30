@@ -12,13 +12,13 @@ structure, so both formats give the same SemanticModel.
 """
 
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
+from .m_sources import NATIVE_SQL, m_sources, sql_tables
 from .tmdl import find_tmdl_folder, read_tmdl_folder
 
 # Columns of Tabular Editor's ExportProperties TSV, as consumed by run_cmd()
@@ -116,6 +116,9 @@ class Partition:
     entity_name: str = ""  # Direct Lake: source table/view
     schema_name: str = ""
     expression_source: str = ""  # Direct Lake: shared expression holding the connection
+    # Other M queries of the model by name (shared expressions, other tables' queries), so
+    # references to them can be followed; set by parse_model()
+    queries: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     def source_summary(self) -> tuple[str, str]:
         """
@@ -124,7 +127,8 @@ class Partition:
         Returns:
             (connector, source objects), e.g. ("Sql.Database", "dbo.DimCustomer"),
             ("Direct Lake", "gold.dim_date") or ("DAX", "calculated table").
-            Parsed from the M query, so unusual queries may give partial results.
+            Parsed from the query text (see m_sources.py), so unusual queries may give
+            partial results.
         """
         if self.source_type == "calculated":
             return "DAX", "calculated table"
@@ -133,25 +137,12 @@ class Partition:
                 f"{self.schema_name}.{self.entity_name}" if self.schema_name else self.entity_name
             )
             return "Direct Lake", name
+        if self.source_type == "query":  # legacy DirectQuery partition: plain SQL
+            return "SQL query", ", ".join(sql_tables(self.expression) or [NATIVE_SQL])
         if self.source_type != "m":
             return self.source_type, ""
-
-        connector = _M_CONNECTOR.search(self.expression)
-        objects = [f"{schema}.{item}" for schema, item in _M_SCHEMA_ITEM.findall(self.expression)]
-        if not objects and _M_NATIVE_QUERY.search(self.expression):
-            objects = ["native SQL query"]
-        return (connector.group(1) if connector else "M"), ", ".join(dict.fromkeys(objects))
-
-
-# M query patterns used by Partition.source_summary()
-_M_CONNECTOR = re.compile(
-    r"\b(Sql\.Databases?|PostgreSQL\.Database|Lakehouse\.Contents|Fabric\.Warehouse|"
-    r"Snowflake\.Databases|Databricks\.Catalogs|Odbc\.\w+|OleDb\.\w+|Oracle\.Database|"
-    r"Excel\.Workbook|Csv\.Document|Json\.Document|SharePoint\.\w+|Web\.Contents|"
-    r"AzureStorage\.\w+|PowerPlatform\.Dataflows|Dataflows?\.\w+)\s*\("
-)
-_M_SCHEMA_ITEM = re.compile(r'Schema\s*=\s*"([^"]+)"\s*,\s*Item\s*=\s*"([^"]+)"')
-_M_NATIVE_QUERY = re.compile(r"Value\.NativeQuery|\[\s*Query\s*=")
+        connector, objects = m_sources(self.expression, self.queries, self.table)
+        return connector, ", ".join(objects)
 
 
 @dataclass
@@ -356,6 +347,18 @@ def parse_model(database: dict) -> SemanticModel:
         )
         for role in model.get("roles", [])
     ]
+
+    # Queries a partition's M can refer to: tables with one M partition (their query has the
+    # table's name) and shared expressions (these win on a name clash, as in Power Query)
+    queries = {
+        table.name: table.partitions[0].expression
+        for table in tables
+        if len(table.partitions) == 1 and table.partitions[0].source_type == "m"
+    }
+    queries.update({e.name: e.expression for e in expressions if e.kind in ("m", "")})
+    for table in tables:
+        for partition in table.partitions:
+            partition.queries = queries
 
     return SemanticModel(
         name=database.get("name", ""),
