@@ -214,6 +214,12 @@ def test_non_zip_pbix_gives_clear_error(tmp_path):
         read_report(tmp_path / "Broken.pbix")
 
 
+def test_package_has_a_version():
+    from pbixtractor import __version__
+
+    assert isinstance(__version__, str) and __version__
+
+
 def test_excel_sheet_name():
     used = set()
     assert excel_sheet_name("Sales/Region: [EU]", used) == "Sales_Region_ _EU_"
@@ -222,6 +228,36 @@ def test_excel_sheet_name():
     second = excel_sheet_name(long_name, used)
     assert len(first) == 31 and len(second) <= 31
     assert first != second
+
+
+def test_excel_sheet_name_never_ends_in_an_apostrophe_or_uses_history():
+    used = set()
+    name = excel_sheet_name("Overview of sales per customer's region", used)
+    assert not name.endswith("'") and len(name) <= 31
+    again = excel_sheet_name("Overview of sales per customer's region", used)
+    assert not again.endswith("'") and again != name
+    assert excel_sheet_name("History", used).lower() != "history"  # reserved by Excel
+
+
+def test_text_over_the_excel_cell_limit_is_marked_truncated(tmp_path, caplog):
+    from xml.etree import ElementTree
+
+    from pbixtractor.excel_report import TRUNCATED_MARKER, WORKBOOK_OPTIONS, _Workbook
+
+    workbook = _Workbook(str(tmp_path / "x.xlsx"), WORKBOOK_OPTIONS)
+    bold = workbook.add_format({"bold": True})
+    sheet = workbook.add_worksheet("s")
+    with caplog.at_level("WARNING", logger="pbixtractor"):
+        sheet.write(0, 0, "x" * 40_000)
+        sheet.write_rich_string(1, 0, bold, "VAR", " " + "y" * 40_000)  # xlsxwriter skips it
+    workbook.close()
+    assert "A1" in caplog.text and "A2" in caplog.text
+    with zipfile.ZipFile(tmp_path / "x.xlsx") as archive:
+        strings = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+    texts = ["".join(t.text for t in item.iter() if t.tag.endswith("}t")) for item in strings]
+    assert [t[0] for t in texts] == ["x", "V"]
+    for text in texts:
+        assert len(text) == 32_767 and text.endswith(TRUNCATED_MARKER)
 
 
 # ----------------------------------------------------------------------------

@@ -19,6 +19,13 @@ from pbixtractor.tabular_editor import (
 
 from .test_semantic_model import BIM
 
+
+# Runs the real Tabular Editor 2 (slow); leave these out with: pytest -m "not tabular_editor"
+def _needs_tabular_editor(test):
+    test = pytest.mark.skipif(find_tabular_editor() is None, reason="Tabular Editor 2 not installed")(test)
+    return pytest.mark.tabular_editor(test)
+
+
 FLOAT_RULE = "[Performance] Do not use floating point data types"
 FK_RULE = "[Formatting] Hide foreign keys"
 
@@ -101,7 +108,7 @@ def test_add_tabular_editor_location(tmp_path):
     assert find_tabular_editor(locations) == exe
 
 
-@pytest.mark.skipif(find_tabular_editor() is None, reason="Tabular Editor 2 not installed")
+@_needs_tabular_editor
 def test_run_best_practice_analyzer_on_sample_model(tmp_path):
     # Direct Lake partitions and dynamic format strings need compatibility level 1604
     bim = tmp_path / "Model.bim"
@@ -122,9 +129,8 @@ def test_run_best_practice_analyzer_on_sample_model(tmp_path):
     assert all(v.category and v.severity for v in violations)  # all from the bundled rules
 
 
+@_needs_tabular_editor
 def test_run_best_practice_analyzer_reports_load_errors(tmp_path):
-    if find_tabular_editor() is None:
-        pytest.skip("Tabular Editor 2 not installed")
     bim = tmp_path / "Broken.bim"
     bim.write_text("{not json", encoding="utf-8")
     with pytest.raises(RuntimeError, match="script failed"):
@@ -159,7 +165,7 @@ def test_drop_redundant_table_refs():
     assert len(kept) == 4
 
 
-@pytest.mark.skipif(find_tabular_editor() is None, reason="Tabular Editor 2 not installed")
+@_needs_tabular_editor
 def test_export_dependencies_on_sample_model(tmp_path):
     bim = tmp_path / "Model.bim"
     bim.write_text(json.dumps({**BIM, "compatibilityLevel": 1604}), encoding="utf-8")

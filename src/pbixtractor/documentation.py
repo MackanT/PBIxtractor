@@ -8,6 +8,7 @@ Everything the writers need is computed here; nothing in this module writes file
 
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Optional
@@ -159,16 +160,35 @@ class Documentation:
 # ============================================================================
 
 
-def parse_tsv_object_name(object_name: str) -> tuple[str, str, str]:
+_OBJECT_KINDS = {"C": "Column", "M": "Measure", "H": "Hierarchy", "P": "Table"}
+
+
+def parse_tsv_object_name(
+    object_name: str, table_names: Optional[list[str]] = None
+) -> tuple[str, str, str]:
     """
     Parse TSV object name to extract type, table, and column.
 
     Args:
         object_name: Object name from TSV (e.g., "Model.T.Table.C.Column")
+        table_names: The model's table names. Pass them whenever available: table names may
+            contain dots ("dbo.Customer", "01. Sales"), which only a known-name match splits
+            correctly - the dot-counting fallback would read "Model.T.dbo.Customer.C.Id" as
+            table "dbo", column "C.Id".
 
     Returns:
         Tuple of (type, table, column) where type is Table/Column/Hierarchy/Measure
     """
+    if table_names and object_name.startswith("Model.T."):
+        rest = object_name[len("Model.T.") :]
+        for table in sorted(table_names, key=len, reverse=True):  # "dbo.Customer" before "dbo"
+            if rest == table:
+                return ("Table", table, "")
+            if rest.startswith(table + ".") and rest[len(table) + 2 : len(table) + 3] == ".":
+                kind, name = rest[len(table) + 1], rest[len(table) + 3 :]
+                if kind in _OBJECT_KINDS:
+                    return (_OBJECT_KINDS[kind], table, "" if kind == "P" else name.strip("[]"))
+
     data_type = "Table"
     start_pos = find_nth_occurrence(".", object_name, 2) + 1
     end_pos = find_nth_occurrence(".", object_name, 3)
@@ -198,6 +218,26 @@ def parse_tsv_object_name(object_name: str) -> tuple[str, str, str]:
             data_type = "Measure"
 
     return (data_type, table, column)
+
+
+def split_embedded_description(definition: str, tag: str) -> tuple[str, str]:
+    """
+    Take a description embedded in DAX as a comment: "<tag> description <tag>".
+
+    The first tag pair counts, wherever it is ("VAR x =\\n //// text ////\\n ..." happens);
+    only that comment is removed, the DAX around it is kept as written. A single tag
+    ("x //// note"), or a pair with nothing between (a line of slashes as a separator), is
+    not a description: the DAX is returned unchanged.
+
+    Returns:
+        (description or "", DAX without the embedded description)
+    """
+    start = definition.find(tag) if tag else -1
+    end = definition.find(tag, start + len(tag)) if start != -1 else -1
+    if end == -1 or not definition[start + len(tag) : end].strip():
+        return "", definition
+    description = definition[start + len(tag) : end].strip()
+    return description, definition[:start] + definition[end + len(tag) :]
 
 
 def button_target_and_label(row: pd.Series) -> tuple[str, str]:
@@ -305,7 +345,14 @@ def build_page_items(
         Page name -> items in display order
     """
     pages = {}
-    for page in report_info["Page"].unique().tolist():
+    # Pages with visuals, plus pages that only have page-level filters (else those are lost)
+    page_order = list(
+        dict.fromkeys(
+            report_info["Page"].unique().tolist()
+            + [row[0] for row in filter_strings if row[2] == "This Page" and row[0]]
+        )
+    )
+    for page in page_order:
         page_rows = report_info[report_info["Page"] == page]
         visual_ids = page_rows["Visual ID"].unique().tolist()
         sorted_rows = page_rows.sort_values(by=["Visual Type", "Type"])
@@ -344,7 +391,8 @@ def build_page_items(
             if item.item_type in ("Visual", "Slicer"):
                 item.fields = sorted_rows[sorted_rows["Visual ID"] == row["ID"]]
             elif item.item_type in ("Button", "Group"):
-                item.first_row = report_info[report_info["Visual ID"] == row["ID"]].iloc[0]
+                # page_rows, not report_info: in model mode a copied report reuses visual ids
+                item.first_row = page_rows[page_rows["Visual ID"] == row["ID"]].iloc[0]
             elif item.item_type == "Filter":
                 item.filter_field, item.filter_condition = filter_strings[row["ID"]][3:5]
             items.append(item)
@@ -386,7 +434,7 @@ def build_objects(
     rows = []
     for i in range(len(dataset)):
         line = dataset.iloc[i]
-        object_type, table, name_in_object = parse_tsv_object_name(line["Object"])
+        object_type, table, name_in_object = parse_tsv_object_name(line["Object"], table_names)
         if object_type in ("Table", "Hierarchy"):
             continue
 
@@ -395,16 +443,9 @@ def build_objects(
         else:
             definition = ""
 
-        # Extract description if embedded in definition
-        if definition.find(description_tag) != -1:
-            comment_start = find_nth_occurrence(description_tag, definition, 1) + 5
-            comment_end = find_nth_occurrence(description_tag, definition, 2) - 1
-            definition_start = comment_end + 6
-        else:
-            comment_start = comment_end = definition_start = 0
-
+        embedded, definition = split_embedded_description(definition, description_tag)
         if pd.isna(line["Description"]):
-            description = definition[comment_start:comment_end].strip().replace("\\n", "\\r\\n")
+            description = embedded.replace("\\n", "\\r\\n")
         else:
             description = line["Description"]
 
@@ -418,8 +459,7 @@ def build_objects(
                 "Name": line["Name"],
                 "DataType": line["DataType"],
                 "Description": description,
-                "Definition": definition[definition_start:]
-                .strip()
+                "Definition": definition.strip()
                 .replace("\r\n", "\n")
                 .replace("\r", "\n"),
                 "Table": table,
@@ -476,8 +516,9 @@ def find_unused(
         (unused columns, unused measures) as (table, name) tuples
     """
     unused = []
+    table_names = [table.name for table in model.tables]
     for object_name in dataset["Object"]:
-        object_type, table, name = parse_tsv_object_name(object_name)
+        object_type, table, name = parse_tsv_object_name(object_name, table_names)
         if object_type in ("Column", "Measure"):
             unused.append((table, name))
 
@@ -499,12 +540,18 @@ def find_unused(
     unused = [col for col in unused if col not in used_in_report]
 
     if exact_dependencies is None:
-        # Fallback: text matching of the DAX of measures and calculated columns
-        for _, row in objects.iterrows():
-            if row["Type"] == "Column":  # data column: no DAX
+        # Fallback: text matching of all DAX in the model - measures, calculated columns,
+        # calculated tables (field parameters' NAMEOF), calculation items and RLS filters
+        dax_texts = [row["Definition"] for _, row in objects.iterrows() if row["Type"] != "Column"]
+        for table in model.tables:
+            dax_texts += [p.expression for p in table.partitions if p.source_type == "calculated"]
+            dax_texts += [item.expression for item in table.calculation_items]
+        dax_texts += [dax for role in model.roles for dax in role.table_filters.values()]
+        for dax in dax_texts:
+            if not dax:
                 continue
-            columns = find_columns(row["Definition"])
-            referenced_names = {measure[1:-1] for measure in find_measures(row["Definition"])}
+            columns = find_columns(dax)
+            referenced_names = {measure[1:-1] for measure in find_measures(dax)}
             unused = [
                 col for col in unused if col not in columns and col[1] not in referenced_names
             ]
@@ -516,13 +563,16 @@ def find_unused(
     )
 
 
-def _visual_labels(pages: dict[str, list[PageItem]]) -> dict[str, str]:
-    """Visual id -> readable label, e.g. "Table (a1b2c3) on Sales"."""
+def _visual_labels(pages: dict[str, list[PageItem]]) -> dict[tuple[str, str], str]:
+    """(page, visual id) -> readable label, e.g. "Table (a1b2c3) on Sales".
+
+    Keyed by page as well: in model mode a copied report reuses the same visual ids.
+    """
     labels = {}
     for page, items in pages.items():
         for item in items:
             if item.item_type != "Filter":
-                labels[str(item.id)] = f"{item.visual_type} ({item.id}) on {page}"
+                labels[(page, str(item.id))] = f"{item.visual_type} ({item.id}) on {page}"
     return labels
 
 
@@ -556,7 +606,7 @@ def build_interactivity(
             if interaction.kind == "Default":
                 continue
             action = _INTERACTION_TEXT.get(interaction.kind, f"{interaction.kind}:")
-            target = labels.get(interaction.target, interaction.target)
+            target = labels.get((page.display_name, interaction.target), interaction.target)
             target = target.removesuffix(f" on {page.display_name}")
             notes.setdefault((page.display_name, interaction.source), []).append(
                 f"{action} {target}"
@@ -602,8 +652,19 @@ def build_bookmarks(
     recorded on a deleted page gets page "(missing page: <id>)" and broken=True.
     """
     labels = _visual_labels(pages)
+    # Hidden visuals are looked up on the bookmark's own page first, by id alone as a fallback
+    by_id: dict[str, str] = {}
+    for (_, visual_id), label in labels.items():
+        by_id.setdefault(visual_id, label)
     page_names = {page.name: page.display_name for page in report.pages}
     button_rows = report_info[report_info["Type"] == "Bookmark"]
+    # Button rows only carry the bookmark's display name. When several bookmarks share one
+    # (e.g. "Reset" on every page), a button belongs to the one recorded on its own page.
+    shared_names = {
+        name
+        for name, count in Counter(b.display_name for b in report.bookmark_details).items()
+        if count > 1
+    }
 
     bookmarks = []
     for bookmark in report.bookmark_details:
@@ -616,10 +677,10 @@ def build_bookmarks(
             )
             if captured
         ]
-        used_by = [
-            f"{row['Page']} ({row['Visual ID']})"
-            for _, row in button_rows[button_rows["Name"] == bookmark.display_name].iterrows()
-        ]
+        users = button_rows[button_rows["Name"] == bookmark.display_name]
+        if bookmark.display_name in shared_names:
+            users = users[users["Page"] == page_names.get(bookmark.page, "")]
+        used_by = [f"{row['Page']} ({row['Visual ID']})" for _, row in users.iterrows()]
         broken = bool(bookmark.page) and bookmark.page not in page_names
         if broken:
             page = f"(missing page: {bookmark.page})"
@@ -645,7 +706,10 @@ def build_bookmarks(
                     if bookmark.target_visuals
                     else "All visuals"
                 ),
-                hidden_visuals=[labels.get(v, v) for v in bookmark.hidden_visuals],
+                hidden_visuals=[
+                    labels.get((page_names.get(bookmark.page, ""), v)) or by_id.get(v, v)
+                    for v in bookmark.hidden_visuals
+                ],
                 used_by=list(dict.fromkeys(used_by)),
             )
         )

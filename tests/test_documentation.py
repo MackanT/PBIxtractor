@@ -18,6 +18,7 @@ from pbixtractor.documentation import (
     build_objects,
     parse_tsv_object_name,
     resolve_hierarchy_columns,
+    split_embedded_description,
 )
 from pbixtractor.pipeline import ExtractionOptions, run_extraction
 from pbixtractor.semantic_model import model_to_dataset, parse_model
@@ -75,6 +76,37 @@ def test_parse_tsv_object_name(name, expected):
     assert parse_tsv_object_name(name) == expected
 
 
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("Model.T.dbo.Customer.C.Id", ("Column", "dbo.Customer", "Id")),
+        ("Model.T.dbo.Customer.M.Cnt", ("Measure", "dbo.Customer", "Cnt")),
+        ("Model.T.dbo.Customer", ("Table", "dbo.Customer", "")),
+        ("Model.T.01. Sales.C.Amount", ("Column", "01. Sales", "Amount")),
+        ("Model.T.dbo.C.x", ("Column", "dbo", "x")),  # the shorter table still resolves
+        ("Model.T.dbo.Customer.P.dbo.Customer-1", ("Table", "dbo.Customer", "")),
+    ],
+)
+def test_parse_tsv_object_name_with_dotted_table_names(name, expected):
+    tables = ["dbo", "dbo.Customer", "01. Sales"]
+    assert parse_tsv_object_name(name, tables) == expected
+
+
+@pytest.mark.parametrize(
+    "dax, description, definition",
+    [
+        ("//// Sum of sales ////\nSUM(Sales[Amount])", "Sum of sales", "\nSUM(Sales[Amount])"),
+        # inside the DAX (seen in real models): only the comment is removed
+        ("VAR y =\n    //// Year ////\n    SELECTEDVALUE(D[Y])", "Year", "VAR y =\n    \n    SELECTEDVALUE(D[Y])"),
+        ("SUM(Sales[Amt]) //// note", "", "SUM(Sales[Amt]) //// note"),  # one tag: not a description
+        ("VAR x = 1\n//////////////\nRETURN x", "", "VAR x = 1\n//////////////\nRETURN x"),
+        ("SUM(x)", "", "SUM(x)"),
+    ],
+)
+def test_split_embedded_description(dax, description, definition):
+    assert split_embedded_description(dax, "////") == (description, definition)
+
+
 def test_text_dependencies():
     deps = text_dependencies("SUMX ( Sales, Sales[Amount] * [Rate] ) + [Total]")
     assert deps[0] == "Sales[Amount]"
@@ -93,6 +125,32 @@ def test_highlight_dax_keeps_all_text():
     for word in ("VAR", "x", "SUM", "Sales[Amount]", "// ", "total", "RETURN", "IF", '"'):
         assert word in text
     assert "function" in segments and "var" in segments and "comment" in segments
+
+
+def _plain(segments, formats):
+    return "".join(s for s in segments if s not in formats.values() and s not in formats["para"])
+
+
+def test_highlight_dax_keeps_names_that_look_like_placeholders():
+    formats = {k: k for k in ("comment", "quote", "var", "varname", "measure", "function", "return")}
+    formats["para"] = [f"para{i}" for i in range(15)]
+    text = _plain(highlight_dax("VAR YYY = 1 RETURN YYY + XXX && AAA || ZZZ", formats, []), formats)
+    assert "YYY" in text and "XXX" in text and "AAA" in text and "ZZZ" in text
+    assert "\n" not in text and "\t" not in text  # no name was turned into a newline or tab
+    assert "&& " in text and "|| " in text
+
+
+def test_highlight_dax_survives_deep_nesting_and_a_trailing_var():
+    formats = {k: k for k in ("comment", "quote", "var", "varname", "measure", "function", "return")}
+    formats["para"] = [f"para{i}" for i in range(15)]
+    deep = "(" * 20 + "[M]" + ")" * 20
+    assert "M" in _plain(highlight_dax(deep, formats, []), formats)
+    assert "var" in _plain(highlight_dax("SUM ( x ) // no var", formats, ["SUM"]), formats)
+
+
+def test_text_dependencies_with_quoted_table_names():
+    deps = text_dependencies("SUM ( 'Sales Data'[Amount] ) + 'Bob''s'[X]")
+    assert sorted(deps) == ["Bob's[X]", "Sales Data[Amount]"]
 
 
 def test_build_objects_description_tag_and_order(model):

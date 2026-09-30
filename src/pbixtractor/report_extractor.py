@@ -8,7 +8,6 @@
 """
 
 import os
-import sys
 from pathlib import Path
 
 import yaml
@@ -23,9 +22,8 @@ from .readers import ReportDefinition, read_report
 try:
     CONFIG = load_config()
 except (OSError, ValueError, KeyError, yaml.YAMLError) as e:
-    print(f"Error loading YAML configuration file: {YAML_FILE}")
-    print(f"Exception: {e}")
-    sys.exit(1)
+    # Raised, not sys.exit(): importing must not end the process (the web UI imports this)
+    raise RuntimeError(f"Error loading the configuration file {YAML_FILE}: {e}") from e
 
 visual_mapper = CONFIG.visual_mapper
 visual_type_list = sorted(CONFIG.supported_visual_types)
@@ -50,34 +48,6 @@ class ReportExtractor:
         self.report = None  # readers.ReportDefinition after extract()
         self.logger = get_logger("pbixtractor")
         self.page_extractor = PageExtractor(config=CONFIG, logger=self.logger)
-
-    def add_item(
-        self,
-        page: str,
-        visual_type: str,
-        item_name: str,
-        table_name: str,
-        val_name: str,
-        disp_name: str,
-        data_type: str,
-    ) -> None:
-        """Store an extracted item row (REPORT_COLUMNS order)."""
-        self.result.append(
-            [page, visual_type, item_name, table_name, val_name, disp_name, data_type]
-        )
-
-    def add_filter(
-        self,
-        page: str,
-        item_name: str,
-        filter_type: str,
-        table_name: str,
-        val_name: str,
-        operator: str,
-        value: str,
-    ) -> None:
-        """Store an extracted filter row."""
-        self.filters.append([page, item_name, filter_type, table_name, val_name, operator, value])
 
     def extract(self, prefix: str = "") -> None:
         """

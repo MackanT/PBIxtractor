@@ -168,6 +168,11 @@ class ReportReadError(ValueError):
     """The report cannot be read, for a reason the message explains (no traceback needed)."""
 
 
+# One report definition file (layout JSON, a visual.json...) is at most a few MB; anything far
+# larger in a .pbix is a corrupt or hostile archive, not something to unpack into memory
+MAX_REPORT_FILE_BYTES = 500_000_000
+
+
 class _ZipFiles:
     """Read report files from a .pbix zip."""
 
@@ -185,6 +190,10 @@ class _ZipFiles:
     def read(self, name: str) -> bytes:
         # Read on demand: the zip also holds the (large) DataModel, which we never load
         with zipfile.ZipFile(self._path, "r") as zip_file:
+            if zip_file.getinfo(name).file_size > MAX_REPORT_FILE_BYTES:  # zip bombs
+                raise ReportReadError(
+                    f"{self._path.name}: {name} is larger than {MAX_REPORT_FILE_BYTES:,} bytes"
+                )
             return zip_file.read(name)
 
 
@@ -221,6 +230,12 @@ def _open_files(path: Path):
         return _FolderFiles(path)
     if path.suffix.lower() == ".pbip":
         report_folder = path.with_name(f"{path.stem}.Report")
+        try:  # the .pbip names its report folder ("artifacts": [{"report": {"path": ...}}])
+            artifacts = _load_json(path.read_bytes()).get("artifacts") or []
+            listed = next(a["report"]["path"] for a in artifacts if (a.get("report") or {}).get("path"))
+            report_folder = (path.parent / listed).resolve()
+        except (OSError, ValueError, StopIteration, KeyError, TypeError, AttributeError):
+            pass  # unreadable or no report listed: the <name>.Report convention
         if not report_folder.is_dir():
             raise FileNotFoundError(f"Report folder not found for {path.name}: {report_folder}")
         return _FolderFiles(report_folder)
@@ -357,27 +372,30 @@ def _legacy_visual(
     query = single_visual.get("prototypeQuery") or {}
     column_properties = single_visual.get("columnProperties") or {}
 
-    # queryRef -> projection role (e.g. "Values", "Category")
-    roles = {}
+    # queryRef -> projection roles (e.g. ["Y", "Tooltips"]: one field can fill several roles)
+    roles: dict[str, list[str]] = {}
     for role, refs in (single_visual.get("projections") or {}).items():
         for ref in refs:
             if isinstance(ref, dict) and "queryRef" in ref:
-                roles.setdefault(ref["queryRef"], role)
+                field_roles = roles.setdefault(ref["queryRef"], [])
+                if role not in field_roles:
+                    field_roles.append(role)
 
     fields = []
     for select in query.get("Select", []):
         if not isinstance(select, dict):
             continue
         query_ref = select.get("Name", "")
-        fields.append(
-            FieldBinding(
-                role=roles.get(query_ref),
-                expr=select,
-                query_ref=query_ref,
-                display_name=(column_properties.get(query_ref) or {}).get("displayName")
-                or select.get("NativeReferenceName"),
+        for role in roles.get(query_ref) or [None]:  # one binding per role, as in PBIR
+            fields.append(
+                FieldBinding(
+                    role=role,
+                    expr=select,
+                    query_ref=query_ref,
+                    display_name=(column_properties.get(query_ref) or {}).get("displayName")
+                    or select.get("NativeReferenceName"),
+                )
             )
-        )
 
     return VisualDefinition(
         name=name,

@@ -24,8 +24,8 @@ from .data import DATA_DIR
 # Source: https://github.com/microsoft/Analysis-Services/tree/master/BestPracticeRules
 DEFAULT_BPA_RULES = DATA_DIR / "BPARules.json"
 
-# Where to look for "Tabular Editor/TabularEditor.exe" when Input/TabularEditorLocations.txt
-# does not list any folders
+# Where to look for "Tabular Editor/TabularEditor.exe" after the folders listed in
+# Input/TabularEditorLocations.txt
 DEFAULT_SEARCH_DIRS = [Path(r"C:\Program Files"), Path(r"C:\Program Files (x86)")]
 
 # Rule severity as used in the BPA rules file
@@ -48,6 +48,8 @@ def find_tabular_editor(locations_file: Optional[Path] = None) -> Optional[Path]
         Path to TabularEditor.exe, or None if not found
     """
     locations_file = locations_file or _default_locations_file()
+    # Listed folders first: they let the user pick a specific Tabular Editor (e.g. a newer one
+    # than the copy in Program Files). The file lives in the user's own working folder.
     folders = list(DEFAULT_SEARCH_DIRS)
     if locations_file.is_file():
         listed = [Path(line.strip()) for line in locations_file.read_text().splitlines()]
@@ -258,6 +260,7 @@ sb.AppendLine("SourceType\tSourceTable\tSourceName\tTargetType\tTargetTable\tTar
 Func<ITabularNamedObject, string> tableOf = o =>
     o is Table ? ((Table)o).Name
     : o is TablePermission ? ((TablePermission)o).Table.Name
+    : o is CalculationItem ? ((CalculationItem)o).CalculationGroupTable.Name
     : (o is ITabularTableObject ? ((ITabularTableObject)o).Table.Name : "");
 Func<string, string> clean = s => (s ?? "").Replace("\t", " ").Replace("\r", " ").Replace("\n", " ");
 
@@ -266,6 +269,8 @@ sources.AddRange(Model.AllMeasures);
 sources.AddRange(Model.AllColumns.OfType<CalculatedColumn>());
 sources.AddRange(Model.Tables.OfType<CalculatedTable>());
 foreach (var role in Model.Roles) sources.AddRange(role.TablePermissions);
+// Calculation items: a measure used only inside one is not unused
+foreach (var group in Model.Tables.OfType<CalculationGroupTable>()) sources.AddRange(group.CalculationItems);
 
 foreach (var source in sources)
 {
@@ -286,7 +291,8 @@ SaveFile(System.IO.Path.Combine(@"%FOLDER%", "dependencies.tsv"), sb.ToString())
 class Dependency:
     """A direct DAX dependency: source (measure, calculated column/table, RLS) -> target."""
 
-    source_type: str  # Measure | Column | Table | TablePermission (RLS filter; name = role)
+    # Measure | Column | Table | TablePermission (RLS filter; name = role) | CalculationItem
+    source_type: str
     source_table: str
     source_name: str
     target_type: str  # Measure | Column | Table | ...

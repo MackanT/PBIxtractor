@@ -6,15 +6,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional
 
-from jsonpath_ng.ext import parse as jsonpath_ext_parse
-
 from .config import Config
 from .logger import get_logger
 from .models import ExtractedFilter, ExtractedItem
 from .readers import FieldBinding, PageDefinition, ReportDefinition, VisualDefinition
 from .visual_helpers import custom_visual_name
-
-_JSONPATH_CACHE = {}
 
 # Power BI QueryComparisonKind
 COMPARISON_OPERATORS = {0: "=", 1: ">", 2: ">=", 3: "<=", 4: "<"}
@@ -234,55 +230,6 @@ class BaseExtractor(ABC):
         self.config = config
         self.logger = logger or get_logger("pbixtractor")
 
-    def query_json(self, data: dict, path: str, default: Any = None) -> Any:
-        """
-        Query JSON data using JSONPath with caching.
-
-        Args:
-            data: JSON data to query
-            path: JSONPath expression
-            default: Value to return if no matches found
-
-        Returns:
-            First matching value or default
-        """
-        try:
-            if path not in _JSONPATH_CACHE:
-                _JSONPATH_CACHE[path] = jsonpath_ext_parse(path)
-
-            matches = _JSONPATH_CACHE[path].find(data)
-            if matches:
-                return matches[0].value
-            return default
-        except Exception as e:
-            self.logger.warning(f"JSONPath query failed: {path}. Error: {str(e)}")
-            return default
-
-    def query_all_json(self, data: dict, path: str) -> list:
-        """
-        Query JSON data and return all matches with caching.
-
-        Args:
-            data: JSON data to query
-            path: JSONPath expression
-
-        Returns:
-            List of all matching values
-        """
-        try:
-            if path not in _JSONPATH_CACHE:
-                _JSONPATH_CACHE[path] = jsonpath_ext_parse(path)
-
-            matches = _JSONPATH_CACHE[path].find(data)
-            return [match.value for match in matches]
-        except Exception as e:
-            self.logger.warning(f"JSONPath query failed: {path}. Error: {str(e)}")
-            return []
-
-    def clean_value(self, value: str) -> str:
-        """Clean extracted values (remove quotes, convert types)."""
-        return clean_literal(value)
-
     @abstractmethod
     def extract(self, data: dict) -> list:
         """Extract data from JSON structure."""
@@ -380,10 +327,31 @@ class VisualExtractor(BaseExtractor):
         for binding in visual.fields:
             resolved = resolve_field(binding.expr, visual.aliases)
             if not resolved or not resolved[0] or not resolved[1]:
-                self.logger.warning(
-                    f"Could not resolve table/field on {page_name}. "
-                    f"Data: {str(binding.expr)[:200]}"
-                )
+                # Wrapped fields ("% of grand total", sparklines, ...): the Column/Measure
+                # references nested inside still count as used
+                nested = list(dict.fromkeys(iter_field_refs(binding.expr, visual.aliases)))
+                nested = [(table, name) for table, name in nested if table and name]
+                if nested:
+                    data_type = self._determine_data_type(binding, visual_type)
+                    for table_name, val_name in nested:
+                        items.append(
+                            ExtractedItem(
+                                page=page_name,
+                                visual_type=visual_type,
+                                item_name=visual.name,
+                                table_name=table_name,
+                                val_name=val_name,
+                                disp_name=binding.display_name
+                                if binding.display_name != val_name
+                                else None,
+                                data_type=data_type,
+                            )
+                        )
+                elif "NativeVisualCalculation" not in binding.expr:  # visual calcs: no model field
+                    self.logger.warning(
+                        f"Could not resolve table/field on {page_name}. "
+                        f"Data: {str(binding.expr)[:200]}"
+                    )
                 continue
             table_name, val_name = resolved
 
@@ -392,18 +360,20 @@ class VisualExtractor(BaseExtractor):
 
             if "HierarchyLevel" in binding.expr:
                 data_type = "Hierarchy"
-                hierarchy_name = (
-                    binding.expr["HierarchyLevel"]
-                    .get("Expression", {})
-                    .get("Hierarchy", {})
-                    .get("Hierarchy", "")
-                )
+                hierarchy_expr = binding.expr["HierarchyLevel"].get("Expression", {}).get("Hierarchy", {})
+                hierarchy_name = hierarchy_expr.get("Hierarchy", "")
                 disp_name = f"{hierarchy_name}: {val_name}"
-                # The level name can differ from its column; the queryRef
-                # ("Table.Hierarchy.Column") holds the column used for unused-detection
-                prefix = f"{table_name}.{hierarchy_name}."
-                if binding.query_ref.startswith(prefix) and len(binding.query_ref) > len(prefix):
-                    val_name = binding.query_ref[len(prefix) :]
+                variation = hierarchy_expr.get("Expression", {}).get("PropertyVariationSource")
+                if isinstance(variation, dict) and variation.get("Property"):
+                    # Auto date/time: the levels live on a hidden LocalDateTable; the model
+                    # column the visual really uses is the date column (e.g. OrderDate)
+                    val_name = variation["Property"]
+                else:
+                    # The level name can differ from its column; the queryRef
+                    # ("Table.Hierarchy.Column") holds the column used for unused-detection
+                    prefix = f"{table_name}.{hierarchy_name}."
+                    if binding.query_ref.startswith(prefix) and len(binding.query_ref) > len(prefix):
+                        val_name = binding.query_ref[len(prefix) :]
 
             items.append(
                 ExtractedItem(
@@ -736,14 +706,15 @@ def _join(operator: str, value: str) -> str:
 class PageExtractor(BaseExtractor):
     """Orchestrates extraction of all elements from a page."""
 
-    def __init__(self, config: Config, logger: logging.Logger = None, skip_template: bool = True):
+    def __init__(self, config: Config, logger: logging.Logger = None, skip_template: bool = False):
         """
         Initialize page extractor.
 
         Args:
             config: Configuration from data.yaml
             logger: Logger instance
-            skip_template: Ignore pages named "Template"
+            skip_template: Ignore pages named "Template" (opt-in: a real page with that name
+                would otherwise lose its fields and make them look unused)
         """
         super().__init__(config, logger)
         self.skip_template = skip_template

@@ -11,7 +11,12 @@ from .utils import find_vars
 # Tokens for highlight_dax(): brackets, [refs], commas, comments, decimals, words, dots, other
 _TOKEN = re.compile(r"(\(|\)|\[.*?\]|,|//|\d+\.\d+|\w+|(?<!\d)\.(?!\d)|\W)")
 _BRACKET_REF = re.compile(r"\[.*?\]")
-_COLUMN_REF = re.compile(r"(\w+)\[(.*?)\]")
+# Table[Column] and 'Table name'[Column] ('' escapes a quote inside a quoted name)
+_COLUMN_REF = re.compile(r"('(?:[^']|'')+'|\w+)\[(.*?)\]")
+
+# Placeholders for highlight_dax(): private-use characters, which cannot occur in real DAX
+# (plain words like "XXX" could - a column or variable with that name was rewritten)
+_TAB, _NEWLINE, _AND, _OR = "", "", "", ""
 
 
 def find_functions(dax_code: str, known_functions: list) -> list[str]:
@@ -49,9 +54,14 @@ def find_columns(dax_code: str) -> list[tuple[str, str]]:
         dax_code: DAX code string
 
     Returns:
-        List of (table, column) tuples
+        List of (table, column) tuples; quoted table names are unquoted ("Sales Data")
     """
-    return list(set(_COLUMN_REF.findall(dax_code)))
+    return list(
+        {
+            (table[1:-1].replace("''", "'") if table.startswith("'") else table, column)
+            for table, column in _COLUMN_REF.findall(dax_code)
+        }
+    )
 
 
 def text_dependencies(dax_code: str) -> list[str]:
@@ -91,11 +101,11 @@ def highlight_dax(dax_code: str, formats: dict, known_functions: list) -> list:
     measures = find_measures(dax_code)
 
     # Protect whitespace and operators that the tokenizer would otherwise split or drop
-    text = dax_code.replace("\t", " XXX ")
-    text = text.replace("\r\n", " YYY ")
-    text = text.replace("\n", " YYY ")
-    text = text.replace("&&", " ZZZ ")
-    text = text.replace("||", " AAA ")
+    text = dax_code.replace("\t", f" {_TAB} ")
+    text = text.replace("\r\n", f" {_NEWLINE} ")
+    text = text.replace("\n", f" {_NEWLINE} ")
+    text = text.replace("&&", f" {_AND} ")
+    text = text.replace("||", f" {_OR} ")
     tokens = [token for token in _TOKEN.findall(text) if token.strip()]
 
     segments = []
@@ -103,11 +113,16 @@ def highlight_dax(dax_code: str, formats: dict, known_functions: list) -> list:
     parenthesis_count = -1
     is_whole_line_comment = False
     quote_counter = 0
+    deepest = len(formats["para"]) - 1
+
+    def para(depth: int):
+        """Parenthesis colour for a nesting depth (the palette repeats its last colour)."""
+        return formats["para"][max(0, min(depth, deepest))]
 
     for token in tokens:
         if token == "//":
             is_whole_line_comment = True
-        elif token == "YYY":
+        elif token == _NEWLINE:
             is_whole_line_comment = False
 
         if token == '"' and not is_whole_line_comment:
@@ -122,21 +137,19 @@ def highlight_dax(dax_code: str, formats: dict, known_functions: list) -> list:
                 quote_counter = 0
             else:
                 add((token,))
-        elif token == "XXX":
+        elif token == _TAB:
             add(("\t",))
-        elif token == "YYY":
+        elif token == _NEWLINE:
             add(("\n",))
-        elif token == "ZZZ":
+        elif token == _AND:
             add(("&& ",))
-        elif token == "AAA":
+        elif token == _OR:
             add(("|| ",))
         elif token == "(":
             parenthesis_count += 1
-            safe_count = max(0, min(parenthesis_count, 14))
-            add((formats["para"][safe_count], token + " "))
+            add((para(parenthesis_count), token + " "))
         elif token == ")":
-            safe_count = max(0, min(parenthesis_count, 14))
-            add((formats["para"][safe_count], token + " "))
+            add((para(parenthesis_count), token + " "))
             parenthesis_count -= 1
         elif token == "VAR":
             add((formats["var"], token + " "))
@@ -145,11 +158,11 @@ def highlight_dax(dax_code: str, formats: dict, known_functions: list) -> list:
         elif token in measures:
             add(
                 (
-                    formats["para"][parenthesis_count + 1],
+                    para(parenthesis_count + 1),
                     token[0],
                     formats["measure"],
                     token[1:-1],
-                    formats["para"][parenthesis_count + 1],
+                    para(parenthesis_count + 1),
                     token[-1] + " ",
                 )
             )

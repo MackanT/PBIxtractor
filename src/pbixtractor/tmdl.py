@@ -136,6 +136,7 @@ def parse_tmdl(text: str) -> list[TmdlNode]:
     root = TmdlNode("root")
     stack = [root]
     description: list[str] = []
+    last_node: Optional[TmdlNode] = None
     i = 0
     while i < len(lines):
         raw = lines[i]
@@ -159,7 +160,14 @@ def parse_tmdl(text: str) -> list[TmdlNode]:
             description = []
             continue
 
-        keyword, rest = _KEYWORD.match(stripped).groups()
+        keyword_match = _KEYWORD.match(stripped)
+        if keyword_match is None:
+            # Not a keyword line, e.g. the continuation of an expression that started on
+            # the object's own line ("measure A = DIVIDE([A],"): keep it with that expression
+            if last_node is not None and last_node.value is not None:
+                last_node.value += "\n" + stripped
+            continue
+        keyword, rest = keyword_match.groups()
         if keyword == "ref":  # ref table Sales
             ref_type, _, ref_name = rest.partition(" ")
             node = TmdlNode("ref", unquote_name(ref_name), ref_type, indent=level)
@@ -198,6 +206,7 @@ def parse_tmdl(text: str) -> list[TmdlNode]:
         description = []
         parent.children.append(node)
         stack.append(node)
+        last_node = node
     return root.children
 
 

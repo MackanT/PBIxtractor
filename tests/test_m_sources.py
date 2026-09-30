@@ -120,6 +120,31 @@ def test_own_step_and_self_are_not_references():
     assert m_sources(queries["dim_a"], queries, "dim_a") == ("M", [])
 
 
+def test_field_access_and_library_functions_are_not_references():
+    queries = {
+        "Customer": 'let S = Sql.Database("a", "b"), T = S{[Schema="dbo",Item="DimCustomer"]}[Data] in T',
+        "Date": 'let S = Sql.Database("a", "b"), T = S{[Schema="dbo",Item="DimDate"]}[Data] in T',
+    }
+    m = """let
+    Source = Sql.Database("srv", "db"),
+    Sales = Source{[Schema="dbo",Item="FactSales"]}[Data],
+    Added = Table.AddColumn(Sales, "Y", each Date.Year([OrderDate]) & [Customer])
+in
+    Added"""
+    assert m_sources(m, queries, "Sales") == ("Sql.Database", ["dbo.FactSales"])
+
+
+def test_native_query_with_commas_in_the_first_argument():
+    m = """let
+    Source = Sql.Database("srv", "db"),
+    Db = Source{[Name="db",Kind="Database"]}[Data],
+    Result = Value.NativeQuery(Db, "SELECT * FROM dbo.Fact", null, [EnableFolding=true])
+in Result"""
+    assert m_sources(m)[1] == ["dbo.Fact"]
+    inline = 'Value.NativeQuery(Sql.Database("srv", "db"), "SELECT a FROM dim.X")'
+    assert m_sources(inline)[1] == ["dim.X"]
+
+
 def test_circular_references_stop():
     queries = {"a": "let x = b in x", "b": "let y = a in y"}
     assert m_sources(queries["a"], queries, "a") == ("M", [])

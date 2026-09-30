@@ -4,8 +4,12 @@ write_main_workbook("Report.xlsx", documentation, graph_path, known_functions)
 write_data_workbook("Report_data.xlsx", documentation, graph_path, known_functions)
 """
 
+import logging
+import warnings
+
 import xlsxwriter
 from xlsxwriter.utility import xl_rowcol_to_cell
+from xlsxwriter.worksheet import Worksheet
 
 from .constants import DEFAULT_COLORS
 from .dax import find_columns, find_measures, highlight_dax, text_dependencies
@@ -23,9 +27,39 @@ from .utils import excel_sheet_name, rgba_tuple_to_hex, write_to_excel
 # Colours for nested brackets in DAX (cycled by nesting depth)
 PARENTHESIS_COLORS = ["#0433fa", "#319331", "#7b3831"]
 
-# Everything we write is text: without this, values such as the filter condition "= Grey"
-# would be written as (broken) Excel formulas
-WORKBOOK_OPTIONS = {"strings_to_formulas": False}
+# Cell text comes from reports/models: never turn it into formulas ("= Grey") or links
+# ("http://...", "external:\\host\share\x.exe" in a description would become clickable)
+WORKBOOK_OPTIONS = {"strings_to_formulas": False, "strings_to_urls": False}
+
+TRUNCATED_MARKER = " …(truncated: longer than Excel's 32,767 characters)"
+
+logger = logging.getLogger("pbixtractor")
+
+
+class _Worksheet(Worksheet):
+    """A worksheet that marks text over Excel's cell limit as truncated (xlsxwriter cuts it
+    silently, and leaves a rich - highlighted DAX - string out altogether) and logs it."""
+
+    def _write_string(self, row, col, string, cell_format=None):
+        if len(string) > self.xls_strmax:
+            string = string[: self.xls_strmax - len(TRUNCATED_MARKER)] + TRUNCATED_MARKER
+            logger.warning(
+                f"Sheet '{self.name}' cell {xl_rowcol_to_cell(row, col)}: text truncated, it is "
+                "longer than Excel allows in a cell (the JSON output has all of it)"
+            )
+        return super()._write_string(row, col, string, cell_format)
+
+    def _write_rich_string(self, row, col, *args):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # handled below
+            result = super()._write_rich_string(row, col, *args)
+        if result == -2:  # too long: write it as plain (truncated) text instead
+            result = self._write_string(row, col, "".join(a for a in args if isinstance(a, str)))
+        return result
+
+
+class _Workbook(xlsxwriter.Workbook):
+    worksheet_class = _Worksheet
 
 DEFINITION_INDEX = OBJECT_COLUMNS.index("Definition")
 DEPENDS_ON_INDEX = OBJECT_COLUMNS.index("Depends On")
@@ -372,7 +406,7 @@ def write_main_workbook(
         graph_path: Relationship PNG to embed
         known_functions: DAX function names to highlight
     """
-    workbook = xlsxwriter.Workbook(path, WORKBOOK_OPTIONS)
+    workbook = _Workbook(path, WORKBOOK_OPTIONS)
     used_names = set()
 
     def sheet_name(name: str) -> str:
@@ -438,7 +472,7 @@ def write_data_workbook(
         graph_path: Relationship PNG to embed
         known_functions: DAX function names to highlight
     """
-    workbook = xlsxwriter.Workbook(path, WORKBOOK_OPTIONS)
+    workbook = _Workbook(path, WORKBOOK_OPTIONS)
     formats = create_formats(workbook)
 
     _write_pages_sheet(

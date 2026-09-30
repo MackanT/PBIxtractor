@@ -90,25 +90,3 @@ class VisualTypeMapper:
         display_name = " ".join(word.capitalize() for word in words)
 
         return display_name.strip()
-
-    def is_special_visual(self, visual_type: str) -> bool:
-        """Check if visual type has custom configuration."""
-        return visual_type in self.special_visuals
-
-    def is_button_type(self, visual_type: str) -> bool:
-        """Check if visual type is a button."""
-        return visual_type in self.button_types
-
-
-def create_visual_mapper(config_data: dict) -> VisualTypeMapper:
-    """
-    Factory function to create VisualTypeMapper from YAML config.
-
-    Args:
-        config_data: Full YAML configuration dict
-
-    Returns:
-        VisualTypeMapper instance
-    """
-    visual_metadata = config_data.get("visual_type_metadata", {})
-    return VisualTypeMapper(visual_metadata)

@@ -225,7 +225,9 @@ def render_lineage_html(doc: dict) -> str:
     """The complete HTML page for a JSON documentation dict."""
     data = build_viewer_data(doc)
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-    payload = payload.replace("</", "<\\/")  # never close the <script> tag early
+    # No "<" at all inside the data block: neither "</script>" nor "<!--<script" (which puts
+    # the HTML parser in an escaped state) can then end or swallow it. Still valid JSON.
+    payload = payload.replace("<", "\\u003c")
     return _TEMPLATE.replace("__TITLE__", escape(f"{data['report']} - lineage")).replace(
         "__DATA__", payload
     )

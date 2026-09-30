@@ -192,6 +192,15 @@ def test_partitions_expressions_and_roles(model):
     assert model.roles[0].table_filters == {"Sales": "Sales[Amount] > 0"}
 
 
+def test_default_partition_mode_comes_from_the_model():
+    database = {"name": "m", "model": {"defaultMode": "directQuery", "tables": []}}
+    dq_model = parse_model(database)
+    assert dq_model.partition_mode(Partition(name="p", table="t", mode="default")) == "directQuery"
+    assert dq_model.partition_mode(Partition(name="p", table="t", mode="")) == "directQuery"
+    assert dq_model.partition_mode(Partition(name="p", table="t", mode="import")) == "import"
+    assert parse_model({"name": "m", "model": {}}).partition_mode(Partition(name="p", table="t")) == "import"
+
+
 def test_structurally_used_columns(model):
     assert model.structurally_used_columns() == {
         ("Sales", "Date Key"),  # relationship

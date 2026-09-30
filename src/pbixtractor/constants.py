@@ -14,14 +14,6 @@ DEFAULT_COLORS = [
 # Description tag delimiter
 DESCRIPT_TAG = "////"
 
-# Excel column widths
-EXCEL_COLUMN_WIDTHS = {
-    "default": 30,
-    "type": 50,
-    "field": 60,
-    "display_name": 60,
-}
-
 # Report data columns
 REPORT_COLUMNS = [
     "Page",
@@ -32,6 +24,3 @@ REPORT_COLUMNS = [
     "Display Name",
     "Type",
 ]
-
-# Tab replacement token for formatting
-TAB_REPLACEMENT = " XXX "

@@ -31,12 +31,12 @@ _CONNECTOR = re.compile(
 )
 _SCHEMA_ITEM = re.compile(r'Schema\s*=\s*"([^"]+)"\s*,\s*Item\s*=\s*"([^"]+)"')
 # Source{[Name="vw_x"]}[Data] - only for connectors whose first navigation level is the object
-_NAME_NAVIGATION = re.compile(r'\{\s*\[\s*Name\s*=\s*"([^"]+)"')
+_NAME_NAVIGATION = re.compile(r'\{\s*\[\s*Name\s*=\s*"([^"]+)"(?:\s*,\s*Kind\s*=\s*"(\w+)")?')
+_CONTAINER_KINDS = {"database", "schema"}  # {[Name="db",Kind="Database"]} is not a source object
 _NAME_CONNECTORS = {"Sql.Database", "PostgreSQL.Database", "Oracle.Database", "Fabric.Warehouse"}
 _LAKEHOUSE_TABLE = re.compile(r'\[\s*Id\s*=\s*"([^"]+)"\s*,\s*ItemKind\s*=\s*"Table"')
 # An M text literal: "..." with "" as the escaped quote
 _M_STRING = r'"((?:[^"]|"")*)"'
-_NATIVE_QUERY = re.compile(r"Value\.NativeQuery\s*\(\s*[^,]+,\s*" + _M_STRING)
 _QUERY_OPTION = re.compile(r"\[\s*Query\s*=\s*" + _M_STRING)
 _ENTERED_DATA = re.compile(r"Table\.FromRows\s*\(\s*Json\.Document\s*\(\s*Binary\.Decompress")
 _PARAMETER = re.compile(r"meta\s*\[\s*IsParameterQuery\s*=\s*true", re.IGNORECASE)
@@ -78,9 +78,45 @@ def sql_tables(sql: str) -> Optional[list[str]]:
     return list(dict.fromkeys(tables))
 
 
+def _native_query_literals(expression: str) -> list[str]:
+    """
+    The SQL text literal of each Value.NativeQuery(<source>, "<sql>", ...) call.
+
+    <source> may itself contain commas, brackets and strings
+    (Source{[Name="db",Kind="Database"]}[Data], Sql.Database("srv", "db")), so the first
+    argument is skipped by tracking nesting and strings, not with a regex.
+    """
+    literals = []
+    for match in re.finditer(r"Value\.NativeQuery\s*\(", expression):
+        position, depth, in_string = match.end(), 0, False
+        while position < len(expression):
+            char = expression[position]
+            if in_string:
+                if char == '"':
+                    if expression[position + 1 : position + 2] == '"':
+                        position += 1  # "" = escaped quote
+                    else:
+                        in_string = False
+            elif char == '"':
+                in_string = True
+            elif char in "([{":
+                depth += 1
+            elif char in ")]}":
+                if depth == 0:
+                    break  # the call ended without a second argument
+                depth -= 1
+            elif char == "," and depth == 0:
+                literal = re.match(r"\s*" + _M_STRING, expression[position + 1 :])
+                if literal:
+                    literals.append(literal.group(1))
+                break
+            position += 1
+    return literals
+
+
 def _native_sql_objects(expression: str) -> list[str]:
     """Source tables of the native SQL in an M query ([NATIVE_SQL] if it cannot be parsed)."""
-    literals = _NATIVE_QUERY.findall(expression) + _QUERY_OPTION.findall(expression)
+    literals = _native_query_literals(expression) + _QUERY_OPTION.findall(expression)
     objects = []
     for literal in literals:
         objects += sql_tables(m_text(literal)) or [NATIVE_SQL]
@@ -92,8 +128,9 @@ def _references(expression: str, queries: dict[str, str]) -> list[str]:
     found = []
     for name in queries:
         quoted = f'#"{name}"' in expression
+        # Not a field access ([Customer]) or a library function (Date.Year(...))
         bare = re.fullmatch(r"[A-Za-z_][\w.]*", name) and re.search(
-            rf'(?<![\w."#]){re.escape(name)}(?![\w"])', expression
+            rf'(?<![\w."#\[]){re.escape(name)}(?![\w"\].(])', expression
         )
         # A step of this query with the same name (e.g. "Source = ...") is not a reference
         own_step = re.search(
@@ -134,7 +171,11 @@ def _m_sources(expression: str, queries: dict[str, str], seen: set) -> tuple[str
     objects = [f"{schema}.{item}" for schema, item in _SCHEMA_ITEM.findall(expression)]
     objects += _LAKEHOUSE_TABLE.findall(expression)
     if not objects and connector in _NAME_CONNECTORS:
-        objects = _NAME_NAVIGATION.findall(expression)
+        objects = [
+            name
+            for name, kind in _NAME_NAVIGATION.findall(expression)
+            if kind.lower() not in _CONTAINER_KINDS
+        ]
     objects += _native_sql_objects(expression)
 
     for name in _references(expression, queries):

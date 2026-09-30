@@ -113,6 +113,22 @@ def test_html_is_self_contained_and_safe(doc, tmp_path):
     assert path.read_text(encoding="utf-8") == html
 
 
+@pytest.mark.parametrize(
+    "ref, expected",
+    [
+        ("Sales[Amount]", ("Sales", "Amount")),
+        ("'Sales Data'[Amount]", ("Sales Data", "Amount")),
+        ("Sales[Price [EUR]]]", ("Sales", "Price [EUR]")),
+        ("'Params'", ("Params", "")),
+        ("'Bob''s'[X]", ("Bob's", "X")),
+    ],
+)
+def test_split_ref(ref, expected):
+    from pbixtractor.json_report import _split_ref
+
+    assert _split_ref(ref) == expected
+
+
 def test_html_has_guide(doc):
     html = render_lineage_html(doc)
     assert 'id="help"' in html and 'id="guide"' in html

@@ -3,6 +3,17 @@
 import os
 import re
 
+# Windows cannot create files or folders with these names (with any extension)
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {f"{d}{i}" for d in ("COM", "LPT") for i in range(1, 10)}
+
+
+def safe_name(name: str) -> str:
+    """A file/folder name for a workspace, report, project, ... name from a service."""
+    clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name).strip(" .") or "item"
+    if clean.split(".")[0].upper() in _RESERVED_NAMES:
+        clean = f"_{clean}"
+    return clean
+
 
 def rgba_tuple_to_hex(color: tuple) -> str:
     """
@@ -56,7 +67,7 @@ def find_vars(string: str) -> tuple[str]:
     tokens = string.split()
 
     for i, token in enumerate(tokens):
-        if token in ["VAR", "var"]:
+        if token in ["VAR", "var"] and i + 1 < len(tokens):  # "... no var" at the very end
             var_names.append(tokens[i + 1])
 
     return tuple(var_names)
@@ -138,21 +149,17 @@ def excel_sheet_name(name: str, used: set[str]) -> str:
         Valid sheet name
     """
     clean = re.sub(r"[\[\]:*?/\\]", "_", name).strip("'") or "Sheet"
-    candidate = clean[:31]
+
+    def fit(text: str, suffix: str = "") -> str:
+        # Excel rejects a name that starts or ends with ' - also after cutting to 31 characters
+        return (text[: 31 - len(suffix)].strip("'") or "Sheet") + suffix
+
+    candidate = fit(clean)
+    if candidate.lower() == "history":  # reserved by Excel
+        candidate = fit(clean, " (page)")
     counter = 2
     while candidate.lower() in used:
-        suffix = f" ({counter})"
-        candidate = clean[: 31 - len(suffix)] + suffix
+        candidate = fit(clean, f" ({counter})")
         counter += 1
     used.add(candidate.lower())
     return candidate
-
-
-def ensure_directory(path: str) -> None:
-    """
-    Ensure directory exists, create if necessary.
-
-    Args:
-        path: Directory path to ensure
-    """
-    os.makedirs(path, exist_ok=True)

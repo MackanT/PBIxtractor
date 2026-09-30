@@ -41,6 +41,29 @@ def _ref(table: str, name: str) -> str:
     return f"{table}[{name}]"
 
 
+def _split_ref(ref: str) -> tuple[str, str]:
+    """
+    "Table[Name]" / "'My Table'[Name]" / "'Params'" -> (table, name); name is "" for a table.
+
+    Only the brackets around the name are removed ("Sales[Price [EUR]]" -> "Price [EUR]"),
+    and DAX escapes are undone ('' inside a quoted table, ]] inside a name).
+    """
+    if ref.startswith("'"):
+        end = 1
+        while True:  # the closing quote is one not followed by another quote
+            end = ref.index("'", end)
+            if ref[end + 1 : end + 2] != "'":
+                break
+            end += 2
+        table, rest = ref[1:end].replace("''", "'"), ref[end + 1 :]
+    else:
+        table, bracket, rest = ref.partition("[")
+        rest = bracket + rest
+    if rest.startswith("[") and rest.endswith("]"):
+        return table, rest[1:-1].replace("]]", "]")
+    return table, ""
+
+
 # ============================================================================
 # Sections
 # ============================================================================
@@ -361,20 +384,20 @@ def _lineage_section(documentation: Documentation, dependencies: list[dict]) -> 
                     if row["Table"] and row["Name"]:
                         edge(visual_id, field_node(row["Table"], row["Name"]), "uses")
             for field, _ in item.visual_filters:
-                table, _, name = field.partition("[")
-                edge(visual_id, field_node(table, name.rstrip("]")), "filters")
+                edge(visual_id, field_node(*_split_ref(field)), "filters")
+
+    def ref_node(ref: str, ref_type: str) -> str:
+        """Node of a dependency end: a table (e.g. a field parameter) or a column/measure."""
+        table, name = _split_ref(ref)
+        if ref_type == "Table" or not name:
+            return node(f"table:{table}", "table", table)
+        return field_node(table, name)
 
     for dependency in dependencies:
-        if not dependency["exact"] or dependency["source_type"] == "TablePermission":
-            continue  # text-matched refs may be unresolved; RLS has no node yet
-        source_table, _, source_name = dependency["source"].partition("[")
-        source_id = field_node(source_table, source_name.rstrip("]"))
-        if dependency["target_type"] == "Table":
-            table_name = dependency["target"].strip("'")
-            target_id = node(f"table:{table_name}", "table", table_name)
-        else:
-            target_table, _, target_name = dependency["target"].partition("[")
-            target_id = field_node(target_table, target_name.rstrip("]"))
+        if not dependency["exact"] or dependency["source_type"] in ("TablePermission", "CalculationItem"):
+            continue  # text-matched refs may be unresolved; RLS and calc items have no node yet
+        source_id = ref_node(dependency["source"], dependency["source_type"])
+        target_id = ref_node(dependency["target"], dependency["target_type"])
         edge(source_id, target_id, "depends_on")
 
     return {"nodes": list(nodes.values()), "edges": edges}

@@ -211,6 +211,7 @@ class SemanticModel:
     name: str = ""
     compatibility_level: Optional[int] = None
     culture: str = ""
+    default_mode: str = ""  # storage mode of partitions with mode "default" (empty: import)
     tables: list[Table] = field(default_factory=list)
     relationships: list[Relationship] = field(default_factory=list)
     expressions: list[SharedExpression] = field(default_factory=list)
@@ -220,6 +221,12 @@ class SemanticModel:
     @property
     def all_columns(self) -> list[Column]:
         return [column for table in self.tables for column in table.columns]
+
+    def partition_mode(self, partition: "Partition") -> str:
+        """The partition's storage mode, with "default"/empty resolved via the model."""
+        if partition.mode in ("", "default"):
+            return self.default_mode or "import"
+        return partition.mode
 
     @property
     def all_measures(self) -> list[Measure]:
@@ -364,6 +371,7 @@ def parse_model(database: dict) -> SemanticModel:
         name=database.get("name", ""),
         compatibility_level=database.get("compatibilityLevel"),
         culture=model.get("culture", ""),
+        default_mode=model.get("defaultMode", ""),
         tables=tables,
         relationships=relationships,
         expressions=expressions,
