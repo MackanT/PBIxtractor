@@ -383,9 +383,13 @@ def _parse_table(table: dict) -> Table:
         Hierarchy(
             table=name,
             name=hierarchy.get("name", ""),
+            # Array order is not the hierarchy order: "ordinal" is (TMDL lists by ordinal)
             levels=[
                 Level(name=level.get("name", ""), column=level.get("column", ""))
-                for level in hierarchy.get("levels", [])
+                for _, level in sorted(
+                    enumerate(hierarchy.get("levels", [])),
+                    key=lambda item: (item[1].get("ordinal", item[0]), item[0]),
+                )
             ],
             description=_text(hierarchy.get("description")),
             is_hidden=hierarchy.get("isHidden", False),

@@ -203,6 +203,26 @@ def test_structurally_used_columns(model):
     }
 
 
+def test_hierarchy_levels_follow_ordinal():
+    """The .bim array order is not the level order (seen in Adventure Works); ordinal is."""
+    table = {
+        "name": "Geo",
+        "hierarchies": [
+            {
+                "name": "Territories",
+                "levels": [
+                    {"name": "Group", "ordinal": 0, "column": "Group"},
+                    {"name": "Region", "ordinal": 2, "column": "Region"},
+                    {"name": "Country", "ordinal": 1, "column": "Country"},
+                ],
+            }
+        ],
+    }
+    model = parse_model({"model": {"tables": [table]}})
+    levels = model.tables[0].hierarchies[0].levels
+    assert [level.name for level in levels] == ["Group", "Country", "Region"]
+
+
 def test_dataset_matches_tabular_editor_layout(model):
     dataset = model_to_dataset(model)
     assert list(dataset.columns) == DATASET_COLUMNS
