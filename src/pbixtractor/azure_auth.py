@@ -22,6 +22,7 @@ from typing import Callable, Optional
 
 FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 DEVOPS_SCOPE = "499b84ac-1321-427f-aa17-267ca6975798/.default"  # Azure DevOps resource id
+POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 AUTH_RECORD = Path.home() / ".pbixtractor" / "auth_record.json"
 
 
@@ -180,15 +181,29 @@ class RestClient:
         raise ApiError(f"Still throttled after 5 attempts: {url}")
 
 
+def _error_detail(body: dict) -> str:
+    """The reason in a JSON error body: Fabric, Azure DevOps or Power BI format."""
+    if isinstance(body.get("error"), dict):  # Power BI: {"error": {"code", "message"?, "pbi.error"}}
+        error = body["error"]
+        details = [
+            str((d.get("detail") or {}).get("value", ""))
+            for d in (error.get("pbi.error") or {}).get("details", [])
+        ]
+        return ": ".join(
+            part for part in (error.get("code"), error.get("message"), " ".join(filter(None, details))) if part
+        )
+    code = body.get("errorCode") or body.get("typeKey") or ""
+    return f"{code}: {body.get('message', '')}".strip(": ")
+
+
 def error_text(code: int, url: str, content: bytes) -> str:
-    """Readable error message from an HTTP error response (Fabric and DevOps formats)."""
+    """Readable error message from an HTTP error response (reason first, then the URL)."""
     try:
-        body = json.loads(content)
-        detail = f"{body.get('errorCode') or body.get('typeKey', '')}: {body.get('message', '')}"
-        detail = detail.strip(": ")
+        detail = _error_detail(json.loads(content))
     except (ValueError, AttributeError):
         detail = content.decode("utf-8", errors="replace")[:300]
     hint = ""
     if code in (401, 403):
         hint = " - check that you have access (Fabric getDefinition needs Contributor or higher)."
-    return f"HTTP {code} for {url}: {detail}{hint}"
+    endpoint = url.split("?")[0]
+    return f"HTTP {code}: {detail or '(no details)'}{hint} [{endpoint}]"

@@ -195,6 +195,19 @@ def test_encrypted_pbix_gives_clear_error(tmp_path):
         read_report(tmp_path / "Labelled.pbix")
 
 
+def test_encrypted_pbix_fails_the_run_without_a_traceback(tmp_path):
+    from pbixtractor.pipeline import ExtractionOptions, run_extraction
+
+    (tmp_path / "Labelled.pbix").write_bytes(b".pfile\x03\x00\x00\x00" + b"\x00" * 64)
+    (tmp_path / "Labelled.bim").write_text('{"model": {}}', encoding="utf-8")
+    result = run_extraction(ExtractionOptions(
+        tmp_path / "Labelled.pbix", tmp_path / "Labelled.bim", tmp_path / "out",
+        tabular_editor_analysis=False,
+    ))
+    assert result.status == "error" and "sensitivity label" in result.message
+    assert "Traceback" not in result.logs
+
+
 def test_non_zip_pbix_gives_clear_error(tmp_path):
     (tmp_path / "Broken.pbix").write_bytes(b"not a zip")
     with pytest.raises(ValueError, match="not a valid .pbix file"):

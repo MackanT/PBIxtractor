@@ -164,6 +164,10 @@ def _bookmark(data: dict, group: str = "") -> BookmarkDefinition:
 # ============================================================================
 
 
+class ReportReadError(ValueError):
+    """The report cannot be read, for a reason the message explains (no traceback needed)."""
+
+
 class _ZipFiles:
     """Read report files from a .pbix zip."""
 
@@ -173,7 +177,7 @@ class _ZipFiles:
             with zipfile.ZipFile(path, "r") as zip_file:
                 self._names = zip_file.namelist()
         except zipfile.BadZipFile as exc:
-            raise ValueError(_not_a_zip_message(path)) from exc
+            raise ReportReadError(_not_a_zip_message(path)) from exc
 
     def names(self) -> list[str]:
         return list(self._names)
@@ -261,7 +265,7 @@ def read_report(path: str | Path, logger: logging.Logger = None) -> ReportDefini
     if "report.json" in names:
         return _read_legacy(_load_json(files.read("report.json")), logger)
 
-    raise ValueError(f"{path.name}: no Power BI report definition found")
+    raise ReportReadError(f"{path.name}: no Power BI report definition found")
 
 
 # ============================================================================

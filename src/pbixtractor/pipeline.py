@@ -25,6 +25,7 @@ from .json_report import documentation_to_dict, write_json_data
 from .lineage_html import write_lineage_html
 from .live_model import collect_live_statistics
 from .logger import capture_logs, get_logger
+from .readers import ReportReadError
 from .relationship_graph import save_relationship_graph
 from .report_extractor import ReportExtractor, known_functions, visual_mapper, visual_type_list
 from .semantic_model import model_source, model_to_dataset, read_model
@@ -203,6 +204,9 @@ def run_extraction(
     with _RUN_LOCK, capture_logs(callback=on_log) as capture:
         try:
             result = _run(options, progress)
+        except ReportReadError as e:  # expected and explained, e.g. an encrypted .pbix
+            logger.error(f"Extraction failed: {e}")
+            result = ExtractionResult("error", f"Extraction failed: {e}")
         except Exception as e:  # report unexpected failures instead of crashing the UI/CLI
             logger.exception(f"Extraction failed: {e}")
             result = ExtractionResult("error", f"Extraction failed: {e}")
