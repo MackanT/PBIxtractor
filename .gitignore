@@ -173,6 +173,9 @@ TabularScript.cs
 # Temporary extraction folders
 temp_*/
 
+# Web UI state (remembered Fabric/DevOps choices)
+.nicegui/
+
 # Legacy folders (will be removed during migration)
 Input/
 PBIxtractor/PBIxtractor/
