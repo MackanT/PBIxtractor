@@ -2,6 +2,7 @@
 
 import logging
 import sys
+import threading
 from contextlib import contextmanager
 from io import StringIO
 from typing import Callable, Iterator, Optional
@@ -87,33 +88,6 @@ def get_logger(name: str = "pbixtractor") -> logging.Logger:
     return logger
 
 
-def wrap_long_message(message: str, max_length: int = 122) -> str:
-    """
-    Wrap long messages to specified line length.
-
-    Args:
-        message: Message to wrap
-        max_length: Maximum line length
-
-    Returns:
-        Wrapped message
-    """
-    if len(message) <= max_length:
-        return message
-
-    lines = []
-    for line in message.split("\n"):
-        if len(line) <= max_length:
-            lines.append(line)
-        else:
-            # Split long lines
-            while line:
-                lines.append(line[:max_length])
-                line = line[max_length:]
-
-    return "\n".join(lines)
-
-
 class CallbackHandler(logging.Handler):
     """Forward formatted log records to a function, e.g. to show them live in a UI."""
 
@@ -151,7 +125,11 @@ def capture_logs(
     handlers = [capture.handler]
     if callback:
         handlers.append(CallbackHandler(callback, level))
+    # Only this thread's records: in the web UI another tab may be downloading or running in
+    # parallel, and its warnings must not end up in this run's result and log file
+    thread_id = threading.get_ident()
     for handler in handlers:
+        handler.addFilter(lambda record: record.thread == thread_id)
         logger.addHandler(handler)
     try:
         yield capture

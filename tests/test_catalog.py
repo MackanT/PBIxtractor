@@ -122,6 +122,29 @@ def test_source_identity_from_fabric_and_devops_downloads(tmp_path):
     assert "@ main" in devops["label"]
 
 
+def test_crafted_source_file_cannot_delete_outside_the_catalog(sample):
+    """A <report>.fabric_source.json next to an untrusted report must not steer the catalog key
+    outside the catalog folder (the audit reproduced deleting an arbitrary folder)."""
+    victim = sample / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("precious")
+    (sample / "Sample.fabric_source.json").write_text(json.dumps({"semantic_model": {
+        "id": "../../../victim", "name": "Evil", "workspace": "x"}}), encoding="utf-8")
+    catalog = sample / "catalog"
+    _run(sample, catalog)
+    (entry,) = list_entries(catalog)
+    assert "/" not in entry["key"] and ".." not in entry["key"]
+    assert (victim / "keep.txt").read_text() == "precious"
+    assert (catalog / "models" / entry["key"]).is_dir()
+
+
+def test_catalog_links_are_limited_to_the_models_folder(sample):
+    catalog = sample / "catalog"
+    _run(sample, catalog)
+    html = (catalog / "catalog.html").read_text(encoding="utf-8")
+    assert "function safeLink" in html and "^models\\/" in html
+
+
 def test_catalog_page_embeds_data_safely(sample):
     catalog = sample / "catalog"
     _run(sample, catalog)

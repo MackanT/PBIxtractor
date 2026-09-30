@@ -11,11 +11,13 @@ token is multi-resource), so Fabric and DevOps do not ask twice.
 """
 
 import base64
+import email.utils
 import json
 import shutil
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
@@ -89,13 +91,15 @@ class _RememberingCredential:
 
 
 _credentials: dict[Optional[str], object] = {}
+_credentials_lock = threading.Lock()  # two web UI tabs must not start two browser logins
 
 
 def get_credential(tenant_id: Optional[str] = None):
     """The shared credential for a tenant (created once per process)."""
-    if tenant_id not in _credentials:
-        _credentials[tenant_id] = default_credential(tenant_id)
-    return _credentials[tenant_id]
+    with _credentials_lock:
+        if tenant_id not in _credentials:
+            _credentials[tenant_id] = default_credential(tenant_id)
+        return _credentials[tenant_id]
 
 
 # ============================================================================
@@ -135,12 +139,17 @@ class RestClient:
         if self._credential is None:
             self._credential = get_credential()
         if self._token is None or self._token.expires_on - time.time() < 120:
-            self._token = self._credential.get_token(self._scope)
+            try:
+                self._token = self._credential.get_token(self._scope)
+            except ApiError:
+                raise
+            except Exception as error:  # azure-identity: login cancelled/timed out, az expired
+                raise ApiError(f"Sign-in failed: {error}") from None
         return f"Bearer {self._token.token}"
 
     def request(self, method: str, url: str, body: Optional[dict] = None, raw: bool = False):
         """
-        One API call.
+        One API call. Retries throttling (429), server errors (5xx) and dropped connections.
 
         Args:
             method: HTTP method
@@ -150,35 +159,84 @@ class RestClient:
 
         Returns:
             (status, headers, body) - body is parsed JSON (None if empty) or bytes with raw
+
+        Raises:
+            ApiError: For every failure (HTTP error, network, sign-in, unexpected answer)
         """
         if not url.startswith("http"):
             url = f"{self._api}/{url.lstrip('/')}"
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme != "https" and parts.hostname not in ("127.0.0.1", "localhost"):
+            raise ApiError(f"Refusing to send credentials over {parts.scheme or 'no scheme'}: {url}")
         data = json.dumps(body).encode() if body is not None else None
-        for attempt in range(5):
+        for attempt in range(MAX_ATTEMPTS):
+            last_attempt = attempt == MAX_ATTEMPTS - 1
             headers = {"Authorization": self._auth_header(), "Content-Type": "application/json"}
             req = urllib.request.Request(url, data=data, method=method, headers=headers)
             try:
-                with urllib.request.urlopen(req, timeout=300) as response:
+                with _OPENER.open(req, timeout=300) as response:
                     content = response.read()
                     response_headers = dict(response.headers)
+                    content_type = response.headers.get("Content-Type", "")
+                    if response.status == 203 or (content and "html" in content_type):
+                        # e.g. Azure DevOps answers an expired or wrong token with a sign-in page
+                        raise ApiError(
+                            f"Unexpected sign-in page from {url.split('?')[0]} (HTTP "
+                            f"{response.status}) - check the sign-in / access token."
+                        )
                     if raw:
                         return response.status, response_headers, content
-                    if content and "json" not in response.headers.get("Content-Type", ""):
-                        # e.g. Azure DevOps answers a failed PAT login with an HTML page (203)
+                    if content and "json" not in content_type:
                         raise ApiError(
-                            f"Unexpected non-JSON answer from {url} (HTTP {response.status}) - "
-                            "check the sign-in / access token."
+                            f"Unexpected non-JSON answer from {url.split('?')[0]} (HTTP "
+                            f"{response.status}) - check the sign-in / access token."
                         )
                     return response.status, response_headers, (json.loads(content) if content else None)
             except urllib.error.HTTPError as error:
                 content = error.read()
-                if error.code == 429 and attempt < 4:
-                    self._sleep(float(error.headers.get("Retry-After") or 10))
+                if error.code in RETRY_STATUSES and not last_attempt:
+                    self._sleep(_retry_after(error.headers.get("Retry-After"), 2**attempt))
                     continue
                 raise ApiError(error_text(error.code, url, content)) from None
-            except urllib.error.URLError as error:
-                raise ApiError(f"Cannot reach {url}: {error.reason}") from None
-        raise ApiError(f"Still throttled after 5 attempts: {url}")
+            except (urllib.error.URLError, OSError) as error:  # incl. timeouts, resets
+                if not last_attempt:
+                    self._sleep(2**attempt)
+                    continue
+                reason = getattr(error, "reason", error)
+                raise ApiError(f"Cannot reach {url.split('?')[0]}: {reason}") from None
+        raise ApiError(f"Still failing after {MAX_ATTEMPTS} attempts: {url.split('?')[0]}")
+
+
+MAX_ATTEMPTS = 5
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _retry_after(value: Optional[str], default: float) -> float:
+    """Seconds to wait from a Retry-After header (seconds or an HTTP date), at most 2 minutes."""
+    if value:
+        try:
+            return min(max(float(value), 0), 120)
+        except ValueError:
+            try:
+                delta = email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+                return min(max(delta, 0), 120)
+            except (TypeError, ValueError):
+                pass
+    return default
+
+
+class _NoCrossHostAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never carry the Authorization header to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_request = super().redirect_request(req, fp, code, msg, headers, newurl)
+        old_host = urllib.parse.urlsplit(req.full_url).netloc.lower()
+        if new_request is not None and urllib.parse.urlsplit(newurl).netloc.lower() != old_host:
+            new_request.remove_header("Authorization")
+        return new_request
+
+
+_OPENER = urllib.request.build_opener(_NoCrossHostAuthRedirect)
 
 
 def _error_detail(body: dict) -> str:

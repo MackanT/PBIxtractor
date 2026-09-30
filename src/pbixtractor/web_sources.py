@@ -10,6 +10,7 @@ downloads it as a local PBIP project when the documentation is created:
 API calls block (and the first one may open a browser sign-in), so they run in threads.
 """
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -19,6 +20,8 @@ from nicegui import app, run, ui
 from . import devops, fabric
 from .azure_auth import ApiError
 from .pipeline import model_name
+
+logger = logging.getLogger("pbixtractor")
 
 
 @dataclass
@@ -66,6 +69,10 @@ async def _call(function, *args, select: Optional[ui.select] = None):
         return await run.io_bound(function, *args)
     except (ApiError, ValueError, OSError) as error:
         ui.notify(str(error), type="negative", multi_line=True, timeout=15000)
+        return None
+    except Exception as error:  # UI boundary: never let a click end without any message
+        logger.exception(f"Unexpected error: {error}")
+        ui.notify(f"Unexpected error: {error}", type="negative", multi_line=True, timeout=15000)
         return None
     finally:
         if select is not None:
@@ -143,9 +150,10 @@ class FabricPanel:
         _set_options(self.report, {})
         if not self.workspace.value:
             return
-        stored_choices()["fabric_workspace"] = self.workspace.value
-        items = await _call(self._get_client().reports, self.workspace.value, select=self.report)
-        if items is not None:
+        workspace = self.workspace.value
+        stored_choices()["fabric_workspace"] = workspace
+        items = await _call(self._get_client().reports, workspace, select=self.report)
+        if items is not None and self.workspace.value == workspace:  # not changed meanwhile
             _set_options(
                 self.report,
                 {r["id"]: r["displayName"] for r in sorted(items, key=lambda r: r["displayName"].lower())},
@@ -253,9 +261,10 @@ class DevOpsPanel:
             _set_options(select, {})
         if not self.project.value:
             return
+        asked = self._selection(1)
         stored_choices()["devops_project"] = self.project.value
         repos = await _call(self._get_client().repositories, self.project.value, select=self.repo)
-        if repos is not None:
+        if repos is not None and self._selection(1) == asked:  # not changed meanwhile
             self._default_branches = {r["name"]: r["defaultBranch"] for r in repos}
             _set_options(self.repo, {r["name"]: r["name"] for r in repos}, stored_choices().get("devops_repo"))
 
@@ -264,9 +273,10 @@ class DevOpsPanel:
         _set_options(self.report, {})
         if not self.repo.value:
             return
+        asked = self._selection(2)
         stored_choices()["devops_repo"] = self.repo.value
         names = await _call(self._get_client().branches, self.project.value, self.repo.value, select=self.branch)
-        if names:
+        if names and self._selection(2) == asked:
             default = self._default_branches.get(self.repo.value)
             _set_options(self.branch, {n: n for n in names}, default if default in names else names[0])
 
@@ -274,6 +284,7 @@ class DevOpsPanel:
         _set_options(self.report, {})
         if not self.branch.value:
             return
+        asked = self._selection(3)
         paths = await _call(
             self._get_client().find_reports,
             self.project.value,
@@ -281,7 +292,7 @@ class DevOpsPanel:
             self.branch.value,
             select=self.report,
         )
-        if paths is not None:
+        if paths is not None and self._selection(3) == asked:
             _set_options(self.report, {p: p.lstrip("/") for p in paths})
             if not paths:
                 ui.notify("No PBIP reports (*.Report/definition.pbir) on this branch.", type="warning")
@@ -291,6 +302,7 @@ class DevOpsPanel:
         if not self.report.value:
             return
         self._on_choose(self.report.value.rsplit("/", 1)[-1].removesuffix(".Report"))
+        asked = self._selection(4)
         commits = await _call(
             self._get_client().commits,
             self.project.value,
@@ -299,12 +311,17 @@ class DevOpsPanel:
             self.branch.value,
             select=self.version,
         )
-        if commits:
+        if commits and self._selection(4) == asked:
             options = {"": f"Latest on {self.branch.value}"}
             options.update(
                 {c["id"]: f"{c['short']} · {c['date']} · {c['author']}: {c['comment']}" for c in commits}
             )
             self.version.set_options(options, value="")
+
+    def _selection(self, depth: int) -> tuple:
+        """The first `depth` choices (project, repo, branch, report): a slow answer is only
+        applied if they did not change while it was on its way."""
+        return (self.project.value, self.repo.value, self.branch.value, self.report.value)[:depth]
 
     def ready(self) -> bool:
         return bool(self.project.value and self.repo.value and self.branch.value and self.report.value)

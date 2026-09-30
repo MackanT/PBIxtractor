@@ -38,6 +38,15 @@ def _slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()[:60] or "model"
 
 
+def _inside(catalog_dir: Path, folder: str, name: str) -> Path:
+    """<catalog>/<folder>/<name>, refusing anything that would resolve outside <catalog>/<folder>."""
+    base = (Path(catalog_dir) / folder).resolve()
+    path = (base / name).resolve()
+    if path.parent != base:
+        raise ValueError(f"Catalog key {name!r} is not a plain name")
+    return path
+
+
 def _read_json(path: Path) -> Optional[dict]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -58,7 +67,8 @@ def source_identity(report_path: Path, model_path: Path, model_name: str) -> dic
     if fabric and fabric.get("semantic_model", {}).get("id"):
         model = fabric["semantic_model"]
         return {
-            "key": f"fabric-{model['id']}",
+            # _slug: the id comes from a file next to the report, never trust it as a path
+            "key": f"fabric-{_slug(str(model['id']))}",
             "kind": "fabric",
             "label": f"Fabric · {model.get('workspace', '')} / {model.get('name', model_name)}",
             "workspace": model.get("workspace"),
@@ -201,6 +211,8 @@ def build_entry(doc: dict, identity: dict, name: str, links: dict) -> dict:
         "tables": tables,
         "usage": usage,
         "depends_on": depends_on,
+        # Reports on the model that could not be documented: "unused" may be incomplete
+        "not_included": doc.get("not_included", []),
     }
 
 
@@ -233,7 +245,7 @@ def add_to_catalog(
     """
     catalog_dir = Path(catalog_dir)
     identity = source_identity(report_path, model_path, name)
-    model_folder = catalog_dir / "models" / identity["key"]
+    model_folder = _inside(catalog_dir, "models", identity["key"])
     if model_folder.exists():
         shutil.rmtree(model_folder)
     model_folder.mkdir(parents=True)
@@ -244,9 +256,9 @@ def add_to_catalog(
             links[kind] = f"models/{identity['key']}/{Path(files[kind]).name}"
 
     entry = build_entry(doc, identity, name, links)
-    entries = catalog_dir / "entries"
-    entries.mkdir(parents=True, exist_ok=True)
-    (entries / f"{identity['key']}.json").write_text(
+    entry_file = _inside(catalog_dir, "entries", f"{identity['key']}.json")
+    entry_file.parent.mkdir(parents=True, exist_ok=True)
+    entry_file.write_text(
         json.dumps(entry, ensure_ascii=False, indent=1), encoding="utf-8"
     )
     return rebuild_catalog(catalog_dir)
@@ -265,11 +277,11 @@ def list_entries(catalog_dir: Path) -> list[dict]:
 def remove_from_catalog(catalog_dir: Path, key: str) -> bool:
     """Remove an entry and its copied files; True if it existed."""
     catalog_dir = Path(catalog_dir)
-    entry = catalog_dir / "entries" / f"{key}.json"
+    entry = _inside(catalog_dir, "entries", f"{key}.json")
     if not entry.is_file():
         return False
     entry.unlink()
-    shutil.rmtree(catalog_dir / "models" / key, ignore_errors=True)
+    shutil.rmtree(_inside(catalog_dir, "models", key), ignore_errors=True)
     rebuild_catalog(catalog_dir)
     return True
 
@@ -286,7 +298,8 @@ def rebuild_catalog(catalog_dir: Path) -> Path:
     (catalog_dir / CATALOG_JSON).write_text(
         json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
     )
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    # No "<" inside the data block (see lineage_html.render_lineage_html): still valid JSON
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
     html = _TEMPLATE.replace("__TITLE__", escape("PBIxtractor catalog")).replace("__DATA__", payload)
     (catalog_dir / CATALOG_HTML).write_text(html, encoding="utf-8")
     return catalog_dir / CATALOG_HTML
@@ -535,11 +548,15 @@ ul.list li { padding: 2px 0; break-inside: avoid; }
       ul.appendChild(li); });
     main.appendChild(ul);
   }
+  // Only relative links into this catalog's models/ folder (an edited entry must not be able
+  // to smuggle in a javascript: or external link)
+  function safeLink(link) { return typeof link === "string" && /^models\/[^:]*$/.test(link) ? link : null; }
   function fullDocs(e, node) {
     var main = $("main"), box = el("div");
-    if (e.links.lineage) { var a = el("a", "btn", "Open in the lineage viewer ↗");
-      a.href = e.links.lineage + (node ? "#" + encodeURIComponent(node) : ""); a.target = "_blank"; box.appendChild(a); }
-    if (e.links.workbook) { var w = el("a", "btn", "Workbook ⭳"); w.href = e.links.workbook; box.appendChild(w); }
+    var lineage = safeLink(e.links.lineage), workbook = safeLink(e.links.workbook);
+    if (lineage) { var a = el("a", "btn", "Open in the lineage viewer ↗");
+      a.href = lineage + (node ? "#" + encodeURIComponent(node) : ""); a.target = "_blank"; box.appendChild(a); }
+    if (workbook) { var w = el("a", "btn", "Workbook ⭳"); w.href = workbook; box.appendChild(w); }
     main.appendChild(box);
   }
   function pageLink(e, pageId) {
@@ -587,6 +604,12 @@ ul.list li { padding: 2px 0; break-inside: avoid; }
     kv([["Documented", e.documented + " (" + e.generator + ")"], ["Reports", e.reports.length], ["Pages", pages],
         ["Tables", e.tables.length], ["Columns", columns + (unusedC ? " (" + unusedC + " unused)" : "")],
         ["Measures", measures + (unusedM ? " (" + unusedM + " unused)" : "")]]);
+    if ((e.not_included || []).length) {
+      $("main").appendChild(el("span", "warn", "Not included - 'unused' may be incomplete:"));
+      var ul = el("ul", "list");
+      e.not_included.forEach(function (text) { ul.appendChild(el("li", null, text)); });
+      $("main").appendChild(ul);
+    }
     fullDocs(e);
     section("Reports", e.reports.map(function (r) { return { id: e.key + "|report|" + r.name, text: (r.name || e.name) + " - " + r.pages.length + " pages" }; }));
     section("Tables", e.tables.map(function (t) { return { id: e.key + "|table|" + t.name,

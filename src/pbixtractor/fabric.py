@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .azure_auth import FABRIC_SCOPE, POWERBI_SCOPE, ApiError, RestClient
+from .utils import safe_name  # noqa: F401 (also used as fabric/devops.safe_name)
 
 logger = logging.getLogger("pbixtractor")
 
@@ -242,10 +243,6 @@ class FetchedReport:
     skipped: list[str] = field(default_factory=list)
 
 
-def safe_name(name: str) -> str:
-    return re.sub(r'[<>:"/\\|?*]+', "_", name).strip(" .") or "item"
-
-
 def write_parts(parts: list[dict], folder: Path) -> None:
     """Write definition parts (base64 payloads) under a folder, replacing its content."""
     if folder.exists():
@@ -307,13 +304,21 @@ def _write_source(report_folder: Path, ws: dict, rep: dict, model_ws: dict, mode
 
 
 def reports_on_model(
-    client: FabricClient, model_id: str, workspaces: list[dict], say=None
+    client: FabricClient,
+    model_id: str,
+    workspaces: list[dict],
+    say=None,
+    not_searched: Optional[list[str]] = None,
 ) -> list[tuple[dict, dict]]:
     """
     Reports bound to a semantic model, in the given workspaces.
 
+    Args:
+        not_searched: Receives "<workspace>: <error>" for each workspace whose reports could
+            not be listed - reports there may be missing, so "unused" may be incomplete
+
     Returns:
-        [(workspace, report as {"id", "displayName"})]; workspaces that cannot be read are skipped
+        [(workspace, report as {"id", "displayName"})]
     """
     found = []
     for ws in workspaces:
@@ -322,7 +327,8 @@ def reports_on_model(
         try:
             reports = client.powerbi_reports(ws["id"])
         except FabricError as error:
-            logger.debug(f"Cannot list reports in {ws['displayName']}: {error}")
+            if not_searched is not None:
+                not_searched.append(f"workspace {ws['displayName']} could not be searched: {error}")
             continue
         for report in reports:
             if (report.get("datasetId") or "").lower() == model_id.lower():
@@ -414,7 +420,8 @@ def fetch_report(
 
     search = workspaces if all_workspaces else list({w["id"]: w for w in (ws, model_ws)}.values())
     used_names = {report_folder.name.lower()}
-    for other_ws, other in reports_on_model(client, model["id"], search, say):
+    found = reports_on_model(client, model["id"], search, say, not_searched=fetched.skipped)
+    for other_ws, other in found:
         if other["id"] == rep["id"]:
             continue
         name = safe_name(other["displayName"])
@@ -425,8 +432,8 @@ def fetch_report(
         try:
             other_pbir = _download_report(client, other_ws, other, folder, say)
         except FabricError as error:
+            # Reported as a warning of the documentation run (ExtractionOptions.not_included)
             fetched.skipped.append(f"{other['displayName']} ({other_ws['displayName']}): {error}")
-            logger.warning(f"Report {other['displayName']} on the model could not be downloaded: {error}")
             continue
         _bind_to_local_model(folder, other_pbir, model_folder)
         _write_source(folder, other_ws, other, model_ws, model)

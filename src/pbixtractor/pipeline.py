@@ -70,6 +70,9 @@ class ExtractionOptions:
     # Model mode: more reports on the same model, documented together with report_path (pages
     # become "<report> › <page>"; "unused" then means unused by all of them)
     extra_reports: list[Path] = field(default_factory=list)
+    # Model mode: reports (or workspaces) on the model that could not be read - logged as
+    # warnings of the run and written to the JSON/catalog, since "unused" is then incomplete
+    not_included: list[str] = field(default_factory=list)
     # Statistics from the Power BI service (row counts, sizes, measure types) for a model
     # downloaded from Fabric; None = look for <report>.fabric_source.json next to the report
     service_model: Optional[ServiceModel] = None
@@ -232,7 +235,7 @@ def _service_statistics(model, options: ExtractionOptions, progress):
         table.name
         for table in model.tables
         if not table.is_calculation_group
-        and not any(p.mode == "directQuery" for p in table.partitions)
+        and not any(model.partition_mode(p) == "directQuery" for p in table.partitions)
     ]
     progress("Row counts from the Power BI service", 0.47)
     try:
@@ -279,7 +282,13 @@ def run_extraction(
         if options.write_log_file:
             log_dir = options.output_dir / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
-            log_file = log_dir / f"log_data_{time.strftime('%H_%M_%S')}.txt"
+            # Date and time, so runs on other days (or in the same second) do not overwrite
+            stamp = time.strftime("%Y-%m-%d_%H_%M_%S")
+            log_file = log_dir / f"log_data_{stamp}.txt"
+            counter = 2
+            while log_file.exists():
+                log_file = log_dir / f"log_data_{stamp}_{counter}.txt"
+                counter += 1
             log_file.write_text(result.logs, encoding="utf-8")
             result.files["log"] = log_file
     result.seconds = round(time.monotonic() - started, 1)
@@ -306,6 +315,9 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
 
     # 1. Model: always read from the .bim (relationships, sort-by and hierarchy columns come
     #    from here, even when Tabular Editor provides the TSV)
+    for missing in options.not_included:
+        logger.warning(f"Not included in this documentation ('unused' may be incomplete): {missing}")
+
     progress("Reading the model", 0.05)
     try:
         source = model_source(options.model_path)  # the .bim file or TMDL folder
@@ -317,8 +329,12 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         model, source, options, progress
     )
     service_statistics = _service_statistics(model, options, progress)
-    if service_statistics is not None and not (live_statistics and live_statistics.has_sizes):
-        # Desktop (when open) knows more: sizes and measure types; the service only rows/values
+    if service_statistics is not None:
+        # The model as published wins: a downloaded report is never open in Desktop by its
+        # own path, so Desktop statistics here come from a name-similarity match - possibly a
+        # different (e.g. dev) copy of the model
+        if live_statistics is not None:
+            logger.debug("Using Power BI service statistics instead of a matching Desktop model")
         live_statistics = service_statistics
 
     # Measure data types are only known by a live model (the .bim usually lacks them)
@@ -378,6 +394,8 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
     )
     progress("Writing JSON and the lineage viewer", 0.95)
     report_json = documentation_to_dict(documentation)
+    if options.not_included:
+        report_json["not_included"] = list(options.not_included)
     write_json_data(str(files["json"]), report_json)
     write_lineage_html(files["lineage"], report_json)
 

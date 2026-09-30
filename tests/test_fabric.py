@@ -238,6 +238,17 @@ def test_report_that_cannot_be_downloaded_is_skipped(tmp_path):
     assert f"powerbi/{WS_MODELS}/reports" in [u for _, u in client.calls]  # every workspace
 
 
+def test_workspace_that_cannot_be_searched_is_reported(tmp_path):
+    client = FakeFabric(_report_parts(tmp_path, "Sales WS"))
+
+    def refuse(workspace_id):
+        raise FabricError("HTTP 401: TokenExpired")
+
+    client.powerbi_reports = refuse
+    fetched = fetch_report(client, "Sales WS", "Sample", tmp_path / "out", all_reports=True)
+    assert fetched.skipped == ["workspace Sales WS could not be searched: HTTP 401: TokenExpired"]
+
+
 def test_service_statistics(tmp_path):
     client = FakeFabric([])
     stats = read_service_statistics(ServiceModel(WS_SALES, MODEL_ID), ["Sales", "Dates"], client=client)
@@ -316,7 +327,30 @@ def test_cli_extract_needs_report_or_fabric(capsys):
 
 
 class _Handler(BaseHTTPRequestHandler):
+    calls: dict = {}
+
+    def _send(self, status, body, content_type="application/json", **headers):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        for name, value in headers.items():
+            self.send_header(name.replace("_", "-"), value)
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):  # noqa: N802 (http.server API)
+        _Handler.calls[self.path] = _Handler.calls.get(self.path, 0) + 1
+        if self.path == "/v1/flaky":  # 503 once, then fine
+            if _Handler.calls[self.path] == 1:
+                return self._send(503, b"{}", Retry_After="Wed, 21 Oct 2015 07:28:00 GMT")
+            return self._send(200, b'{"ok": true}')
+        if self.path == "/v1/signin":
+            return self._send(203, b"<html>Sign in</html>", "text/html")
+        if self.path == "/v1/redirect":  # to another host (localhost vs 127.0.0.1)
+            port = self.server.server_port
+            return self._send(302, b"", Location=f"http://localhost:{port}/v1/landing")
+        if self.path == "/v1/landing":
+            _Handler.calls["landing_auth"] = self.headers.get("Authorization")
+            return self._send(200, b"{}")
         if self.path == "/v1/workspaces":
             assert self.headers["Authorization"] == "Bearer fake-token"
             body = json.dumps({"value": [{"id": WS_SALES, "displayName": "Sales WS"}]}).encode()
@@ -346,3 +380,32 @@ def test_http_requests_and_errors(server):
     assert client.workspaces() == [{"id": WS_SALES, "displayName": "Sales WS"}]
     with pytest.raises(FabricError, match="HTTP 403.*InsufficientPrivileges: Nope.*Contributor"):
         client.reports(WS_SALES)
+
+
+def test_http_retries_sign_in_pages_and_redirects(server):
+    waits = []
+    client = FabricClient(_Credential(), api=server, sleep=waits.append)
+    # A 503 is retried; its Retry-After is an HTTP date in the past -> no long wait
+    assert client.request("GET", "flaky")[2] == {"ok": True}
+    assert waits == [0]
+    # An HTML sign-in page (DevOps answers an expired token so) is an error, also for raw
+    with pytest.raises(FabricError, match="sign-in page"):
+        client.request("GET", "signin", raw=True)
+    # The token is never carried to another host on a redirect
+    client.request("GET", "redirect")
+    assert _Handler.calls["landing_auth"] is None
+
+
+def test_credentials_are_never_sent_over_plain_http():
+    client = FabricClient(_Credential(), api="http://api.example.com/v1")
+    with pytest.raises(FabricError, match="Refusing to send credentials over http"):
+        client.request("GET", "workspaces")
+
+
+def test_sign_in_errors_become_api_errors():
+    class Failing:
+        def get_token(self, *scopes):
+            raise RuntimeError("User cancelled the login")
+
+    with pytest.raises(FabricError, match="Sign-in failed: User cancelled"):
+        FabricClient(Failing(), api="https://api.fabric.microsoft.com/v1").request("GET", "x")

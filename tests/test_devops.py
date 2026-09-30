@@ -18,6 +18,7 @@ from pbixtractor.devops import (
     parse_devops_url,
     parse_version,
     report_folder_path,
+    safe_repo_path,
 )
 
 from .sample_pbir import write_sample_pbip
@@ -137,6 +138,30 @@ def test_parse_devops_url():
         report_folder_path("/Reports/readme.md")
 
 
+def test_parse_short_devops_url_without_project():
+    location = parse_devops_url("https://dev.azure.com/contoso/_git/Reports?path=/Sales.Report")
+    assert (location.org, location.project, location.repo) == (
+        "https://dev.azure.com/contoso", "Reports", "Reports")
+    old_style = parse_devops_url("https://contoso.visualstudio.com/_git/Reports?path=/Sales.Report")
+    assert (old_style.project, old_style.repo) == ("Reports", "Reports")
+
+
+@pytest.mark.parametrize(
+    "org",
+    ["http://contoso.visualstudio.com", "https://evil.example/contoso", "https://dev.azure.com.evil.example"],
+)
+def test_tokens_are_only_sent_to_azure_devops(org):
+    with pytest.raises(ApiError, match="Not an Azure DevOps address"):
+        DevOpsClient(org, credential=object())
+    # dev.azure.com links are always rewritten to https
+    assert DevOpsClient("http://dev.azure.com/contoso", credential=object()).org.startswith("https://")
+
+
+def test_extra_devops_hosts_can_be_allowed(monkeypatch):
+    monkeypatch.setenv("PBIXTRACTOR_DEVOPS_HOSTS", "tfs.contoso.local")
+    assert DevOpsClient("https://tfs.contoso.local", credential=object()).org == "https://tfs.contoso.local"
+
+
 def test_parse_version():
     assert parse_version("main") == ("main", "branch")
     assert parse_version("tag:v1.0") == ("v1.0", "tag")
@@ -212,6 +237,36 @@ def test_report_bound_to_service_model(tmp_path):
         fetch_report(client, "BI Team", "reports", "/Reports/Sample.Report", tmp_path / "out", "main")
 
 
+@pytest.mark.parametrize(
+    "path", ["/a/../b", "..", "/a\\..\\b", "/C:/Windows", "/a//b", "/./a", ""]
+)
+def test_unsafe_repository_paths_are_refused(path):
+    with pytest.raises(ApiError, match="Unsafe path"):
+        safe_repo_path(path)
+
+
+def test_malicious_model_reference_cannot_touch_other_folders(tmp_path):
+    """A definition.pbir byPath with ..\\ segments must never delete or write outside the
+    download folder (the audit reproduced wiping an arbitrary folder)."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("precious")
+    files = _repo_files(tmp_path)
+    for reference in ("..\\..\\..\\victim", "../../../../victim"):
+        files["/Reports/Sample.Report/definition.pbir"] = json.dumps(
+            {"datasetReference": {"byPath": {"path": reference}}}
+        ).encode()
+        client = FakeDevOps(files)
+        with pytest.raises(ApiError):
+            fetch_report(client, "BI Team", "reports", "/Reports/Sample.Report", tmp_path / "out", "main")
+        assert (victim / "keep.txt").read_text() == "precious"
+
+
+def test_non_zip_download_gives_a_clear_error(tmp_path):
+    with pytest.raises(ApiError, match="not a zip archive.*access token"):
+        extract_folder(b"<html>Sign in</html>", "/Reports/Sample.Report", tmp_path)
+
+
 def test_extract_folder_rejects_escaping_paths(tmp_path):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -226,12 +281,12 @@ def test_cli_extract_from_devops(tmp_path, monkeypatch, capsys):
     output = tmp_path / "doc"
     url = "https://dev.azure.com/contoso/BI%20Team/_git/reports?path=/Reports/Sample.Report&version=GBmain"
     with pytest.raises(SystemExit) as exit_info:
-        main(["extract", "--devops", url, "--version", "tag:v1", "-o", str(output),
+        main(["extract", "--devops", url, "--ref", "tag:v1", "-o", str(output),
               "--no-tabular-editor", "-q"])
     assert exit_info.value.code == 0, capsys.readouterr().err
     assert (output / "Sample.xlsx").is_file()
     zips = [q for p, q in client.calls if q.get("$format") == "zip"]
-    assert zips[0]["versionDescriptor.versionType"] == "tag"  # --version wins over the URL
+    assert zips[0]["versionDescriptor.versionType"] == "tag"  # --ref wins over the URL
 
 
 def test_cli_devops_list(tmp_path, monkeypatch, capsys):

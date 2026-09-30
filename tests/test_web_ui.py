@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -59,6 +60,27 @@ def test_report_path_fills_model_and_output(sample):
     _simulate(scenario)
 
 
+def test_changing_the_report_replaces_the_found_model_but_not_a_chosen_one(sample):
+    other = sample / "other"
+    other.mkdir()
+    (other / "Other.pbix").write_bytes((sample / "Sample.pbix").read_bytes())
+    (other / "Other.bim").write_text((sample / "Sample.bim").read_text(encoding="utf-8"), encoding="utf-8")
+
+    async def scenario(user):
+        await user.open("/")
+        report = next(iter(user.find(marker="report").elements))
+        model = next(iter(user.find(marker="model").elements))
+        report.value = str(sample / "Sample.pbix")
+        assert model.value == str(sample / "Sample.bim")
+        report.value = str(other / "Other.pbix")  # the audit found Sample.bim kept here
+        assert model.value == str(other / "Other.bim")
+        model.value = str(sample / "Sample.bim")  # chosen by the user: kept
+        report.value = str(sample / "Sample.pbix")
+        assert model.value == str(sample / "Sample.bim")
+
+    _simulate(scenario)
+
+
 def test_run_shows_results_and_serves_lineage(sample):
     async def scenario(user):
         await user.open("/")
@@ -84,6 +106,47 @@ def test_run_shows_results_and_serves_lineage(sample):
             web_ui._serve_output_file(token, "../Sample.pbix")
 
     _simulate(scenario)
+
+
+def test_catalog_route_serves_only_catalog_files(tmp_path, monkeypatch):
+    catalog = tmp_path / "catalog"
+    (catalog / "models" / "k").mkdir(parents=True)
+    (catalog / "catalog.html").write_text("<html></html>")
+    (catalog / "models" / "k" / "x_lineage.html").write_text("<html></html>")
+    (catalog / "secret.txt").write_text("not for the browser")
+    (catalog / "notes").mkdir()
+    (catalog / "notes" / "id_rsa").write_text("key")
+    monkeypatch.setitem(web_ui._CATALOG, "dir", catalog)
+
+    page = web_ui._serve_catalog_file("catalog.html")
+    assert "sandbox" in page.headers["content-security-policy"]  # runs in an opaque origin
+    assert web_ui._serve_catalog_file("models/k/x_lineage.html").status_code == 200
+    for path in ("secret.txt", "notes/id_rsa", "models/../secret.txt", "../catalog/secret.txt"):
+        with pytest.raises(HTTPException):
+            web_ui._serve_catalog_file(path)
+
+
+def test_unknown_hosts_are_refused():
+    """DNS rebinding: a page on another host name pointing at 127.0.0.1 gets nothing."""
+    import httpx
+    from fastapi import FastAPI
+
+    server = FastAPI()
+    server.get("/")(lambda: {"ok": True})
+    original, web_ui.app = web_ui.app, server
+    try:
+        web_ui.add_host_check(8081)
+    finally:
+        web_ui.app = original
+
+    async def status(host: str) -> int:
+        transport = httpx.ASGITransport(app=server)
+        async with httpx.AsyncClient(transport=transport, base_url="http://x") as client:
+            return (await client.get("/", headers={"host": host})).status_code
+
+    assert asyncio.run(status("127.0.0.1:8081")) == 200
+    assert asyncio.run(status("localhost:8081")) == 200
+    assert asyncio.run(status("evil.example:8081")) == 421
 
 
 def test_tabular_editor_folder_can_be_set(sample):
@@ -125,8 +188,8 @@ def test_dropped_files_are_copied_and_filled_in(sample):
         # The model and the report of one drop may arrive in any order
         await upload.handle_uploads([ui.upload.SmallFileUpload("Dropped.bim", "", model_bytes)])
         await upload.handle_uploads([ui.upload.SmallFileUpload("Dropped.pbix", "", report_bytes)])
-        await asyncio.sleep(0.3)  # let the handlers finish
         uploads = sample / "output" / "_uploads"
+        await _wait_for(lambda: _value(user, "model") == str(uploads / "Dropped.bim"))
         assert (uploads / "Dropped.pbix").read_bytes() == report_bytes
         assert user.find(marker="report").elements.pop().value == str(uploads / "Dropped.pbix")
         assert user.find(marker="model").elements.pop().value == str(uploads / "Dropped.bim")
@@ -138,10 +201,32 @@ def test_dropped_files_are_copied_and_filled_in(sample):
     _simulate(scenario)
 
 
-async def _choose(user, marker: str, value) -> None:
-    """Set a select/input like a user would and let its (async) handler finish."""
-    user.find(marker=marker).elements.pop().value = value
-    await asyncio.sleep(0.3)
+def _element(user, marker: str):
+    return next(iter(user.find(marker=marker).elements))
+
+
+def _value(user, marker: str):
+    return _element(user, marker).value
+
+
+def _options(user, marker: str) -> dict:
+    return _element(user, marker).options
+
+
+async def _wait_for(condition, timeout: float = 10.0) -> None:
+    """Poll until an (async) handler has done its work - no fixed sleeps that are too short
+    on a slow machine."""
+    for _ in range(int(timeout / 0.05)):
+        if condition():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("condition not met in time")
+
+
+async def _choose(user, marker: str, value, until=None) -> None:
+    """Set a select/input like a user would; `until`: what its handler does (waited for)."""
+    _element(user, marker).value = value
+    await _wait_for(until or (lambda: True))
 
 
 def test_document_a_report_from_devops(sample, monkeypatch):
@@ -155,15 +240,17 @@ def test_document_a_report_from_devops(sample, monkeypatch):
         await _choose(user, "source", "devops")
         await _choose(user, "devops_org", "contoso")
         user.find(marker="devops_load").click()
-        await asyncio.sleep(0.3)
-        await _choose(user, "devops_project", "BI Team")
-        await _choose(user, "devops_repo", "reports")
-        branch = user.find(marker="devops_branch").elements.pop()
-        assert branch.value == "main"  # the repository's default branch is preselected
-        await asyncio.sleep(0.3)
-        await _choose(user, "devops_report", "/Reports/Sample.Report")
-        version = user.find(marker="devops_version").elements.pop()
-        assert "a1b2c3d4" in list(version.options.values())[1]  # commit history listed
+        await _wait_for(lambda: _options(user, "devops_project"))
+        await _choose(user, "devops_project", "BI Team", until=lambda: _options(user, "devops_repo"))
+        # the repository's default branch is preselected, and its reports listed
+        await _choose(user, "devops_repo", "reports", until=lambda: _value(user, "devops_branch"))
+        assert _value(user, "devops_branch") == "main"
+        await _wait_for(lambda: _options(user, "devops_report"))
+        await _choose(
+            user, "devops_report", "/Reports/Sample.Report",
+            until=lambda: len(_options(user, "devops_version")) > 1,
+        )
+        assert "a1b2c3d4" in list(_options(user, "devops_version").values())[1]  # commit history
         await _choose(user, "devops_version", "a1b2c3d4e5f6")
         assert user.find(marker="output").elements.pop().value.endswith("Sample")
 
@@ -192,8 +279,8 @@ def test_document_a_report_from_fabric(sample, monkeypatch):
         user.find("Create documentation").click()
         await user.should_see("Choose a report first.")
         user.find(marker="fabric_load").click()
-        await asyncio.sleep(0.3)
-        await _choose(user, "fabric_workspace", WS_SALES)
+        await _wait_for(lambda: _options(user, "fabric_workspace"))
+        await _choose(user, "fabric_workspace", WS_SALES, until=lambda: _options(user, "fabric_report"))
         await _choose(user, "fabric_report", REPORT_ID)
         await _choose(user, "fabric_all_reports", True)  # model mode
         user.find("Create documentation").click()
@@ -224,6 +311,15 @@ def test_browser_opens_only_without_a_reconnecting_tab(monkeypatch):
         assert opened == ["http://x/"]
 
     asyncio.run(scenario())
+
+
+def test_tests_never_use_the_real_nicegui_storage():
+    """user_simulation deletes NiceGUI's storage folder; conftest points it at a temp folder so
+    running the tests does not wipe the web UI's remembered choices in the repo."""
+    from nicegui.storage import Storage
+
+    repo = Path(__file__).resolve().parent.parent
+    assert repo not in Storage.path.parents and Storage.path != repo / ".nicegui"
 
 
 def test_log_count_counts_messages_not_lines():

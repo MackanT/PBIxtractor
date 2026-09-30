@@ -27,9 +27,9 @@ Examples:
   pbixtractor fabric fetch "Sales WS/Sales" -o C:/pbip   Only download (as a PBIP project)
   pbixtractor extract --devops "https://dev.azure.com/org/Proj/_git/Repo?path=/Sales.Report"
                                                   Document a report from Azure DevOps (URL as
-                                                  copied from the browser; add --version)
+                                                  copied from the browser; add --ref)
   pbixtractor devops list myorg                   Projects (then: myorg Proj, myorg Proj Repo)
-  pbixtractor devops fetch "<url>" --version commit:a1b2c3d   Download an older version
+  pbixtractor devops fetch "<url>" --ref commit:a1b2c3d   Download an older version
 """
 
 
@@ -64,9 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
         "first; the URL of the .Report folder or .pbip file as shown in the browser",
     )
     extract.add_argument(
-        "--version",
+        "--ref",
+        "--version",  # the old name; "pbixtractor --version" is the program's version
         dest="repo_version",
-        metavar="VERSION",
+        metavar="REF",
         help="with --devops: branch name, tag:<name> or commit:<id> (default: the URL's "
         "version, else the default branch)",
     )
@@ -161,7 +162,8 @@ def build_parser() -> argparse.ArgumentParser:
     devops_fetch = devops_commands.add_parser("fetch", help="download a report and its model")
     devops_fetch.add_argument("url", help="URL of the .Report folder or .pbip file")
     devops_fetch.add_argument(
-        "--version", dest="repo_version", help="branch, tag:<name> or commit:<id>"
+        "--ref", "--version", dest="repo_version", metavar="REF",
+        help="branch, tag:<name> or commit:<id>",
     )
     devops_fetch.add_argument(
         "-o", "--output", type=Path, help="local root (default: output/_devops/<project>/<repo>/<version>)"
@@ -235,7 +237,7 @@ def run_fabric(args: argparse.Namespace) -> int:
             for item in sorted(items, key=lambda i: i["displayName"].lower()):
                 print(f"  {item['id']}  {item['displayName']}")
         return 0
-    except (FabricError, ValueError) as error:
+    except (FabricError, ValueError, OSError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
@@ -294,7 +296,7 @@ def run_devops(args: argparse.Namespace) -> int:
             for path in client.find_reports(args.project, args.repo):
                 print(f"  {path}")
         return 0
-    except (ApiError, ValueError) as error:
+    except (ApiError, ValueError, OSError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
@@ -348,14 +350,13 @@ def run_extract(args: argparse.Namespace) -> int:
                 fetched = _fetch(args, args.fabric, source)
             else:
                 fetched = _devops_fetch(args, args.devops, source)
-        except (ApiError, ValueError) as error:
+        except (ApiError, ValueError, OSError) as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 1
         args.report = fetched.report_folder
         args.model = args.model or fetched.model_path
         extra_reports = fetched.report_folders[1:]
-        for skipped in getattr(fetched, "skipped", []):
-            print(f"WARNING: not included (could not be downloaded): {skipped}", file=sys.stderr)
+        not_included = list(fetched.skipped)  # reported as warnings of the run
         if args.all_reports and not args.name:
             args.name = model_name(fetched.model_path)
     else:
@@ -363,7 +364,7 @@ def run_extract(args: argparse.Namespace) -> int:
             print("--all-reports works with --fabric / --devops; for local files use --also.",
                   file=sys.stderr)
             return 2
-        extra_reports = list(args.also or [])
+        extra_reports, not_included = list(args.also or []), []
         if extra_reports and not args.name:
             model_path = args.model or find_model_for_report(args.report)
             args.name = model_name(model_path) if model_path else None
@@ -387,6 +388,7 @@ def run_extract(args: argparse.Namespace) -> int:
         tabular_editor_tsv=args.tabular_editor_tsv,
         write_log_file=not args.no_log_file,
         extra_reports=extra_reports,
+        not_included=not_included,
         service_statistics=not args.no_service_statistics,
         catalog_dir=args.catalog,
     )

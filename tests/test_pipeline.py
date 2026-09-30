@@ -120,6 +120,40 @@ def test_model_mode_documents_reports_together(sample):
     assert result.files["workbook"].name == "Sample model.xlsx"
 
 
+def test_model_mode_keeps_copied_reports_apart(sample):
+    """A copied report reuses every visual id: each button must keep its own report's target."""
+    detail = _detail_report(sample / "detail")
+    button = detail / "definition/pages/ReportSectionA/visuals/btn1/visual.json"
+    text = button.read_text(encoding="utf-8-sig")
+    assert "'Bookmark1'" in text
+    button.write_text(text.replace("'Bookmark1'", "'BookmarkGone'"), encoding="utf-8")
+
+    result = run_extraction(ExtractionOptions(
+        report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+        output_dir=sample / "model", name="Sample model", tabular_editor_analysis=False,
+        extra_reports=[detail],
+    ))
+    assert result.ok, result.message
+    pages = {p["name"]: p for p in result.report_json["report"]["pages"]}
+    broken = {
+        name: sorted(i["id"] for i in page["items"] if i.get("broken"))
+        for name, page in pages.items()
+    }
+    assert broken["Sample › Sales"] == ["btn4"]
+    assert broken["Detail › Sales"] == ["btn1", "btn4"]
+
+
+def test_not_included_reports_make_the_run_warn(sample):
+    result = run_extraction(ExtractionOptions(
+        report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+        output_dir=sample / "out", tabular_editor_analysis=False,
+        not_included=["Other report (WS): HTTP 403"],
+    ))
+    assert result.status == "warnings"
+    assert "Not included in this documentation" in result.logs
+    assert result.report_json["not_included"] == ["Other report (WS): HTTP 403"]
+
+
 def test_cli_also_documents_local_reports_together(sample, capsys):
     detail = _detail_report(sample / "detail")
     output = sample / "doc"

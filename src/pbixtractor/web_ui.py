@@ -9,6 +9,7 @@ output files can be downloaded. The extraction itself runs in a background threa
 """
 
 import asyncio
+import logging
 import os
 import queue
 import re
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from nicegui import app, background_tasks, events, run, ui
 
 from . import __version__
@@ -41,7 +42,13 @@ from .web_sources import DevOpsPanel, FabricPanel, Fetched, stored_choices
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
 _OUTPUT_DIRS: dict[str, Path] = {}
 
+def default_catalog_dir() -> Path:
+    """Default catalog folder: inside output/, which is gitignored (client DAX stays out of git)."""
+    return Path.cwd() / "output" / "_catalog"
+
+
 UPLOAD_SUFFIXES = (".pbix", ".bim")
+MAX_UPLOAD_BYTES = 2_000_000_000  # real .pbix files reach several hundred MB
 UPLOAD_FOLDER = Path("output") / "_uploads"  # dropped files are copied here (CWD-relative)
 # After a restart the open tab reconnects on its own (socket.io retries at most every 5 s, then
 # the page reloads because the new server does not know it); only open a new tab if none does
@@ -58,13 +65,18 @@ FILE_LABELS = {
 }
 
 
+# Generated pages (lineage viewer, catalog) run sandboxed: scripts yes, but in an opaque origin,
+# so even a page built from a hostile report could not act as the app (same origin) in the UI
+_SANDBOX = {"Content-Security-Policy": "sandbox allow-scripts allow-popups allow-downloads"}
+
+
 def _serve_output_file(token: str, name: str) -> FileResponse:
     """Serve a file from a run's output folder (only folders created by this app)."""
     folder = _OUTPUT_DIRS.get(token)
     path = (folder / name).resolve() if folder else None
     if path is None or path.parent != folder.resolve() or not path.is_file():
         raise HTTPException(status_code=404)
-    return FileResponse(path)
+    return FileResponse(path, headers=_SANDBOX)
 
 
 # The catalog folder in use (set when a run adds to it or the page finds one), served at /catalog/
@@ -72,12 +84,39 @@ _CATALOG = {"dir": None}
 
 
 def _serve_catalog_file(path: str) -> FileResponse:
-    """Serve a file from the catalog folder (catalog.html and the models' copied files)."""
+    """
+    Serve the catalog: catalog.html, catalog.json and models/<key>/<file> only - never other
+    files that happen to be in (or below) the chosen catalog folder.
+    """
     folder = _CATALOG["dir"]
-    target = (folder / path).resolve() if folder else None
-    if target is None or folder.resolve() not in target.parents or not target.is_file():
+    if folder is None:
         raise HTTPException(status_code=404)
-    return FileResponse(target)
+    root = folder.resolve()
+    target = (root / path).resolve()
+    allowed = target.parent == root and target.name in ("catalog.html", "catalog.json")
+    allowed |= target.parent.parent == root / "models"  # models/<key>/<file>, checked resolved
+    if not allowed or not target.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(target, headers=_SANDBOX)
+
+
+def _allowed_hosts(port: int) -> set[str]:
+    return {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+
+
+def add_host_check(port: int) -> None:
+    """
+    Answer only requests addressed to this machine's loopback name (DNS rebinding: a web page
+    the user visits could otherwise point its own host name at 127.0.0.1 and use the app,
+    including the file picker and the cached sign-in).
+    """
+    allowed = _allowed_hosts(port)
+
+    @app.middleware("http")
+    async def check_host(request, call_next):
+        if request.headers.get("host", "").lower() not in allowed:
+            return PlainTextResponse("Unknown host", status_code=421)
+        return await call_next(request)
 
 
 def register_routes() -> None:
@@ -191,6 +230,15 @@ def _table(rows: list[dict], columns: list[tuple[str, str]], empty: str) -> None
     ).classes("w-full").props("dense flat wrap-cells")
 
 
+def _log_text(logs: str) -> None:
+    """Show log text as plain, escaped text (ui.code renders markdown: a report name holding a
+    code fence could inject links or images there)."""
+    ui.label(logs).classes(
+        "w-full whitespace-pre-wrap break-words font-mono text-sm q-pa-sm rounded "
+        "bg-grey-2 dark:bg-grey-9"
+    ).mark("log_text")
+
+
 def _log_count(logs: str) -> int:
     """Number of log messages (a message can span several lines, e.g. Tabular Editor output)."""
     return len(re.findall(r"^(?:DEBUG|INFO|WARNING|ERROR|CRITICAL): ", logs or "", re.MULTILINE))
@@ -214,7 +262,7 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
 
         if not result.ok or result.report_json is None:
             if result.logs:
-                ui.code(result.logs).classes("w-full")
+                _log_text(result.logs)
             return
 
         token = secrets.token_urlsafe(8)
@@ -357,7 +405,7 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                 )
             with ui.tab_panel(log_tab):
                 if result.logs:
-                    ui.code(result.logs).classes("w-full")
+                    _log_text(result.logs)
                 else:
                     ui.label("No warnings.").classes("text-grey-7")
 
@@ -372,7 +420,7 @@ def index() -> None:
             ui.label("PBIxtractor").classes("text-h6")
             ui.label(f"v{__version__}").classes("text-caption opacity-70")
         with ui.row().classes("items-center gap-4"):
-            known = Path(stored_choices().get("catalog_dir") or Path.cwd() / "catalog")
+            known = Path(stored_choices().get("catalog_dir") or default_catalog_dir())
             if (known / "catalog.html").is_file():
                 _CATALOG["dir"] = known
                 ui.link("Catalog", "/catalog/catalog.html", new_tab=True).classes(
@@ -449,6 +497,12 @@ def index() -> None:
                         multiple=True,
                         auto_upload=True,
                         on_upload=on_upload,
+                        max_file_size=MAX_UPLOAD_BYTES,
+                        on_rejected=lambda: ui.notify(
+                            f"Files larger than {MAX_UPLOAD_BYTES // 1_000_000_000} GB are not "
+                            "accepted - use the folder picker for those.",
+                            type="warning",
+                        ),
                     ).props('accept=".pbix,.bim" flat bordered').classes("w-full").mark("upload")
                 local_box.bind_visibility_from(source, "value", value="local")
 
@@ -496,7 +550,7 @@ def index() -> None:
                         catalog_input = (
                             ui.input(
                                 "Catalog folder",
-                                value=remembered.get("catalog_dir") or str(Path.cwd() / "catalog"),
+                                value=remembered.get("catalog_dir") or str(default_catalog_dir()),
                             )
                             .classes("grow")
                             .bind_visibility_from(add_catalog, "value")
@@ -536,9 +590,21 @@ def index() -> None:
                         ui.button("Save", on_click=save_location).props("flat dense no-caps")
                 desktop_box = ui.column().classes("gap-1")
 
-                def refresh_desktop() -> None:
+                refresh_state = {"seq": 0}
+
+                async def refresh_desktop(delay: float = 0.0) -> None:
+                    """Scan for Power BI Desktop off the event loop (psutil can take seconds);
+                    while typing, only the last change within `delay` seconds scans."""
+                    refresh_state["seq"] += 1
+                    seq = refresh_state["seq"]
+                    if delay:
+                        await asyncio.sleep(delay)
+                        if seq != refresh_state["seq"]:
+                            return
+                    instances = await run.io_bound(find_local_instances)
+                    if seq != refresh_state["seq"] or desktop_box.is_deleted:
+                        return  # a newer scan runs, or the page is gone
                     desktop_box.clear()
-                    instances = find_local_instances()
                     selected = Path(report_input.value) if report_input.value else None
                     with desktop_box:
                         if not instances:
@@ -565,10 +631,10 @@ def index() -> None:
                                     + (" - live statistics will be included" if match else "")
                                 ).classes("text-sm")
 
-                ui.button("Refresh", icon="refresh", on_click=refresh_desktop).props(
+                ui.button("Refresh", icon="refresh", on_click=lambda: refresh_desktop()).props(
                     "flat dense no-caps"
                 )
-                refresh_desktop()
+                ui.timer(0.05, lambda: refresh_desktop(), once=True)  # after the page is sent
 
         # ---------------- run ----------------
         with ui.card().classes("w-full"):
@@ -595,11 +661,15 @@ def index() -> None:
             return
         path = Path(value)
         model = find_model_for_report(path)
-        if model and not model_input.value:
-            model_input.value = str(model)
+        # Replace an empty box or the model found for the PREVIOUS report; keep one the user
+        # chose (typed, picked or dropped) - it may be deliberate for this report too
+        if not model_input.value or model_input.value == auto_model["value"]:
+            model_input.value = str(model) if model else ""
+            auto_model["value"] = model_input.value or None
         output_input.value = str(Path.cwd() / "output" / report_name(path))
-        refresh_desktop()
+        background_tasks.create(refresh_desktop(delay=0.5), name="refresh_desktop")
 
+    auto_model = {"value": None}  # the model value on_report_change filled in last
     report_input.on_value_change(lambda _: on_report_change())
 
     async def download_remote_report(panel) -> Optional[Fetched]:
@@ -624,6 +694,10 @@ def index() -> None:
         except (ApiError, ValueError, OSError) as error:
             ui.notify(f"Download failed: {error}", type="negative", multi_line=True, timeout=20000)
             return None
+        except Exception as error:  # UI boundary: never let a click end without any message
+            logging.getLogger("pbixtractor").exception(f"Download failed unexpectedly: {error}")
+            ui.notify(f"Download failed: {error}", type="negative", multi_line=True, timeout=20000)
+            return None
         finally:
             timer.cancel()
             run_button.enable()
@@ -632,6 +706,19 @@ def index() -> None:
             step_label.text = ""
 
     async def start_run() -> None:
+        """One download + documentation run at a time across all tabs: a second tab's download
+        replaces the same _fabric/_devops folder, and extractions share the logger."""
+        if _JOB_LOCK.locked():
+            run_button.disable()
+            step_label.text = "Waiting for a run in another tab to finish…"
+        try:
+            async with _JOB_LOCK:
+                step_label.text = ""
+                await _start_run()
+        finally:
+            run_button.enable()
+
+    async def _start_run() -> None:
         if source.value != "local":
             panel = remote[source.value]
             if not panel.ready():
@@ -645,6 +732,7 @@ def index() -> None:
             name = fetched.name
             if fetched.model_mode and output_input.value == suggested_output["value"]:
                 output_input.value = str(Path.cwd() / "output" / name)  # named after the model
+            not_included = list(fetched.skipped)  # also logged as warnings of the run
             if fetched.skipped:
                 ui.notify(
                     "Not included (could not be downloaded) - 'unused' may be incomplete: "
@@ -654,7 +742,7 @@ def index() -> None:
                     timeout=30000,
                 )
         else:
-            extra_reports, name = [], ""
+            extra_reports, name, not_included = [], "", []
             report = Path((report_input.value or "").strip('"'))
             model_value = (model_input.value or "").strip('"')
             if not report_input.value or not report.exists():
@@ -679,6 +767,7 @@ def index() -> None:
             tabular_editor_tsv=te_tsv.value,
             write_log_file=log_file.value,
             extra_reports=extra_reports,
+            not_included=not_included,
             service_statistics=service_stats.value,
             catalog_dir=Path(catalog_input.value) if add_catalog.value and catalog_input.value else None,
         )
@@ -731,6 +820,9 @@ def index() -> None:
     run_button.on_click(start_run)
 
 
+_JOB_LOCK = asyncio.Lock()
+
+
 async def _open_browser_unless_reconnected(url: str, connected: asyncio.Event) -> None:
     """Open a browser tab, unless a tab from before a restart reconnects within the grace time."""
     try:
@@ -747,6 +839,7 @@ def start(port: int = 8081, open_browser: bool = True, host: Optional[str] = Non
     after a restart the open tab reconnects by itself, so no duplicate tab appears.
     """
     register_routes()
+    add_host_check(port)
     if open_browser:
         connected = asyncio.Event()
         app.on_connect(connected.set)

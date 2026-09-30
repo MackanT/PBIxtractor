@@ -20,8 +20,6 @@ AZURE_DEVOPS_PAT environment variable (scope Code: Read) is used instead when se
 import io
 import json
 import os
-import posixpath
-import re
 import shutil
 import time
 import urllib.parse
@@ -31,9 +29,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .azure_auth import DEVOPS_SCOPE, ApiError, RestClient
+from .utils import safe_name  # noqa: F401 (also used as fabric/devops.safe_name)
 
 API_VERSION = "7.1"
 VERSION_TYPES = ("branch", "tag", "commit")
+MAX_ARCHIVE_BYTES = 2_000_000_000  # unpacked size limit of one downloaded folder (zip bombs)
 _URL_VERSION_PREFIX = {"GB": "branch", "GT": "tag", "GC": "commit"}
 
 
@@ -49,6 +49,29 @@ def normalize_org(org: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+def check_devops_host(base_url: str) -> None:
+    """
+    Only Azure DevOps receives the sign-in token or PAT: https and dev.azure.com /
+    *.visualstudio.com, plus hosts listed in PBIXTRACTOR_DEVOPS_HOSTS (comma-separated, for
+    Azure DevOps Server on your own domain). A pasted link to any other host is refused, so
+    a phishing URL cannot collect the token.
+
+    Raises:
+        ApiError: For any other host or scheme
+    """
+    parts = urllib.parse.urlsplit(base_url)
+    host = (parts.hostname or "").lower()
+    extra = {h.strip().lower() for h in os.environ.get("PBIXTRACTOR_DEVOPS_HOSTS", "").split(",") if h.strip()}
+    if parts.scheme == "https" and (
+        host == "dev.azure.com" or host.endswith(".visualstudio.com") or host in extra
+    ):
+        return
+    raise ApiError(
+        f"Not an Azure DevOps address: {base_url} (allowed: https://dev.azure.com, "
+        "https://<org>.visualstudio.com, or hosts in PBIXTRACTOR_DEVOPS_HOSTS)"
+    )
+
+
 @dataclass
 class DevOpsLocation:
     """A report in a repository: organisation, project, repo, report folder and version."""
@@ -61,9 +84,46 @@ class DevOpsLocation:
     version_type: str = "branch"
 
 
+def safe_repo_path(path: str) -> str:
+    """
+    A repository path that cannot leave the local download folder: "/"-separated, no "..",
+    "." or empty segments, no drive letters or other ":" / "\\" characters.
+
+    Paths come from the repository (definition.pbir byPath, folder names), so anyone with
+    commit access controls them - they must never reach the file system unchecked.
+
+    Raises:
+        ApiError: For an unsafe path
+    """
+    parts = path.strip("/").split("/")
+    if not path.strip("/") or any(
+        part in ("", ".", "..") or any(c in part for c in '\\:\x00') for part in parts
+    ):
+        raise ApiError(f"Unsafe path in the repository, refusing to use it: {path!r}")
+    return "/" + "/".join(parts)
+
+
+def _resolve_repo_path(base: str, relative: str) -> str:
+    """A repository path relative to another one ("../X.SemanticModel"), checked with safe_repo_path."""
+    if "\\" in relative:
+        raise ApiError(f"Unsafe path in the repository, refusing to use it: {relative!r}")
+    # Resolve segment by segment: posixpath.normpath would silently clamp "/../.." at the root
+    parts = [] if relative.startswith("/") else base.strip("/").split("/")
+    for part in relative.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise ApiError(f"Path points outside the repository: {relative!r}")
+            parts.pop()
+        else:
+            parts.append(part)
+    return safe_repo_path("/".join(parts))
+
+
 def report_folder_path(path: str) -> str:
     """The <name>.Report folder for a path to a .pbip file or to anything inside the folder."""
-    path = "/" + path.strip("/")
+    path = safe_repo_path(path)
     if path.lower().endswith(".pbip"):
         return path[: -len(".pbip")] + ".Report"
     parts = path.split("/")
@@ -90,11 +150,11 @@ def parse_devops_url(url: str) -> DevOpsLocation:
     if "_git" not in segments:
         raise ValueError(f"Not an Azure DevOps repository URL (no /_git/): {url}")
     git = segments.index("_git")
-    if parts.netloc.lower() == "dev.azure.com":
-        org, project = f"https://dev.azure.com/{segments[0]}", segments[git - 1]
-    else:
-        org, project = f"{parts.scheme}://{parts.netloc}", segments[git - 1]
+    on_dev_azure = parts.netloc.lower() == "dev.azure.com"
+    org = f"https://dev.azure.com/{segments[0]}" if on_dev_azure else f"{parts.scheme}://{parts.netloc}"
     repo = segments[git + 1] if len(segments) > git + 1 else ""
+    # Short form without a project (…/org/_git/Repo): the repository has the project's name
+    project = segments[git - 1] if git > (1 if on_dev_azure else 0) else repo
     query = urllib.parse.parse_qs(parts.query)
     path = query.get("path", [""])[0]
     if not repo or not path:
@@ -131,6 +191,7 @@ class DevOpsClient(RestClient):
             sleep: Wait function (tests pass a no-op)
         """
         self.org = normalize_org(org)
+        check_devops_host(self.org)
         super().__init__(
             self.org,
             DEVOPS_SCOPE,
@@ -278,15 +339,31 @@ def extract_folder(archive: bytes, repo_path: str, destination: Path) -> Path:
 
     The archive may hold paths relative to the folder or including it (and its parents); both
     are handled. Returns the local folder.
+
+    Raises:
+        ApiError: For an unsafe repository path or archive entry, a corrupt/non-zip download
+            or an archive larger than MAX_ARCHIVE_BYTES unpacked
     """
-    target = (Path(destination) / repo_path.strip("/")).resolve()
+    repo_path = safe_repo_path(repo_path)
+    root = Path(destination).resolve()
+    target = (root / repo_path.strip("/")).resolve()
+    if root not in target.parents:  # checked BEFORE anything is deleted
+        raise ApiError(f"Path points outside the download folder: {repo_path!r}")
     name = repo_path.rstrip("/").rsplit("/", 1)[-1]
-    if target.exists():
-        shutil.rmtree(target)  # an earlier download: files deleted in git must not linger
-    with zipfile.ZipFile(io.BytesIO(archive)) as zip_file:
-        for entry in zip_file.infolist():
-            if entry.is_dir():
-                continue
+    try:
+        zip_file = zipfile.ZipFile(io.BytesIO(archive))
+    except zipfile.BadZipFile:
+        raise ApiError(
+            f"The download of {repo_path} is not a zip archive - check the sign-in / access "
+            "token (Azure DevOps answers an expired token with a sign-in page)."
+        ) from None
+    with zip_file:
+        entries = [entry for entry in zip_file.infolist() if not entry.is_dir()]
+        if sum(entry.file_size for entry in entries) > MAX_ARCHIVE_BYTES:
+            raise ApiError(f"The download of {repo_path} is larger than {MAX_ARCHIVE_BYTES:,} bytes unpacked")
+        if target.exists():
+            shutil.rmtree(target)  # an earlier download: files deleted in git must not linger
+        for entry in entries:
             parts = entry.filename.replace("\\", "/").strip("/").split("/")
             if name in parts[:-1]:
                 parts = parts[parts.index(name) + 1 :]
@@ -315,11 +392,7 @@ def _model_reference(pbir: bytes, report_path: str) -> Optional[str]:
     reference = (json.loads(pbir.decode("utf-8-sig")).get("datasetReference") or {}).get("byPath")
     if not (reference or {}).get("path"):
         return None
-    return posixpath.normpath(posixpath.join(report_path, reference["path"]))
-
-
-def safe_name(name: str) -> str:
-    return re.sub(r'[<>:"/\\|?*]+', "_", name).strip(" .") or "item"
+    return _resolve_repo_path(report_path, reference["path"])
 
 
 def fetch_report(
