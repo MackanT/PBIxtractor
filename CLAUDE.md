@@ -45,7 +45,8 @@ folder says otherwise. The model is auto-found next to the report (`find_model_f
 TMDL `definition/`); `extract` exits 2
 when there is none. By default the model is read
 from the `.bim` on every run; a `documentation.tsv` is only used with `USE_TABULAR_EDITOR`.
-Real test reports (local only, never commit):
+Real test reports (local only, never commit; the paths below are on the owner's first PC - on
+another machine, list its reports in `Input/regression.json`, see "Refactoring safety net"):
 - `…/_Arbete/Rowico/…/Reports V1/` (client data): `Invoices.pbix` + `Invoices.bim` (legacy
   Layout format; only one with a .bim) and 8 other legacy `.pbix` files.
 - `C:\Users\MarcusToftås\Downloads\Adventure Works DW 2020.pbix` + `Model.bim` (owner's dummy
@@ -59,7 +60,12 @@ Power BI Desktop is the Microsoft Store version: workspaces under
 `%USERPROFILE%\Microsoft\Power BI Desktop Store App\AnalysisServicesWorkspaces`.
 
 Git: only read-only commands (status/diff/log). **No commit, push or `git stash`** — the owner
-reviews and commits everything. Compare against baselines by copying output elsewhere instead.
+reviews and commits everything. Compare against baselines with `tools/regress.py` instead.
+The owner likes one commit per logical part: when a change spans parts, prepare `.patch` files
+per part (verified by applying them in order to a `git archive HEAD` copy and running the tests
+after each) and hand over `git apply --cached <part>.patch` + `git commit -m ...` commands;
+when every file belongs to one part, plain `git add <files>` lists are enough. Staging is only
+done on request.
 
 ## Architecture
 ```
@@ -282,6 +288,48 @@ src/pbixtractor/
   NiceGUI web UI with the viewer embedded (done 2026-09-29; DearPyGUI removed) →
   1b DevOps/Fabric readers → 6 SQL/Fabric source lineage (sqlglot).
 
+## Next steps (handoff 2026-09-30)
+Work moves to the owner's second PC, which has access to Fabric/DevOps and the source databases.
+Everything local-file based is done (both report formats, .bim + TMDL, web UI, CLI). Open:
+
+**1b Remote reports/models (Fabric workspace, Azure DevOps).** Design: a fetch step that
+materialises a PBIP layout in a temp/output folder (`<name>.Report/` + `<name>.SemanticModel/`)
+and then runs the unchanged local pipeline on it - readers.py/tmdl.py already read that layout.
+- Azure DevOps: PBIP projects in a git repo already work after `git clone` (point the tool at
+  the .pbip / .Report folder). Optional: fetch items via the DevOps REST API instead of cloning.
+- Fabric: REST `POST /v1/workspaces/{ws}/reports/{id}/getDefinition` and
+  `.../semanticModels/{id}/getDefinition` (`?format=TMSL` for a .bim, default TMDL); long-running
+  (202 → poll the operation, then fetch the result); response = definition parts (path +
+  base64 payload) → write them to disk. Auth: `azure-identity` (InteractiveBrowserCredential or
+  AzureCliCredential), scope `https://api.fabric.microsoft.com/.default`. Check the required
+  item permissions in the Fabric docs (getDefinition has needed write access to the item).
+  Semantic Link (`sempy` / `semantic-link-labs`) is mainly for Fabric notebooks; a local tool
+  should use REST. Also list workspaces/reports so the web UI can offer a picker.
+- CLI/web UI: e.g. `pbixtractor extract --fabric <workspace>/<report>`; tokens never stored in
+  the repo.
+
+**6 SQL/Fabric source lineage.** Today `Partition.source_summary()` already gives connector +
+source objects (M `Sql.Database` navigation, Direct Lake `schemaName.entityName`), shown as
+source nodes in the lineage graph.
+- 6a (offline, no database needed): parse native SQL in partitions (`Value.NativeQuery`,
+  `Sql.Database(..., [Query=...])`) with `sqlglot` (dialect `tsql`) → source tables/columns.
+- 6b (needs the database): connect to Azure SQL / Fabric Warehouse / Lakehouse SQL endpoint with
+  an Entra token (`azure-identity` + `mssql-python` or `pyodbc` + ODBC Driver 18), read view
+  definitions (`sys.sql_modules`, `sys.sql_expression_dependencies`), parse with
+  `sqlglot.lineage` → view → base table/column edges in the lineage graph + a "sources" sheet.
+  Read-only account with VIEW DEFINITION is enough. `psycopg` (declared, unused) can be dropped
+  unless Postgres sources appear.
+
+**Checklist for the new PC:** clone `ft_v2`; `uv sync --extra dev`; Tabular Editor 2 (optional,
+found in Program Files or set in the web UI); create `Input/regression.json` with that PC's test
+reports and run `tools/regress.py --save-baseline` before the first change; for 1b/6: Fabric
+workspace access, a DevOps repo with a PBIP project, SQL endpoint + database, ODBC Driver 18.
+
+Smaller open items (no remote access needed): Excel → lineage viewer hyperlink; web UI polish
+(remember last paths, run history, model tab, JSON search); list the filter/slicer state that
+bookmarks capture; old notes `SIMPLIFICATION_PLAN.md`, `docs/RESTRUCTURE_COMPLETE.md`,
+`docs/IMPROVEMENT_PLAN.md` describe removed code (owner to decide: delete or archive).
+
 ## Checking the HTML viewer
 No Node.js here, but headless Edge works (run from PowerShell; bash paths fail):
 `msedge.exe --headless=new --disable-gpu --user-data-dir=<tmp> --window-size=1600,900
@@ -293,18 +341,26 @@ calls `web_ui._render_result()` from a root page. Automated UI tests use NiceGUI
 `user_simulation(web_ui.index)` inside `asyncio.run` (tests/test_web_ui.py; no pytest-asyncio).
 
 ## Refactoring safety net
-Output is deterministic (except the graph PNG layout; baseline refreshed 2026-09-29 after the
-common-sheet fixes). Before a refactor, copy
-`output/Invoices_NEW/*.xlsx` and `output/AdventureWorks/*.xlsx` somewhere, re-run, and compare
-workbooks cell by cell incl. rich-text runs and resolved styles (a small zip/XML comparer was
-used for Step 2; `tests/test_documentation.py::test_workbooks_end_to_end` and
-`tests/test_pipeline.py` cover the pipeline and CLI on the sample data).
+Output is deterministic (except the graph PNG layout). Regression check on real reports:
+```powershell
+# Input/regression.json (gitignored): {"reports": [{"name": "AW", "report": "...pbix", "model": "...bim"}]}
+uv run --frozen python tools/regress.py --save-baseline   # before the change -> output/_baseline/
+uv run --frozen python tools/regress.py                   # after: compare every workbook
+uv run --frozen python tools/compare_xlsx.py OLD.xlsx NEW.xlsx     # one pair, cell by cell
+uv run --frozen python tools/compare_models.py Model.bim X.SemanticModel/definition  # .bim vs TMDL
+```
+compare_xlsx compares sheets, values, rich-text runs and resolved styles (not style indexes).
+Intended output changes: show the diff to the owner, then re-save the baseline. Unit tests
+(`tests/test_documentation.py::test_workbooks_end_to_end`, `tests/test_pipeline.py`) cover the
+pipeline and CLI on the anonymised sample data.
 
 ## Conventions
 - black/ruff, line length 100, py311 target. Google-style docstrings with Args/Returns.
 - New config belongs in `data/data.yaml`, not in Python constants.
-- Don't commit anything in `output/` or `Input/` (both gitignored). Sample output for
-  regression comparison: `output/Invoices` (older `main` code) vs `output/Invoices_NEW` (`ft_v2`).
+- Don't commit anything in `output/` or `Input/` (both gitignored; regression config and
+  baselines live there and may contain client data).
+- `tools/` holds developer scripts (not part of the package): regress.py, compare_xlsx.py,
+  compare_models.py.
 
 ## Branches
 - `main`: legacy single-file `PB-Ixtractor.py` (has working button/bookmark logic).
