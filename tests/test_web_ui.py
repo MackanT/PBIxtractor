@@ -351,3 +351,61 @@ def test_theme_fonts_are_served_and_the_band_follows_the_accent(sample):
     assert theme.darken("#3f7d5a", 0.55) in theme.theme_css()
     assert theme.darken("#aa3366", 0.55) in theme.theme_css("#aa3366")
     assert "#3f7d5a" not in theme.theme_css("#aa3366").replace(theme.OK_HEX, "")
+
+
+def _drop(upload, *files):
+    """Drop files one by one, as a browser hands them over."""
+    async def run():
+        for name, content in files:
+            await upload.handle_uploads([ui.upload.SmallFileUpload(name, "", content)])
+    return run()
+
+
+def test_dropped_reports_on_one_model_are_documented_together(sample):
+    report, model = (sample / "Sample.pbix").read_bytes(), (sample / "Sample.bim").read_bytes()
+    uploads = sample / "output" / "_uploads"
+
+    async def scenario(user):
+        await user.open("/")
+        await _drop(_element(user, "upload"),
+                    ("First.pbix", report), ("Second.pbix", report), ("Shared.bim", model))
+        await _wait_for(lambda: _value(user, "model") == str(uploads / "Shared.bim"))
+        assert _value(user, "report") == str(uploads / "First.pbix")
+        await user.should_see(marker="together")
+        user.find("Create documentation").click()
+        await user.should_see("Lineage", retries=100)
+        # One documentation, named after the model, with both reports
+        doc = json.loads((sample / "output" / "Shared" / "Shared.json").read_text(encoding="utf-8"))
+        assert [r["name"] for r in doc["reports"]] == ["First", "Second"]
+        await user.should_see("Reports")  # the stat tile, shown for several reports
+
+    _simulate(scenario)
+
+
+def test_dropped_reports_on_different_models_are_not_mixed(sample):
+    report, model = (sample / "Sample.pbix").read_bytes(), (sample / "Sample.bim").read_bytes()
+
+    async def scenario(user):
+        await user.open("/")
+        await _drop(_element(user, "upload"), ("First.pbix", report), ("First.bim", model),
+                    ("Second.pbix", report), ("Second.bim", model))
+        await user.should_see("one model is documented at a time")
+        user.find("Create documentation").click()
+        await user.should_see("remove the reports of the other model")  # the run's refusal
+        assert not (sample / "output" / "First").exists()  # nothing was documented
+
+    _simulate(scenario)
+
+
+def test_a_later_drop_starts_over(sample, monkeypatch):
+    monkeypatch.setattr(web_ui, "DROP_SECONDS", -1)  # every file arrives "later"
+    report = (sample / "Sample.pbix").read_bytes()
+    uploads = sample / "output" / "_uploads"
+
+    async def scenario(user):
+        await user.open("/")
+        await _drop(_element(user, "upload"), ("First.pbix", report), ("Second.pbix", report))
+        await _wait_for(lambda: _value(user, "report") == str(uploads / "Second.pbix"))
+        await user.should_not_see(marker="together")
+
+    _simulate(scenario)

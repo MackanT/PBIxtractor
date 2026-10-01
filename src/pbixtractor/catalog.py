@@ -128,8 +128,14 @@ def build_entry(doc: dict, identity: dict, name: str, links: dict) -> dict:
         if page not in pages_of:
             pages_of.append(page)
 
+    # JSON schema 2 names each page's report; older documentation only has "<report> › <page>"
+    for listed in doc.get("reports", []):
+        reports.setdefault(listed["name"], [])
     for page in pages:
-        report, page_name = _split_page(page["name"], single)
+        if "report" in page:
+            report, page_name = page["report"], page.get("title") or page["name"]
+        else:
+            report, page_name = _split_page(page["name"], single)
         visuals = [i for i in page["items"] if i["type"] in ("Visual", "Slicer")]
         reports.setdefault(report, []).append(
             {"id": page["name"], "name": page_name, "hidden": bool(page.get("hidden")), "visuals": len(visuals)}
@@ -141,9 +147,11 @@ def build_entry(doc: dict, identity: dict, name: str, links: dict) -> dict:
                 use(visual_filter["field"], page["name"])
             if item["type"] == "Filter" and item.get("field"):
                 use(item["field"], page["name"])
+    several = len(reports) > 1
     for report_filter in doc["report"].get("filters", []):
         if report_filter.get("field") and not report_filter.get("page"):
-            use(report_filter["field"], "(report filter)")
+            owner = report_filter.get("report")
+            use(report_filter["field"], f"(report filter, {owner})" if several and owner else "(report filter)")
 
     # Measure names are unique in a model: "[Total]" (DAX text matching) -> "Sales[Total]"
     measure_refs = {

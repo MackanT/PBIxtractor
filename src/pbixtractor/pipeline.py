@@ -33,8 +33,10 @@ from .report_extractor import (
     ReportExtractor,
     extract_reports,
     known_functions,
+    report_label,
     visual_mapper,
     visual_type_list,
+    with_report,
 )
 from .semantic_model import model_source, model_to_dataset, read_model
 from .service_stats import ServiceModel, read_service_statistics, service_model_for_report
@@ -113,8 +115,7 @@ class ExtractionResult:
 
 def report_name(report_path: str | Path) -> str:
     """Report name from its path: "Sales.pbix" / "Sales.pbip" / "Sales.Report" -> "Sales"."""
-    path = Path(report_path)
-    return path.name[: -len(".Report")] if path.name.endswith(".Report") else path.stem
+    return report_label(report_path)
 
 
 def model_name(model_path: str | Path) -> str:
@@ -363,7 +364,8 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         progress("Reading the report", 0.55)
         extractor = ReportExtractor(str(options.report_path.parent), options.report_path.name)
         extractor.extract()
-        report_items, report_filters = extractor.result, extractor.filters
+        report_items = extractor.result
+        report_filters = with_report(extractor.filters, extractor.report_name)
         report_definition = extractor.report
 
     # 3. Analysis

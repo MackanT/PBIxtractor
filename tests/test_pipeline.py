@@ -119,6 +119,23 @@ def test_model_mode_documents_reports_together(sample):
     assert "page:Detail › Sales" in lineage_pages
     assert result.files["workbook"].name == "Sample model.xlsx"
 
+    # The report is a level of its own: pages, bookmarks and filters say which report
+    assert [(r["name"], r["pages"]) for r in doc["reports"]] == [
+        ("Sample", ["Sample › Sales", "Sample › Detail"]),
+        ("Detail", ["Detail › Sales", "Detail › Detail"]),
+    ]
+    by_key = {p["name"]: p for p in doc["report"]["pages"]}
+    assert (by_key["Detail › Sales"]["report"], by_key["Detail › Sales"]["title"]) == ("Detail", "Sales")
+    assert panels["Detail › Panel Open"]["report"] == "Detail"
+    # Both reports have the same report-level filter: each keeps its own (it used to merge)
+    all_pages = [f["report"] for f in doc["report"]["filters"] if f["level"] == "All Pages"]
+    assert sorted(all_pages) == ["Detail", "Sample"]
+    nodes = {n["id"]: n for n in doc["lineage"]["nodes"]}
+    assert nodes["page:Detail › Sales"]["label"] == "Sales"  # its own title; the report is above
+    assert {"source": "report:Detail", "target": "page:Detail › Sales", "type": "contains"} in doc[
+        "lineage"
+    ]["edges"]
+
 
 def test_model_mode_keeps_copied_reports_apart(sample):
     """A copied report reuses every visual id: each button must keep its own report's target."""

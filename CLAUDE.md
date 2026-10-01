@@ -125,7 +125,10 @@ src/pbixtractor/
                     register_routes() + ui.run(index, reload=False). Local tool: binds
                     127.0.0.1, no auth. Unmatched URLs get the root page (HTTP 200).
                     Drag & drop (ui.upload) copies .pbix/.bim to output/_uploads/ (browsers
-                    never expose a dropped file's path). start() opens a browser tab only if no
+                    never expose a dropped file's path). Files arriving within DROP_SECONDS (30)
+                    of each other are one drop: several reports + one model → model mode (chips
+                    "Documented together", removable); several models → _shared_model() refuses
+                    ("one model is documented at a time"). start() opens a browser tab only if no
                     tab connects within BROWSER_GRACE_SECONDS (7 s): after a restart the old
                     tab reconnects and reloads by itself, so no duplicate tabs.
                     Security (it is a local server, but browsers can reach it): add_host_check()
@@ -152,20 +155,23 @@ src/pbixtractor/
   config.py         load_config() → Config(visual_mapper, supported_visual_types (derived:
                     standard_visuals + special_visuals), data_types, extract_types,
                     function_names). extract_type(visual_type): standard | button | skip.
-  json_report.py    write_json() → <name>.json: report, model (incl. live stats), dependencies,
-                    unused, quality, lineage {nodes, edges} (ids page:/visual:/table:/column:/
-                    measure:/source:, edge types contains/uses/filters/depends_on/
-                    relationship/loads_from). Every page gets a node (also empty ones).
+  json_report.py    write_json() → <name>.json (SCHEMA_VERSION 2): reports [{name, file, pages}],
+                    report (pages with report/title, bookmarks and filters with report), model
+                    (incl. live stats), dependencies, unused, quality, lineage {nodes, edges} (ids
+                    report:/page:/visual:/table:/column:/measure:/source:, edge types contains
+                    (report→page, page→visual, table→field)/uses/filters/depends_on/
+                    relationship/loads_from). Every page gets a node (also empty ones), labelled
+                    with its own title.
   lineage_html.py   write_lineage_html(path, documentation_to_dict(...)) → <name>_lineage.html:
                     one self-contained offline page (vanilla JS + SVG, data embedded as JSON,
                     "</" escaped). Edges re-oriented to flow data → report (source → table →
-                    column → measure → visual → page); relationships left out. Layer per
+                    column → measure → visual → page → report); relationships left out. Layer per
                     node (measures by dependency depth); in-browser layered layout with
                     barycenter ordering; select → upstream/downstream; details panel.
-                    Starts on an overview (source → table → page; table feeds a page if it is
-                    upstream of it; tables feeding no page dashed). Toolbar: back/forward
-                    history (Alt+←/→), "Up a level" (column/measure → table, visual → page,
-                    else overview), zoom −/Fit/+, "Panels" (hide side panels), Guide overlay.
+                    Starts on an overview (source → table → page, or → report when several
+                    reports; table feeds it if it is upstream; tables feeding nothing dashed).
+                    Toolbar: back/forward history (Alt+←/→), "Up a level" (column/measure →
+                    table, visual → page, page → report, else overview), zoom −/Fit/+, "Panels" (hide side panels), Guide overlay.
                     #<node id> in the URL opens that item (kept in sync via replaceState).
   documentation.py  Analysis stage, no file output: build_documentation() → Documentation
                     (report_info, filter_strings, pages: {page: [PageItem]}, model, objects
@@ -229,6 +235,15 @@ src/pbixtractor/
                     a Desktop model by name, possibly another copy). DirectQuery tables are
                     found with SemanticModel.partition_mode() (partition "default" → the
                     model's defaultMode).
+  Report level      Every page/bookmark knows its report (PageDefinition.report/.title,
+                    BookmarkDefinition.report, ReportDefinition.reports {name: file}, set by
+                    ReportExtractor.extract(report_name=)); filter rows get the report as an 8th
+                    column via report_extractor.with_report() (an "All Pages" filter has no page
+                    to tell; identical filters of two reports stay two rows). PageInfo/
+                    BookmarkInfo.report, Documentation.reports; Excel "report pages",
+                    "bookmarks", "report filters" sheets start with a Report column. The page
+                    KEY stays the (prefixed) display name, so nothing keyed on pages changed.
+                    Prepares running several models / a whole workspace (not built yet).
   Model mode        ExtractionOptions.extra_reports: report_extractor.extract_reports() prefixes
                     page/bookmark display names "<report> › " (before extraction, so button
                     targets match) and page/bookmark ids "<n>:" (after), merges into one

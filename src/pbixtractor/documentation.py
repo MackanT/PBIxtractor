@@ -91,9 +91,11 @@ class PageItem:
 class PageInfo:
     """Summary of one report page."""
 
-    name: str
+    name: str  # unique page key: "<report> › <page>" when several reports are documented
     hidden: bool = False
     page_type: str = ""  # "", "Tooltip" or "Drillthrough"
+    report: str = ""  # the report the page belongs to
+    title: str = ""  # the page's own name, without the report prefix
     visuals: int = 0  # visuals and slicers
     buttons: int = 0
     broken_buttons: int = 0  # buttons pointing to a deleted bookmark or page
@@ -137,6 +139,7 @@ class BookmarkInfo:
     hidden_visuals: list[str] = field(default_factory=list)  # labels of visuals it hides
     used_by: list[str] = field(default_factory=list)  # "Page (visual id)" of buttons using it
     broken: bool = False  # recorded on a page that no longer exists
+    report: str = ""  # the report the bookmark belongs to
     # Filters/slicer selections it applies (empty when it does not capture "Data")
     filters: list[BookmarkFilter] = field(default_factory=list)
 
@@ -145,9 +148,10 @@ class BookmarkInfo:
 class Documentation:
     """Everything the documentation writers need."""
 
-    report_name: str
+    report_name: str  # the documentation's name: the report's, or the model's for several
     report_info: pd.DataFrame  # REPORT_COLUMNS, one row per visual field/button/group
-    filter_strings: list[list]  # [page, item, filter type, "Table[Field]", "operator value"]
+    # [page, item, filter type, "Table[Field]", "operator value", report]
+    filter_strings: list[list]
     pages: dict[str, list[PageItem]]  # page name -> sorted items
     model: SemanticModel
     objects: pd.DataFrame  # OBJECT_COLUMNS
@@ -161,6 +165,8 @@ class Documentation:
     bookmarks: list[BookmarkInfo] = field(default_factory=list)
     # (page, visual id) -> notes such as "Sync group: Year", "No effect on Table (a1b2)"
     interactivity: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    # The documented reports, in order: name -> the file/folder it was read from
+    reports: dict[str, str] = field(default_factory=dict)
 
     def interactivity_text(self, page: str, visual_id) -> str:
         """Interactivity notes of a visual as one multi-line string."""
@@ -334,17 +340,26 @@ def unique_filters(filters: list[list]) -> tuple[list[list], list[list]]:
     Remove duplicate filters and format them for display.
 
     Args:
-        filters: Rows [page, item, filter type, table, field, operator, value]
+        filters: Rows [page, item, filter type, table, field, operator, value(, report)]
 
     Returns:
-        (unique filters, display rows [page, item, filter type, "Table[Field]", "op value"])
+        (unique filters, display rows [page, item, filter type, "Table[Field]", "op value",
+        report]). The same filter in two reports stays two rows.
     """
     unique = []
     for row in filters:
         if row not in unique:
             unique.append(row)
     strings = [
-        [row[0], row[1], row[2], f"{row[3]}[{row[4]}]", " ".join(row[5:]).strip()] for row in unique
+        [
+            row[0],
+            row[1],
+            row[2],
+            f"{row[3]}[{row[4]}]",
+            " ".join(row[5:7]).strip(),
+            row[7] if len(row) > 7 else "",
+        ]
+        for row in unique
     ]
     return unique, strings
 
@@ -651,6 +666,8 @@ def build_page_info(
                 name=page.display_name,
                 hidden=page.hidden,
                 page_type=page.page_type,
+                report=page.report,
+                title=page.title or page.display_name,
                 visuals=sum(1 for i in items if i.item_type in ("Visual", "Slicer")),
                 buttons=sum(1 for i in items if i.item_type == "Button"),
                 broken_buttons=sum(1 for i in items if is_broken_button(i)),
@@ -722,6 +739,7 @@ def build_bookmarks(
             BookmarkInfo(
                 name=bookmark.name,
                 display_name=bookmark.display_name,
+                report=bookmark.report,
                 group=bookmark.group,
                 page=page,
                 broken=broken,
@@ -906,4 +924,5 @@ def build_documentation(
         page_info=build_page_info(report, pages, filter_strings) if report else [],
         bookmarks=build_bookmarks(report, report_info, pages, logger) if report else [],
         interactivity=build_interactivity(report, pages) if report else {},
+        reports=(report.reports if report and report.reports else {report_name: ""}),
     )

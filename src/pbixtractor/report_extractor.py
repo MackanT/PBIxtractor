@@ -5,6 +5,9 @@
     extractor.result   # [page, visual type, visual id, table, field, display name, role]
     extractor.filters  # [page, item, filter type, table, field, operator, value]
     extractor.report   # readers.ReportDefinition (pages, bookmarks, interactions, ...)
+
+Every page and bookmark records the report it belongs to (PageDefinition.report/.title), and
+with_report() adds the report to filter rows, so several reports can be documented together.
 """
 
 import os
@@ -24,6 +27,20 @@ try:
 except (OSError, ValueError, KeyError, yaml.YAMLError) as e:
     # Raised, not sys.exit(): importing must not end the process (the web UI imports this)
     raise RuntimeError(f"Error loading the configuration file {YAML_FILE}: {e}") from e
+
+
+
+def report_label(file_name: str | Path) -> str:
+    """Report name from its file/folder: "Sales.pbix" / "Sales.pbip" / "Sales.Report" -> "Sales"."""
+    path = Path(file_name)
+    return path.name[: -len(".Report")] if path.name.endswith(".Report") else path.stem
+
+
+def with_report(filter_rows: list[list], report: str) -> list[list]:
+    """Filter rows with their report as an 8th column (an "All Pages" filter has no page that
+    says which report it belongs to)."""
+    return [list(row) + [report] for row in filter_rows]
+
 
 visual_mapper = CONFIG.visual_mapper
 visual_type_list = sorted(CONFIG.supported_visual_types)
@@ -46,10 +63,11 @@ class ReportExtractor:
         self.result = []
         self.filters = []
         self.report = None  # readers.ReportDefinition after extract()
+        self.report_name = report_label(name)
         self.logger = get_logger("pbixtractor")
         self.page_extractor = PageExtractor(config=CONFIG, logger=self.logger)
 
-    def extract(self, prefix: str = "") -> None:
+    def extract(self, prefix: str = "", report_name: str = "") -> None:
         """
         Extract all data from the Power BI report.
 
@@ -61,9 +79,17 @@ class ReportExtractor:
             prefix: Put in front of every page and bookmark display name, e.g. "Sales › "
                 (used when several reports are documented together). Applied before the pages
                 are extracted, so button targets carry it too.
+            report_name: The report's name (default: from its file name)
         """
+        self.report_name = report_name or self.report_name
         report = self.report = read_report(os.path.join(self.path, self.name), self.logger)
         self.logger.debug(f"Read {self.name} ({report.format} format)")
+        # Which report each page and bookmark belongs to; the title before any prefix
+        report.reports = {self.report_name: self.name}
+        for page in report.pages:
+            page.report, page.title = self.report_name, page.display_name
+        for bookmark in report.bookmark_details:
+            bookmark.report = self.report_name
         if prefix:
             for page in report.pages:
                 page.display_name = prefix + page.display_name
@@ -105,11 +131,11 @@ def extract_reports(paths: list[Path]) -> tuple[list, list, ReportDefinition]:
     merged = None
     for index, path in enumerate(paths):
         path = Path(path)
-        name = path.name[: -len(".Report")] if path.name.endswith(".Report") else path.stem
+        name = report_label(path)
         extractor = ReportExtractor(str(path.parent), path.name)
-        extractor.extract(prefix=name + PREFIX_SEPARATOR)
+        extractor.extract(prefix=name + PREFIX_SEPARATOR, report_name=name)
         items += extractor.result
-        filters += extractor.filters
+        filters += with_report(extractor.filters, name)
 
         report = extractor.report
         id_prefix = f"{index}:"
@@ -127,4 +153,5 @@ def extract_reports(paths: list[Path]) -> tuple[list, list, ReportDefinition]:
         merged.filters += report.filters
         merged.bookmarks.update(bookmarks)
         merged.bookmark_details += report.bookmark_details
+        merged.reports.update(report.reports)
     return items, filters, merged

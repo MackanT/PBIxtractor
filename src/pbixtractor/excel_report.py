@@ -308,13 +308,16 @@ def add_report_sheets(
     """
     Report-level sheets: "report pages" (hidden/tooltip/drillthrough pages and counts),
     "bookmarks" (captures, hidden visuals, buttons using them) and "report filters" (every
-    filter on every level, including report-level filters).
+    filter on every level, including report-level filters). Each row names its report; pages
+    are shown by their own title.
     """
+    title = {p.name: p.title or p.name for p in documentation.page_info}
     if documentation.page_info:
         write_table(
             workbook.add_worksheet(sheet_name("report pages")),
             formats["bi"],
             [
+                ("Report", 25),
                 ("Page", 30),
                 ("Hidden", 8),
                 ("Page Type", 13),
@@ -327,7 +330,8 @@ def add_report_sheets(
             ],
             [
                 [
-                    p.name,
+                    p.report or documentation.report_name,
+                    p.title or p.name,
                     "Yes" if p.hidden else "",
                     p.page_type,
                     p.visuals,
@@ -346,6 +350,7 @@ def add_report_sheets(
             workbook.add_worksheet(sheet_name("bookmarks")),
             formats["bi"],
             [
+                ("Report", 25),
                 ("Bookmark", 40),
                 ("Group", 20),
                 ("Page", 25),
@@ -358,6 +363,7 @@ def add_report_sheets(
             ],
             [
                 [
+                    b.report or documentation.report_name,
                     b.display_name,
                     b.group,
                     b.page,
@@ -377,6 +383,7 @@ def add_report_sheets(
             workbook.add_worksheet(sheet_name("report filters")),
             formats["bi"],
             [
+                ("Report", 25),
                 ("Level", 12),
                 ("Page", 25),
                 ("Visual / Filter", 30),
@@ -384,8 +391,15 @@ def add_report_sheets(
                 ("Condition", 60),
             ],
             [
-                [level, page or "(all pages)", item, field, condition]
-                for page, item, level, field, condition in documentation.filter_strings
+                [
+                    report or documentation.report_name,
+                    level,
+                    title.get(page, page) or "(all pages)",
+                    item,
+                    field,
+                    condition,
+                ]
+                for page, item, level, field, condition, report in documentation.filter_strings
             ],
         )
 

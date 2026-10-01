@@ -1,8 +1,13 @@
 """JSON output: the whole documentation as one machine-readable file.
 
-Sections: report (pages, items, filters), model (tables with columns/measures/hierarchies/
-partitions, relationships, roles, expressions), dependencies, unused, quality (BPA) and
-lineage (nodes + edges for graph views: page -> visual -> field -> DAX -> table -> source).
+Sections: reports (the documented reports and their pages), report (pages, items, filters,
+bookmarks - each with the report it belongs to), model (tables with columns/measures/
+hierarchies/partitions, relationships, roles, expressions), dependencies, unused, quality (BPA)
+and lineage (nodes + edges for graph views: report -> page -> visual -> field -> DAX -> table ->
+source).
+
+Schema version 2 added the report level: "reports", page "report"/"title", bookmark and filter
+"report", lineage "report:" nodes; a page node's label is its own title.
 
     write_json("Report.json", documentation)
 """
@@ -23,7 +28,7 @@ from .documentation import (
 from .m_sources import NATIVE_SQL
 from .model_sheets import STORAGE_MODES
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _clean(value: Any) -> Any:
@@ -101,14 +106,40 @@ def _item_dict(item: PageItem, interactivity: list[str]) -> dict:
     return data
 
 
+def _reports_section(documentation: Documentation) -> list[dict]:
+    """The documented reports, in order, with their page keys (several in model mode)."""
+    pages_of: dict[str, list[str]] = {name: [] for name in documentation.reports}
+    for page, (report, _) in _page_report(documentation).items():
+        pages_of.setdefault(report, []).append(page)
+    return [
+        {"name": name, "file": documentation.reports.get(name) or None, "pages": pages}
+        for name, pages in pages_of.items()
+    ]
+
+
+def _page_report(documentation: Documentation) -> dict[str, tuple[str, str]]:
+    """Page key -> (report, page title), in page order. Pages known only from their items (no
+    report definition was given) belong to the documentation's own report."""
+    mapping = {
+        p.name: (p.report or documentation.report_name, p.title or p.name)
+        for p in documentation.page_info
+    }
+    for page in documentation.pages:
+        mapping.setdefault(page, (documentation.report_name, page))
+    return mapping
+
+
 def _report_section(documentation: Documentation) -> dict:
     info = {p.name: p for p in documentation.page_info}
     page_names = list(info) or list(documentation.pages)  # page_info also has empty pages
+    page_report = _page_report(documentation)
     return {
         "name": documentation.report_name,
         "pages": [
             {
-                "name": page,
+                "name": page,  # unique key; "<report> › <page>" when several reports
+                "report": page_report.get(page, (documentation.report_name, page))[0],
+                "title": page_report.get(page, (documentation.report_name, page))[1],
                 "hidden": info[page].hidden if page in info else None,
                 "page_type": (info[page].page_type or None) if page in info else None,
                 "sync_groups": info[page].sync_groups if page in info else [],
@@ -123,6 +154,7 @@ def _report_section(documentation: Documentation) -> dict:
             {
                 "id": b.name,
                 "name": b.display_name,
+                "report": b.report or documentation.report_name,
                 "group": b.group or None,
                 "page": b.page or None,
                 "captures": [c for c in b.captures.split(", ") if c],
@@ -148,12 +180,13 @@ def _report_section(documentation: Documentation) -> dict:
         "filters": [
             {
                 "page": page or None,
+                "report": report or documentation.report_name,
                 "item": _clean(item),
                 "level": level,
                 "field": field,
                 "condition": condition,
             }
-            for page, item, level, field, condition in documentation.filter_strings
+            for page, item, level, field, condition, report in documentation.filter_strings
         ],
     }
 
@@ -324,9 +357,9 @@ def _lineage_section(documentation: Documentation, dependencies: list[dict]) -> 
     """
     Nodes and edges for graph views.
 
-    Node ids: "page:<page>", "visual:<page>/<id>", "table:<table>", "column:<Table[Col]>",
-    "measure:<Table[Measure]>", "source:<schema.object>".
-    Edge types: contains (page->visual, table->column/measure), uses (visual->field),
+    Node ids: "report:<report>", "page:<page>", "visual:<page>/<id>", "table:<table>",
+    "column:<Table[Col]>", "measure:<Table[Measure]>", "source:<schema.object>".
+    Edge types: contains (report->page, page->visual, table->column/measure), uses (visual->field),
     filters (visual->field), depends_on (DAX), relationship (table->table), loads_from
     (table->source).
     """
@@ -380,9 +413,13 @@ def _lineage_section(documentation: Documentation, dependencies: list[dict]) -> 
             cross_filter=rel.direction_label,
         )
 
-    # Every page gets a node, also pages without visuals (from page_info)
-    for info in documentation.page_info:
-        node(f"page:{info.name}", "page", info.name)
+    # Every report and page gets a node, also pages without visuals (from page_info). A page is
+    # labelled with its own title; its report is a level above it
+    for name, file in documentation.reports.items():
+        node(f"report:{name}", "report", name, file=file or None)
+    for page, (report, title) in _page_report(documentation).items():
+        report_id = node(f"report:{report}", "report", report)
+        edge(report_id, node(f"page:{page}", "page", title, report=report), "contains")
 
     for page, items in documentation.pages.items():
         page_id = node(f"page:{page}", "page", page)
@@ -434,6 +471,7 @@ def documentation_to_dict(documentation: Documentation) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "generator": f"pbixtractor {__version__}",
+        "reports": _reports_section(documentation),
         "report": _report_section(documentation),
         "model": _model_section(documentation),
         "dependencies": dependencies,

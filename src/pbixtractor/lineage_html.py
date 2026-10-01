@@ -27,7 +27,7 @@ _FLOW = {
     "depends_on": False,  # measure -> dependency  becomes  dependency -> measure
 }
 
-TYPE_ORDER = ["source", "table", "column", "measure", "visual", "page"]
+TYPE_ORDER = ["source", "table", "column", "measure", "visual", "page", "report"]
 
 
 def _measure_depths(nodes: dict, edges: list[dict]) -> dict[str, int]:
@@ -99,6 +99,18 @@ def _details(doc: dict) -> dict[str, dict]:
                 "Description": measure.get("description"),
                 "Unused": "Yes - not used by any visual, filter or DAX" if ref in unused else None,
             }
+
+    pages_by_name = {page["name"]: page for page in doc["report"]["pages"]}
+    for report in doc.get("reports", []):
+        pages = [pages_by_name[p] for p in report["pages"] if p in pages_by_name]
+        details[f"report:{report['name']}"] = {
+            "File": report.get("file"),
+            "Pages": len(pages),
+            "Visuals": sum(
+                1 for p in pages for i in p["items"] if i["type"] in ("Visual", "Slicer")
+            ),
+            "Hidden pages": sum(1 for p in pages if p.get("hidden")) or None,
+        }
 
     for page in doc["report"]["pages"]:
         details[f"page:{page['name']}"] = {
@@ -192,6 +204,7 @@ def build_viewer_data(doc: dict) -> dict:
         "column": 2,
         "visual": 4 + max_depth,
         "page": 5 + max_depth,
+        "report": 6 + max_depth,
     }
     details = _details(doc)
     visual_labels = _visual_labels(doc)
@@ -205,7 +218,8 @@ def build_viewer_data(doc: dict) -> dict:
                 "id": node_id,
                 "type": node_type,
                 "label": visual_labels.get(node_id, node["label"]),
-                "group": node.get("table") or node.get("page") or "",
+                # a field's table, a visual's page, a page's report
+                "group": node.get("table") or node.get("page") or node.get("report") or "",
                 "layer": layer,
                 "unused": node_id in unused,
                 "details": details.get(node_id, {}),
@@ -408,16 +422,19 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       <tr><td>Visual</td><td>A chart, table, card, slicer or button on a report page. Arrows into it
         are the fields it shows or is filtered by.</td></tr>
       <tr><td>Page</td><td>A report page and the visuals on it.</td></tr>
+      <tr><td>Report</td><td>A Power BI report and its pages. Several reports appear when all
+        reports on one semantic model are documented together.</td></tr>
     </table>
 
     <h3>Overview and moving around</h3>
     <ul>
       <li><b>⌂ Overview</b> (the start view): the whole system at a glance - sources → tables →
-        pages. A table feeds a page when a visual on the page uses its columns or measures (also
-        through other measures). Tables that feed no page have a dashed red border.</li>
+        pages (→ reports instead of pages, when several reports are documented together). A table
+        feeds a page when a visual on the page uses its columns or measures (also through other
+        measures). Tables that feed nothing have a dashed red border.</li>
       <li><b>← →</b>: back and forward through what you looked at (also Alt+← / Alt+→).</li>
       <li><b>⤴ Up a level</b>: from a column or measure to its table, from a visual to its page,
-        and from a table, page or source to the overview.</li>
+        from a page to its report, and from a table, report or source to the overview.</li>
       <li><b>− Fit +</b>: zoom out, show everything, zoom in (the mouse wheel zooms too).</li>
       <li><b>⇔ Panels</b>: hide the side panels for a bigger graph (click again to bring them back).</li>
     </ul>
@@ -473,9 +490,13 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 (function () {
   "use strict";
   var DATA = JSON.parse(document.getElementById("data").textContent);
-  var TYPES = ["source", "table", "column", "measure", "visual", "page"];
+  var TYPES = ["source", "table", "column", "measure", "visual", "page", "report"];
   var TYPE_LABEL = { source: "Source", table: "Table", column: "Column", measure: "Measure",
-                     visual: "Visual", page: "Page" };
+                     visual: "Visual", page: "Page", report: "Report" };
+  // The overview's top level: reports when several are documented together, else pages
+  var TOP = (DATA.stats.report || 0) > 1 ? "report" : "page";
+  var TOP_PLURAL = TOP === "report" ? "reports" : "pages";
+  var FEEDS_NONE = TOP === "report" ? "feeds no report" : "feeds no report page";
   var MAX_NODES = 600, NODE_W = 210, NODE_H = 34, GAP_X = 90, GAP_Y = 12;
 
   var byId = {}, up = {}, down = {};
@@ -605,14 +626,14 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     return xy;
   }
 
-  // ---------- overview: sources -> tables -> pages ----------
-  // A table feeds a page when anything upstream of the page's visuals belongs to it (also
+  // ---------- overview: sources -> tables -> pages (or reports) ----------
+  // A table feeds a page (report) when anything upstream of it belongs to the table (also
   // through measures in other tables). Built once, on first use.
   var overview = null;
   function buildOverview() {
     if (overview) return overview;
     var ids = DATA.nodes.filter(function (n) {
-      return n.type === "source" || n.type === "table" || n.type === "page";
+      return n.type === "source" || n.type === "table" || n.type === TOP;
     }).map(function (n) { return n.id; });
     var oUp = {}, oDown = {}, feeds = {};
     ids.forEach(function (id) { oUp[id] = []; oDown[id] = []; });
@@ -620,10 +641,10 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     DATA.edges.forEach(function (e) {
       if (byId[e[0]] && byId[e[1]] && byId[e[0]].type === "source" && byId[e[1]].type === "table") link(e[0], e[1], e[2]);
     });
-    ids.forEach(function (pageId) {
-      if (byId[pageId].type !== "page") return;
-      Object.keys(walk(pageId, up)).forEach(function (id) {
-        if (byId[id].type === "table") { link(id, pageId, "uses"); feeds[id] = true; }
+    ids.forEach(function (topId) {
+      if (byId[topId].type !== TOP) return;
+      Object.keys(walk(topId, up)).forEach(function (id) {
+        if (byId[id].type === "table") { link(id, topId, "uses"); feeds[id] = true; }
       });
     });
     var unused = {};
@@ -642,8 +663,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (view.kind === "overview") {
       var ov = buildOverview(), n = Object.keys(ov.unused).length;
       $("status").textContent = "Overview: " + DATA.stats.source + " sources → " + DATA.stats.table +
-        " tables → " + DATA.stats.page + " pages" +
-        (n ? " · " + n + (n === 1 ? " table feeds" : " tables feed") + " no page" : "") +
+        " tables → " + DATA.stats[TOP] + " " + TOP_PLURAL +
+        (n ? " · " + n + (n === 1 ? " table " : " tables ") + (n === 1 ? FEEDS_NONE : FEEDS_NONE.replace("feeds", "feed")) : "") +
         " · click: details, double-click: lineage";
       draw(ov.ids, ov.up, ov.down, null, ov.unused);
       return;
@@ -704,7 +725,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       g.appendChild(el("text", { x: 12, y: 28, "class": "type" },
         TYPE_LABEL[n.type] + (n.group ? " · " + (n.group.length > 26 ? n.group.slice(0, 25) + "…" : n.group) : "")));
       g.appendChild(el("title", {}, TYPE_LABEL[n.type] + ": " + n.label + (n.group ? "\n" + n.group : "") +
-        (n.unused ? "\nUnused" : unused ? "\nFeeds no report page" : "")));
+        (n.unused ? "\nUnused" : unused ? "\n" + FEEDS_NONE.charAt(0).toUpperCase() + FEEDS_NONE.slice(1) : "")));
       // Click: mark it and show its details; double-click (or Enter): open its lineage
       g.addEventListener("click", function (ev) { ev.stopPropagation(); mark(id); });
       g.addEventListener("dblclick", function (ev) { ev.stopPropagation(); select(id); });
@@ -763,11 +784,11 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       var ov = buildOverview();
       body.appendChild(html("h2", null, "System overview"));
       body.appendChild(html("p", "muted", "Where the data comes from (sources), the model tables it " +
-        "lands in, and the report pages that use each table. Click an item for its details, " +
-        "double-click it to open its full lineage."));
+        "lands in, and the " + (TOP === "report" ? "reports" : "report pages") + " that use each table. Click an item for its " +
+        "details, double-click it to open its full lineage."));
       var byLabel = function (a, b) { return byId[a].label.localeCompare(byId[b].label); };
-      body.appendChild(linkList("Tables that feed no report page", Object.keys(ov.unused).sort(byLabel)));
-      body.appendChild(linkList("Pages", ov.ids.filter(function (id) { return byId[id].type === "page"; })));
+      body.appendChild(linkList("Tables that " + FEEDS_NONE.replace("feeds", "feed"), Object.keys(ov.unused).sort(byLabel)));
+      body.appendChild(linkList(TOP === "report" ? "Reports" : "Pages", ov.ids.filter(function (id) { return byId[id].type === TOP; })));
       body.appendChild(linkList("Sources", ov.ids.filter(function (id) { return byId[id].type === "source"; }).sort(byLabel)));
       return;
     }
@@ -828,12 +849,14 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function back() { if (at > 0) { at--; render(); } }
   function forward() { if (at < views.length - 1) { at++; render(); } }
 
-  // One level up: column/measure -> its table, visual -> its page, anything else -> overview
+  // One level up: column/measure -> its table, visual -> its page, page -> its report,
+  // anything else -> overview
   function parentOf(view) {
     if (!view || view.kind !== "item") return null;
     var n = byId[view.id];
     if ((n.type === "column" || n.type === "measure") && byId["table:" + n.group]) return { kind: "item", id: "table:" + n.group };
     if (n.type === "visual" && byId["page:" + n.group]) return { kind: "item", id: "page:" + n.group };
+    if (n.type === "page" && byId["report:" + n.group]) return { kind: "item", id: "report:" + n.group };
     return { kind: "overview" };
   }
   function levelUp() { var parent = parentOf(current()); if (parent) show(parent); }

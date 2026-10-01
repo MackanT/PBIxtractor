@@ -39,6 +39,7 @@ from .pipeline import (
     ExtractionOptions,
     ExtractionResult,
     find_model_for_report,
+    model_name,
     report_name,
     run_extraction,
 )
@@ -59,6 +60,7 @@ def default_catalog_dir() -> Path:
 UPLOAD_SUFFIXES = (".pbix", ".bim")
 MAX_UPLOAD_BYTES = 2_000_000_000  # real .pbix files reach several hundred MB
 UPLOAD_FOLDER_NAME = "_uploads"  # dropped files are copied to output_root()/_uploads
+DROP_SECONDS = 30  # files dropped within this time of each other are one drop
 # After a restart the open tab reconnects on its own (socket.io retries at most every 5 s, then
 # the page reloads because the new server does not know it); only open a new tab if none does
 BROWSER_GRACE_SECONDS = 7
@@ -253,7 +255,9 @@ def _stats(report_json: dict) -> list[tuple[str, object, str]]:
     broken_bookmarks = sum(1 for b in bookmarks if b.get("broken"))
     broken = sum(1 for i in items if i.get("broken"))
     quality = Counter(v["severity"] for v in report_json["quality"] or [])
-    stats = [
+    reports = report_json.get("reports", [])
+    stats = [("Reports", len(reports), "primary")] if len(reports) > 1 else []
+    stats += [
         ("Pages", len(pages), "primary"),
         ("Visuals", sum(1 for i in items if i["type"] in ("Visual", "Slicer")), "primary"),
         ("Tables", len(report_json["model"]["tables"]), "primary"),
@@ -468,6 +472,43 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                     _log_text(result.logs)
                 else:
                     ui.label("No warnings.").classes("text-grey-7")
+
+
+def _shared_model(
+    reports: list[Path], chosen: Optional[Path], models_dropped: int
+) -> Optional[Path]:
+    """The one model several dropped reports are documented with, or None (after telling the
+    user why): one model is documented at a time."""
+    if models_dropped > 1:
+        ui.notify(
+            "Several models were dropped. One model is documented at a time: remove the reports "
+            "of the other model(s), or drop them separately.",
+            type="warning",
+            multi_line=True,
+        )
+        return None
+    if chosen is not None:
+        return chosen  # a dropped or chosen .bim: all the reports use it
+    found = {r: find_model_for_report(r) for r in reports}
+    missing = [r.name for r, m in found.items() if m is None]
+    if missing:
+        ui.notify(
+            f"No model found for {', '.join(missing)} - drop its .bim together with the reports.",
+            type="warning",
+            multi_line=True,
+        )
+        return None
+    if len(set(found.values())) > 1:
+        ui.notify(
+            "These reports use different models ("
+            + ", ".join(sorted({m.name for m in found.values()}))
+            + "). One model is documented at a time: remove the other reports, or drop them "
+            "separately.",
+            type="warning",
+            multi_line=True,
+        )
+        return None
+    return next(iter(found.values()))
 
 
 def _mode() -> str:
@@ -692,8 +733,10 @@ def build_page(
                     model_row.set_visibility(local)
 
                     # Drag & drop: the browser never reveals a dropped file's path, so the file is
-                    # copied to output/_uploads and that copy is documented
-                    last_model_upload = {"time": 0.0}
+                    # copied to output/_uploads and that copy is documented. Files dropped
+                    # together (each arrives on its own) form one drop: several reports in it are
+                    # documented together when they share one model (model mode)
+                    drop = {"time": 0.0, "reports": [], "models": []}
 
                     async def on_upload(event: events.UploadEventArguments) -> None:
                         name = Path(event.file.name).name
@@ -703,14 +746,19 @@ def build_page(
                             return
                         target = output_root() / UPLOAD_FOLDER_NAME / name
                         await event.file.save(target)
-                        if suffix == ".bim":
-                            model_input.value = str(target)
-                            last_model_upload["time"] = time.monotonic()
+                        now = time.monotonic()
+                        if now - drop["time"] > DROP_SECONDS:  # a new drop: its own model
+                            drop["reports"], drop["models"] = [], []
+                            model_input.value = ""
+                        drop["time"] = now
+                        kind = "models" if suffix == ".bim" else "reports"
+                        if target not in drop[kind]:
+                            drop[kind].append(target)
+                        if kind == "models":
+                            model_input.value = str(drop["models"][0])
                         else:
-                            # A new report: find its model again, unless one came in the same drop
-                            if time.monotonic() - last_model_upload["time"] > 30:
-                                model_input.value = ""
-                            report_input.value = str(target)
+                            report_input.value = str(drop["reports"][0])
+                        together.refresh()
                         ui.notify(f"{name} copied to {target.parent}", type="positive")
 
                     ui.upload(
@@ -729,6 +777,38 @@ def build_page(
                             type="warning",
                         ),
                     ).props('accept=".pbix,.bim" flat').classes("drop-zone").mark("upload")
+
+                    def drop_extras() -> list[Path]:
+                        """The other reports of the drop, while its first one is the report."""
+                        reports = drop["reports"]
+                        if len(reports) > 1 and report_input.value == str(reports[0]):
+                            return reports[1:]
+                        return []
+
+                    def remove_from_drop(path: Path) -> None:
+                        drop["reports"].remove(path)
+                        if drop["reports"]:
+                            report_input.value = str(drop["reports"][0])
+                        together.refresh()
+
+                    @ui.refreshable
+                    def together() -> None:
+                        if not drop_extras():
+                            return
+                        with ui.row().classes("w-full items-center gap-1").mark("together"):
+                            ui.label("Documented together:").classes("text-sm text-grey-7")
+                            for path in drop["reports"]:
+                                ui.chip(
+                                    report_name(path),
+                                    removable=True,
+                                    on_value_change=lambda _, p=path: remove_from_drop(p),
+                                ).props("dense outline color=primary")
+                        if len(drop["models"]) > 1:
+                            ui.label(
+                                "Several models were dropped - one model is documented at a time"
+                            ).classes("text-sm text-warning")
+
+                    together()
                 local_box.bind_visibility_from(source, "value", value="local")
 
                 # Remote sources: pick a report; it is downloaded when the documentation runs
@@ -902,11 +982,13 @@ def build_page(
         if not model_input.value or model_input.value == auto_model["value"]:
             model_input.value = str(model) if model else ""
             auto_model["value"] = model_input.value or None
-        output_input.value = str(output_root() / report_name(path))
+        output_input.value = auto_output["value"] = str(output_root() / report_name(path))
+        together.refresh()  # typing another report leaves a drop's other reports out
         if local:
             background_tasks.create(refresh_desktop(delay=0.5), name="refresh_desktop")
 
     auto_model = {"value": None}  # the model value on_report_change filled in last
+    auto_output = {"value": None}  # the output folder on_report_change suggested last
     report_input.on_value_change(lambda _: on_report_change())
 
     async def download_remote_report(panel) -> Optional[Fetched]:
@@ -985,7 +1067,20 @@ def build_page(
             if not report_input.value or not report.exists():
                 ui.notify("Choose an existing report first.", type="warning")
                 return
-            model = Path(model_value) if model_value else find_model_for_report(report)
+            extras = drop_extras()
+            if extras:  # several dropped reports: one documentation if they share a model
+                model = _shared_model(
+                    [report, *extras],
+                    Path(model_value) if model_value and model_value != auto_model["value"] else None,
+                    len(drop["models"]),
+                )
+                if model is None:
+                    return
+                extra_reports, name = extras, model_name(model)
+                if output_input.value == auto_output["value"]:
+                    output_input.value = str(output_root() / name)  # named after the model
+            else:
+                model = Path(model_value) if model_value else find_model_for_report(report)
             if model is None or not model.exists():
                 ui.notify(
                     "Choose the model (.bim, or model.tmdl of a TMDL model) that belongs to the "

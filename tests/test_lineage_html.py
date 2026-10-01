@@ -143,3 +143,13 @@ def test_page_follows_the_app_theme_and_embeds_its_fonts(doc):
     assert ':root[data-theme="dark"]' in html  # set by ?theme= or the app's toggle message
     assert 'e.data && e.data.pbixtractorTheme' in html
     assert "#2563eb" not in html  # the old blue accent is gone
+
+
+def test_the_report_is_the_level_above_its_pages(data):
+    nodes = {n["id"]: n for n in data["nodes"]}
+    report = nodes["report:Sample"]
+    assert report["type"] == "report" and report["layer"] > nodes["page:Sales"]["layer"]
+    assert ("page:Sales", "report:Sample", "contains") in {tuple(e) for e in data["edges"]}
+    assert nodes["page:Sales"]["group"] == "Sample"  # "up a level" from a page goes here
+    assert report["details"]["Pages"] == 2 and report["details"]["File"] == "Sample.pbix"
+    assert data["stats"]["report"] == 1  # one report: the overview still shows pages

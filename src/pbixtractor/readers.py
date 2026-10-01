@@ -74,6 +74,10 @@ class PageDefinition:
     hidden: bool = False
     page_type: str = ""  # "" (normal), "Tooltip" or "Drillthrough"
     interactions: list[VisualInteraction] = field(default_factory=list)
+    # Set by ReportExtractor: the report the page belongs to, and its own title (display_name
+    # gets "<report> › " in front when several reports are documented together)
+    report: str = ""
+    title: str = ""
 
 
 @dataclass
@@ -102,6 +106,7 @@ class BookmarkDefinition:
     # Filter/slicer state it stores (whether or not "Data" is on: applied only when it is).
     # Filter-pane entries without a condition only list the field and are left out.
     filters: list[CapturedFilter] = field(default_factory=list)
+    report: str = ""  # set by ReportExtractor: the report the bookmark belongs to
 
 
 @dataclass
@@ -113,6 +118,9 @@ class ReportDefinition:
     filters: list = field(default_factory=list)  # report-level ("All Pages") filters
     bookmarks: dict[str, str] = field(default_factory=dict)  # bookmark id -> display name
     bookmark_details: list[BookmarkDefinition] = field(default_factory=list)
+    # Set by ReportExtractor: report name -> the file/folder it was read from, in order (one
+    # entry, or several when reports on one model are documented together)
+    reports: dict[str, str] = field(default_factory=dict)
 
 
 # "Edit interactions" types: legacy numbers and PBIR names -> label

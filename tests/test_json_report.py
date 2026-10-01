@@ -55,6 +55,20 @@ def test_top_level_sections(data):
     assert data["dependencies_exact"] is True
 
 
+def test_the_report_is_a_level_above_its_pages(data):
+    assert data["reports"] == [{"name": "Sample", "file": "Sample.pbix", "pages": ["Sales", "Detail"]}]
+    for page in data["report"]["pages"]:
+        assert page["report"] == "Sample" and page["title"] == page["name"]
+    assert {f["report"] for f in data["report"]["filters"]} == {"Sample"}
+    assert {b["report"] for b in data["report"]["bookmarks"]} == {"Sample"}
+    nodes = {n["id"]: n for n in data["lineage"]["nodes"]}
+    assert nodes["report:Sample"]["type"] == "report"
+    for page in ("Sales", "Detail"):  # also the page without visuals
+        assert {"source": "report:Sample", "target": f"page:{page}", "type": "contains"} in data[
+            "lineage"
+        ]["edges"]
+
+
 def test_pages_and_bookmarks(data):
     pages = {p["name"]: p for p in data["report"]["pages"]}
     assert pages["Detail"]["hidden"] is True and pages["Detail"]["items"] == []

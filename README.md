@@ -53,8 +53,9 @@ pbixtractor
 pbixtractor web --port 8090 --no-browser
 ```
 
-Pick a report (`.pbix`, `.pbip` or a `.Report` folder; drag & drop works too), or choose one
-from a Fabric workspace or an Azure DevOps repository. The model is found automatically:
+Pick a report (`.pbix`, `.pbip` or a `.Report` folder; drag & drop works too - drop several
+reports with their one `.bim` to document them together), or choose one from a Fabric workspace
+or an Azure DevOps repository. The model is found automatically:
 `<name>.bim` next to the report, or a PBIP project's semantic model as `model.bim` or TMDL
 (the `definition` folder newer Power BI Desktop versions write). After a run the
 page shows the lineage viewer inline, the Best Practice Analyzer findings, unused objects,

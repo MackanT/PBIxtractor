@@ -45,13 +45,13 @@ _PAGE_LIGHT = """
   --accent: #3f7d5a; --attn: #c2703e; --edge: #b9b6a8; --edge-hi: #2f6246; --on-color: #ffffff;
   --shadow: 0 1px 2px rgba(23,53,43,.05);
   --source: #35657a; --table: #3f7d5a; --column: #5b8cad; --measure: #b58a1e;
-  --visual: #7b68b5; --report: #7b68b5; --page: #6b7466; --model: #1c3828; --unused: #b4433a;"""
+  --visual: #7b68b5; --report: #8a4f7d; --page: #6b7466; --model: #1c3828; --unused: #b4433a;"""
 _PAGE_DARK = """
   --bg: #161915; --panel: #20241f; --text: #e8eae4; --muted: #9ba295; --border: #2a2e28;
   --accent: #6fb08a; --attn: #e0935e; --edge: #4a5048; --edge-hi: #8fc7a4; --on-color: #161915;
   --shadow: none;
   --source: #6fa3b8; --table: #6fb08a; --column: #8ab4d1; --measure: #d4a93f;
-  --visual: #a596d6; --report: #a596d6; --page: #9ba295; --model: #8fc7a4; --unused: #d9776d;"""
+  --visual: #a596d6; --report: #c98fbb; --page: #9ba295; --model: #8fc7a4; --unused: #d9776d;"""
 
 # Sets data-theme before the page paints; only "dark"/"light" are ever accepted
 PAGE_THEME_SCRIPT = """<script>(function () {
