@@ -59,7 +59,13 @@ added to the catalog. A PBIP project (`.pbip` or a `.Report` folder) is chosen u
 on this PC instead"; or pick a report from a Fabric workspace or an Azure DevOps repository.
 Fabric's "Whole workspaces" and Azure DevOps' "Whole repository" list the semantic models found
 ("List models"); the ones you tick are documented - one documentation per model, with all its
-reports - into one searchable catalog. The model is found automatically:
+reports - into one searchable catalog. The catalog searches every model, report, page, visual,
+table, column, measure and source at once, and **flags differences between models**: a
+measure, column, table or visual (same type and title) that exists in several models but is
+not the same everywhere gets a "≠" notice and a side-by-side comparison - often a mistake
+worth a look. It also has a **lineage viewer across all its models**: models and
+their reports first, the sources several models share, then into any one model ("Show
+everything" for all tables at once). The model is found automatically:
 the model inside the `.pbix` itself (no `.bim` needed), else `<name>.bim` next to the report, or a
 PBIP project's semantic model as `model.bim` or TMDL
 (the `definition` folder newer Power BI Desktop versions write). After a run the

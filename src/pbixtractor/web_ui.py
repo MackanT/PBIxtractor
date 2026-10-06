@@ -103,8 +103,8 @@ _CATALOG = {"dir": None}
 
 def _serve_catalog_file(path: str) -> FileResponse:
     """
-    Serve the catalog: catalog.html, catalog.json and models/<key>/<file> only - never other
-    files that happen to be in (or below) the chosen catalog folder.
+    Serve the catalog: catalog.html, catalog.json, lineage.html and models/<key>/<file> only -
+    never other files that happen to be in (or below) the chosen catalog folder.
     """
     if not web_config.may_access():
         raise HTTPException(status_code=403)
@@ -113,7 +113,7 @@ def _serve_catalog_file(path: str) -> FileResponse:
         raise HTTPException(status_code=404)
     root = folder.resolve()
     target = (root / path).resolve()
-    allowed = target.parent == root and target.name in ("catalog.html", "catalog.json")
+    allowed = target.parent == root and target.name in ("catalog.html", "catalog.json", "lineage.html")
     allowed |= target.parent.parent == root / "models"  # models/<key>/<file>, checked resolved
     if not allowed or not target.is_file():
         raise HTTPException(status_code=404)
@@ -365,6 +365,8 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                         icon="menu_book",
                         on_click=lambda: ui.navigate.to(_themed("/catalog/catalog.html"), new_tab=True),
                     ).props("outline color=primary").mark("open_catalog")
+                    if (Path(path).parent / "lineage.html").is_file():
+                        _cross_lineage_button("open_cross_lineage")
                     continue
                 label, file_icon = FILE_LABELS.get(kind, (kind, "download"))
                 ui.button(
@@ -545,6 +547,15 @@ class _PublishedModelDownload:
         )
 
 
+def _cross_lineage_button(marker: str) -> None:
+    """The catalog's lineage across all its models (catalog.LINEAGE_HTML), in a new tab."""
+    ui.button(
+        "Lineage across models",
+        icon="hub",
+        on_click=lambda: ui.navigate.to(_themed("/catalog/lineage.html"), new_tab=True),
+    ).props("outline color=primary").mark(marker)
+
+
 _BATCH_STATUS = {  # (icon, colour, text) per JobOutcome.status; None = not started
     None: ("schedule", "grey", "Waiting"),
     "running": ("autorenew", "primary", "Running…"),
@@ -616,6 +627,8 @@ def _batch_results(container: ui.element, jobs: list[batch.BatchJob], catalog_di
                             icon="menu_book",
                             on_click=lambda: ui.navigate.to(_themed("/catalog/catalog.html"), new_tab=True),
                         ).props("outline color=primary").mark("batch_catalog")
+                    if documented and (catalog_dir / "lineage.html").is_file():
+                        _cross_lineage_button("batch_cross_lineage")
             for index, job in enumerate(jobs):
                 outcome = outcomes[index]
                 icon, colour, text = _BATCH_STATUS[outcome.status if outcome else None]
@@ -739,10 +752,12 @@ def _build_shell():
 
     @ui.refreshable
     def nav() -> None:
-        entries = [("description", "Document a report", None)]
+        entries = [("description", "Document a report", None, "nav_document")]
         if _catalog_ready():
-            entries.append(("menu_book", "Catalog", "/catalog/catalog.html"))
-        for icon, label, page in entries:
+            entries.append(("menu_book", "Catalog", "/catalog/catalog.html", "nav_catalog"))
+            if (Path(_CATALOG["dir"]) / "lineage.html").is_file():
+                entries.append(("hub", "Lineage across models", "/catalog/lineage.html", "nav_cross_lineage"))
+        for icon, label, page, marker in entries:
             button = ui.button(
                 label if rail["expanded"] else "",
                 icon=icon,
@@ -752,7 +767,7 @@ def _build_shell():
                 ("rail-btn-x" if rail["expanded"] else "rail-btn")
                 + " nav-btn"
                 + ("" if page else " nav-active")
-            ).mark("nav_catalog" if page else "nav_document")
+            ).mark(marker)
             if not rail["expanded"]:
                 button.tooltip(label + (" (opens in a new tab)" if page else ""))
 
@@ -815,11 +830,18 @@ def build_page(
         def catalog_link() -> None:
             # The stand-alone rail has a Catalog entry; embedded there is no rail
             if web_config.CONFIG.embedded and _catalog_ready():
-                ui.button(
-                    "Open catalog",
-                    icon="menu_book",
-                    on_click=lambda: ui.navigate.to(_themed("/catalog/catalog.html"), new_tab=True),
-                ).props("flat color=primary").mark("page_catalog")
+                with ui.row().classes("gap-2"):
+                    ui.button(
+                        "Open catalog",
+                        icon="menu_book",
+                        on_click=lambda: ui.navigate.to(_themed("/catalog/catalog.html"), new_tab=True),
+                    ).props("flat color=primary").mark("page_catalog")
+                    if (Path(_CATALOG["dir"]) / "lineage.html").is_file():
+                        ui.button(
+                            "Lineage across models",
+                            icon="hub",
+                            on_click=lambda: ui.navigate.to(_themed("/catalog/lineage.html"), new_tab=True),
+                        ).props("flat color=primary").mark("page_cross_lineage")
 
         catalog_link()
         if on_catalog_change is None:

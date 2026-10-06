@@ -74,7 +74,7 @@ def _split_ref(ref: str) -> tuple[str, str]:
 # ============================================================================
 
 
-def _item_dict(item: PageItem, interactivity: list[str]) -> dict:
+def _item_dict(item: PageItem, interactivity: list[str], title: str = "") -> dict:
     data = {"type": item.item_type, "visual_type": item.visual_type}
     if item.item_type == "Filter":
         data.update(field=item.filter_field, condition=item.filter_condition)
@@ -82,6 +82,8 @@ def _item_dict(item: PageItem, interactivity: list[str]) -> dict:
 
     data["id"] = _clean(item.id)
     if item.item_type in ("Visual", "Slicer"):
+        if title:
+            data["title"] = title  # what the visual shows as its title (same in other reports?)
         data["fields"] = [
             {
                 "table": row["Table"],
@@ -144,7 +146,11 @@ def _report_section(documentation: Documentation) -> dict:
                 "page_type": (info[page].page_type or None) if page in info else None,
                 "sync_groups": info[page].sync_groups if page in info else [],
                 "items": [
-                    _item_dict(item, documentation.interactivity.get((page, str(item.id)), []))
+                    _item_dict(
+                        item,
+                        documentation.interactivity.get((page, str(item.id)), []),
+                        documentation.visual_titles.get((page, str(item.id)), ""),
+                    )
                     for item in documentation.pages.get(page, [])
                 ],
             }

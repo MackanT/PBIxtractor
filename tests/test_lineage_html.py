@@ -10,7 +10,13 @@ import pytest
 import pbixtractor.report_extractor as extractor
 from pbixtractor.documentation import build_documentation
 from pbixtractor.json_report import documentation_to_dict
-from pbixtractor.lineage_html import build_viewer_data, render_lineage_html, write_lineage_html
+from pbixtractor.lineage_html import (
+    build_multi_viewer_data,
+    build_viewer_data,
+    render_lineage_html,
+    render_multi_lineage_html,
+    write_lineage_html,
+)
 from pbixtractor.semantic_model import model_to_dataset, parse_model
 from pbixtractor.tabular_editor import parse_dependencies
 
@@ -159,3 +165,49 @@ def test_rls_is_shown(data):
     assert data["rls"] == ["Nordics"]
     sales = next(n for n in data["nodes"] if n["id"] == "table:Sales")
     assert sales["details"]["Row-level security"].startswith("Nordics: ")
+
+
+def _entry(doc: dict, key: str, name: str) -> dict:
+    from pbixtractor.catalog import build_entry
+
+    identity = {"key": key, "kind": "file", "label": f"File · C:/x/{name}.bim"}
+    entry = build_entry(doc, identity, name, {"lineage": f"models/{key}/{name}_lineage.html"})
+    return {**entry, "documented": "2026-10-06", "rls": ["Nordics"]}
+
+
+def test_lineage_across_models(doc):
+    import copy
+
+    other = copy.deepcopy(doc)  # the same model again, with one measure changed
+    for table in other["model"]["tables"]:
+        for measure in table["measures"]:
+            if measure["name"] == "Dynamic":
+                measure["expression"] = "[Total Amount] * 3"
+    data = build_multi_viewer_data(
+        [(_entry(doc, "a", "Alpha"), build_viewer_data(doc)), (_entry(other, "b", "Beta"), build_viewer_data(other))]
+    )
+    nodes = {n["id"]: n for n in data["nodes"]}
+    assert data["multi"] and data["stats"]["model"] == 2
+    # Each model keeps its own items; one source loaded by both is one item
+    assert nodes["a|table:Dates"]["model"] == "Alpha" and nodes["b|table:Dates"]["model"] == "Beta"
+    source = nodes["source|gold.dim_date"]
+    assert source["shared"] == 2 and source["details"]["Models"] == "Alpha, Beta"
+    assert ["source|gold.dim_date", "a|table:Dates", "loads_from"] in data["edges"]
+    assert ["source|gold.dim_date", "b|table:Dates", "loads_from"] in data["edges"]
+    # Model nodes, linked only for the overviews (not in the lineage edges)
+    model = nodes["model|a"]
+    assert (model["type"], model["group"], model["link"]) == ("model", "File", "models/a/Alpha_lineage.html")
+    assert ["source|gold.dim_date", "model|a", "loads_from"] in data["model_edges"]
+    report = next(n["id"] for n in data["nodes"] if n["type"] == "report" and n["m"] == "a")
+    assert ["model|a", report, "contains"] in data["model_edges"]
+    assert not any("model|" in e[0] or "model|" in e[1] for e in data["edges"])
+    # The same measure / column / table elsewhere: identical, or what differs
+    assert data["same"]["a|measure:Sales[Total Amount]"] == [["b|measure:Sales[Total Amount]", True, []]]
+    assert data["same"]["a|measure:Sales[Dynamic]"] == [["b|measure:Sales[Dynamic]", False, ["DAX"]]]
+    assert data["same"]["a|table:Dates"] == [["b|table:Dates", True, []]]
+    assert data["differs"] == {"a|measure:Sales[Dynamic]": True, "b|measure:Sales[Dynamic]": True}
+    # One layering: the same type in the same column for every model
+    assert {n["layer"] for n in data["nodes"] if n["type"] == "report"} == {nodes[report]["layer"]}
+    assert data["rls"] == ["Alpha", "Beta"]
+    html = render_multi_lineage_html([(_entry(doc, "a", "Alpha"), build_viewer_data(doc))])
+    assert "<title>Lineage across models</title>" in html and '"multi":true' in html

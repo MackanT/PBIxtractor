@@ -175,3 +175,48 @@ def test_cli_catalog(sample, capsys):
     with pytest.raises(SystemExit) as exit_info:
         main(["catalog", "remove", str(catalog), key])
     assert exit_info.value.code == 0 and list_entries(catalog) == []
+
+
+def _page_data(html: str) -> dict:
+    return json.loads(html.split('<script type="application/json" id="data">')[1].split("</script>")[0])
+
+
+def test_catalog_lists_visuals_and_builds_a_lineage_across_models(sample):
+    catalog = sample / "catalog"
+    _run(sample, catalog)
+    other = sample / "other"
+    other.mkdir()
+    shutil.copy(sample / "Sample.bim", other / "Finance.bim")
+    _run(sample, catalog, output="finance", model_path=other / "Finance.bim")
+    entries = list_entries(catalog)
+
+    # Visuals: what each one shows, searchable in the catalog page
+    visuals = [v for r in entries[0]["reports"] for p in r["pages"] for v in p["items"]]
+    assert visuals and all(set(v) == {"id", "type", "label", "title", "fields"} for v in visuals)
+    shown = next(v for v in visuals if v["fields"])
+    assert all(f.endswith("]") and "[" in f for f in shown["fields"]) and ":" in shown["label"]
+
+    # Each model's lineage data, and one viewer across them
+    for entry in entries:
+        assert (catalog / "models" / entry["key"] / "lineage.json").is_file()
+    data = _page_data((catalog / "lineage.html").read_text(encoding="utf-8"))
+    assert data["multi"] and data["stats"]["model"] == 2
+    assert any(n["type"] == "source" and n["shared"] == 2 for n in data["nodes"])
+    assert json.loads((catalog / "catalog.json").read_text(encoding="utf-8"))["lineage"] == "lineage.html"
+
+    # No model left: no page
+    for entry in entries:
+        remove_from_catalog(catalog, entry["key"])
+    assert not (catalog / "lineage.html").exists()
+
+
+def test_adding_without_rebuild_leaves_the_pages_for_later(sample):
+    from pbixtractor.catalog import add_to_catalog
+
+    catalog = sample / "catalog"
+    result = _run(sample, sample / "first")  # a documentation to add
+    add_to_catalog(catalog, result.report_json, sample / "Sample.pbix", sample / "Sample.bim", "Sample",
+                   result.files, rebuild=False)
+    assert len(list_entries(catalog)) == 1 and not (catalog / "catalog.html").exists()
+    rebuild_catalog(catalog)
+    assert (catalog / "catalog.html").is_file() and (catalog / "lineage.html").is_file()

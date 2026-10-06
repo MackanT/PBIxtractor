@@ -82,6 +82,7 @@ class ExtractionOptions:
     service_statistics: bool = True
     # Also add the result to this catalog folder (catalog.py): one searchable page for many models
     catalog_dir: Optional[Path] = None
+    catalog_rebuild: bool = True  # rebuild its pages now (a batch rebuilds once, at the end)
 
     def __post_init__(self):
         self.report_path = Path(self.report_path)
@@ -430,6 +431,7 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
                 options.model_path,
                 options.name if options.extra_reports else model_name(options.model_path),
                 files,
+                rebuild=options.catalog_rebuild,
             )
         except (OSError, ValueError, KeyError) as e:
             logger.warning(f"Adding to the catalog {options.catalog_dir} failed: {e}")

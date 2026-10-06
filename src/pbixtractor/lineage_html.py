@@ -14,6 +14,7 @@ import json
 from html import escape
 from pathlib import Path
 
+from .compare import compare_entries, differences
 from .design import PAGE_THEME_SCRIPT, page_css
 
 # Flow direction for each lineage edge type: True = same as the JSON edge, False = reversed.
@@ -135,6 +136,7 @@ def _details(doc: dict) -> dict[str, dict]:
             ]
             details[f"visual:{page['name']}/{item['id']}"] = {
                 "Page": page["name"],
+                "Title": item.get("title"),
                 "Type": f"{item['type']} - {item['visual_type']}",
                 "Action": (f"{item['action']}: {item['target']}" if item.get("action") else None),
                 "Label": item.get("label") or item.get("name"),
@@ -167,6 +169,8 @@ def _visual_labels(doc: dict) -> dict[str, str]:
                     label = f"⚠ {label}"
             elif item["type"] == "Group":
                 label = f"{kind}: {item.get('name') or item['id']}"
+            elif item.get("title") and not item["title"].startswith("fx:"):
+                label = f"{kind}: {item['title']}"  # its title says best what it shows
             else:
                 names = list(dict.fromkeys(f["display_name"] for f in item.get("fields", [])))
                 shown = ", ".join(names[:2]) + (f" +{len(names) - 2}" if len(names) > 2 else "")
@@ -245,19 +249,159 @@ def build_viewer_data(doc: dict) -> dict:
     }
 
 
-def render_lineage_html(doc: dict) -> str:
-    """The complete HTML page for a JSON documentation dict."""
-    data = build_viewer_data(doc)
+def _source_key(label: str) -> str:
+    """Sources of different models are the same when their names are ("[dbo].[X]" = "dbo.x").
+    Names are not server/database-qualified yet, so equal names in different databases match."""
+    return " ".join(label.replace("[", "").replace("]", "").replace('"', "").lower().split())
+
+
+def build_multi_viewer_data(models: list[tuple[dict, dict]]) -> dict:
+    """
+    One viewer data set over several models: the catalog's lineage across models.
+
+    Every model's nodes keep their own ids behind "<catalog key>|"; a source with the same name
+    in several models becomes one node ("source|<name>"), so lineage runs from it into each
+    model. Model nodes ("model|<key>") and model_edges (source -> model -> report) are only
+    for the overviews. same: measure/column/table id -> [[the same item in another model,
+    identical?, what differs], ...] (compare.compare_entries); differs: the ids of items that
+    are not the same in every model (marked "≠").
+
+    Args:
+        models: [(catalog entry, that model's build_viewer_data())]
+    """
+    # One layering for all: measures stay at 3 + their own depth, the deepest model decides
+    # where visuals / pages / reports go
+    deepest = max(
+        (n["layer"] - 3 for _, data in models for n in data["nodes"] if n["type"] == "measure"), default=0
+    )
+    layer_of = {"source": 0, "table": 1, "column": 2, "visual": 4 + deepest, "page": 5 + deepest,
+                "report": 6 + deepest}
+    nodes: list[dict] = []
+    edges: list[list[str]] = []
+    model_edges: list[list[str]] = []
+    shared: dict[str, dict] = {}
+    rls = []
+    for entry, data in models:
+        key, name = entry["key"], entry["name"]
+        model_id = f"model|{key}"
+        local: dict[str, str] = {}
+        sources, reports = set(), []
+        for node in data["nodes"]:
+            if node["type"] == "source":
+                norm = _source_key(node["label"])
+                merged = shared.setdefault(
+                    norm,
+                    {**node, "id": f"source|{norm}", "m": "", "model": "", "layer": 0,
+                     "details": dict(node["details"]), "models": []},
+                )
+                if name not in merged["models"]:
+                    merged["models"].append(name)
+                local[node["id"]] = merged["id"]
+                sources.add(merged["id"])
+                continue
+            copy = {**node, "id": f"{key}|{node['id']}", "m": key, "model": name}
+            if node["type"] != "measure":
+                copy["layer"] = layer_of.get(node["type"], node["layer"])
+            local[node["id"]] = copy["id"]
+            nodes.append(copy)
+            if node["type"] == "report":
+                reports.append(copy)
+        edges += [[local[a], local[b], kind] for a, b, kind in data["edges"] if a in local and b in local]
+        stats = data.get("stats", {})
+        nodes.append({
+            "id": model_id,
+            "type": "model",
+            "label": name,
+            # where it comes from, short: "Fabric · <workspace>"; a file's path is in its details
+            "group": "File" if entry["source"].get("kind") == "file" else entry["source"].get("label", ""),
+            "m": key,
+            "model": name,
+            "layer": 1,
+            "unused": False,
+            "link": entry.get("links", {}).get("lineage"),
+            "details": {k: v for k, v in {
+                "Source": entry["source"].get("label"),
+                "Reports": ", ".join(r["label"] for r in reports) or None,
+                "Tables": stats.get("table"),
+                "Measures": stats.get("measure"),
+                "Visuals": stats.get("visual"),
+                "Documented": entry.get("documented"),
+                "Row-level security": ", ".join(entry.get("rls") or []) or None,
+                "Not included": "\n".join(entry.get("not_included") or []) or None,
+            }.items() if v not in (None, "", 0)},
+        })
+        model_edges += [[s, model_id, "loads_from"] for s in sorted(sources)]
+        model_edges += [[model_id, r["id"], "contains"] for r in reports]
+        if entry.get("rls"):
+            rls.append(name)  # the roles are in the model's details
+
+    for merged in shared.values():
+        models_of = merged.pop("models")
+        if len(models_of) > 1:
+            merged["details"]["Models"] = ", ".join(models_of)
+        merged["shared"] = len(models_of)
+        nodes.append(merged)
+
+    # The same measure / column / table in other models, and whether it is really the same
+    known = {n["id"] for n in nodes}
+    same: dict[str, list] = {}
+    differs: dict[str, bool] = {}
+    groups = compare_entries([entry for entry, _ in models])
+    for kind in ("measure", "column", "table"):
+        for group in groups[kind]:
+            ids = [f"{m['entry']}|{kind}:{m['id']}" for m in group["members"]]
+            for member, node_id in zip(group["members"], ids):
+                if node_id not in known:
+                    continue
+                pairs = []
+                for other, other_id in zip(group["members"], ids):
+                    if other is member or other_id not in known:
+                        continue
+                    apart = differences(member, other)
+                    pairs.append([other_id, not apart, apart])
+                if pairs:
+                    same[node_id] = pairs
+                    if any(not pair[1] for pair in pairs):
+                        differs[node_id] = True
+
+    types = TYPE_ORDER + ["model"]
+    return {
+        "report": "Lineage across models",
+        "multi": True,
+        "generator": next((d.get("generator", "") for _, d in models), ""),
+        "exact": all(d.get("exact") for _, d in models),
+        "rls": rls,
+        "nodes": nodes,
+        "edges": edges,
+        "model_edges": model_edges,
+        "same": same,
+        "differs": differs,
+        "stats": {t: sum(1 for n in nodes if n["type"] == t) for t in types},
+    }
+
+
+def _render(data: dict, title: str) -> str:
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     # No "<" at all inside the data block: neither "</script>" nor "<!--<script" (which puts
     # the HTML parser in an escaped state) can then end or swallow it. Still valid JSON.
     payload = payload.replace("<", "\\u003c")
     return (
-        _TEMPLATE.replace("__TITLE__", escape(f"{data['report']} - lineage"))
+        _TEMPLATE.replace("__TITLE__", escape(title))
         .replace("__THEME_SCRIPT__", PAGE_THEME_SCRIPT)
         .replace("__THEME__", page_css())
         .replace("__DATA__", payload)  # last: the data must not be searched for placeholders
     )
+
+
+def render_lineage_html(doc: dict) -> str:
+    """The complete HTML page for a JSON documentation dict."""
+    data = build_viewer_data(doc)
+    return _render(data, f"{data['report']} - lineage")
+
+
+def render_multi_lineage_html(models: list[tuple[dict, dict]]) -> str:
+    """The lineage-across-models page (see build_multi_viewer_data)."""
+    return _render(build_multi_viewer_data(models), "Lineage across models")
 
 
 def write_lineage_html(path: str | Path, doc: dict) -> None:
@@ -297,6 +441,10 @@ input[type=search] { width: 100%; padding: 7px 9px; border: 1px solid var(--bord
 .result { padding: 5px 16px; cursor: pointer; display: flex; gap: 8px; align-items: baseline; }
 .result:hover, .result.active { background: var(--bg); }
 .result.marked { background: var(--bg); box-shadow: inset 3px 0 0 var(--attn); }
+.node text.diff { fill: var(--attn); font-weight: 700; font-size: 15px; }
+.result .diff, a .diff { color: var(--attn); font-weight: 700; }
+.notice { margin: 10px 0 4px; padding: 6px 9px; border-radius: 8px; font-size: 12px;
+  border-left: 3px solid var(--attn); background: var(--bg); }
 .rls { margin-top: 8px; padding: 6px 9px; border-radius: 8px; font-size: 12px;
   border-left: 3px solid var(--attn); background: var(--bg); }
 .result .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
@@ -384,6 +532,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       <input type="search" id="search" placeholder="Search tables, columns, measures, visuals, pages" aria-label="Search">
       <div class="chips" id="types"></div>
       <label class="chip" style="margin-top:8px"><input type="checkbox" id="unusedOnly"> Only unused columns/measures</label>
+      <select id="modelFilter" aria-label="Model" hidden style="margin-top:8px; width:100%"><option value="">All models</option></select>
     </div>
     <div id="results" role="listbox"></div>
   </aside>
@@ -395,6 +544,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       </span>
       <button class="btn" id="levelUp">⤴ Up a level</button>
       <button class="btn" id="overview" title="The whole system: sources → tables → pages">⌂ Overview</button>
+      <button class="btn" id="everything" title="Every table of every model at once - can be large" hidden>☰ Show everything</button>
       <select id="direction" aria-label="Direction">
         <option value="both">Upstream + downstream</option>
         <option value="up">Upstream only (built from)</option>
@@ -420,6 +570,21 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     <h2 id="guideTitle">How to read the lineage view</h2>
     <p class="muted">Lineage shows where the numbers in the report come from, and what would be
       affected if something in the model changes.</p>
+    <div id="guideMulti" hidden>
+      <h3>Several models</h3>
+      <ul>
+        <li>The start view shows the <b>models</b>, their <b>reports</b>, and the sources that
+          several models load (where models meet). <b>Double-click a model</b> for its own
+          overview: sources → tables → pages (or reports).</li>
+        <li><b>☰ Show everything</b>: every table of every model at once - can be large.</li>
+        <li>A source with the same name in several models is one item: its lineage runs into every
+          model that loads it.</li>
+        <li>A measure's details list the <b>same measure</b> (same name) in other models, and
+          whether its DAX is identical.</li>
+        <li><b>⤴ Up a level</b> also goes from a table or report to its model, and from a model to
+          the start view. The list on the left can be limited to one model.</li>
+      </ul>
+    </div>
 
     <h3>Data flows left to right</h3>
     <div class="flow" id="guideFlow"></div>
@@ -503,13 +668,15 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 (function () {
   "use strict";
   var DATA = JSON.parse(document.getElementById("data").textContent);
-  var TYPES = ["source", "table", "column", "measure", "visual", "page", "report"];
+  // Several models (the catalog's lineage across models): model nodes, a start view per level
+  var MULTI = !!DATA.multi;
+  var TYPES = ["source", "table", "column", "measure", "visual", "page", "report"].concat(MULTI ? ["model"] : []);
   var TYPE_LABEL = { source: "Source", table: "Table", column: "Column", measure: "Measure",
-                     visual: "Visual", page: "Page", report: "Report" };
+                     visual: "Visual", page: "Page", report: "Report", model: "Model" };
   // The overview's top level: reports when several are documented together, else pages
-  var TOP = (DATA.stats.report || 0) > 1 ? "report" : "page";
-  var TOP_PLURAL = TOP === "report" ? "reports" : "pages";
-  var FEEDS_NONE = TOP === "report" ? "feeds no report" : "feeds no report page";
+  var TOP = MULTI || (DATA.stats.report || 0) > 1 ? "report" : "page";
+  function plural(top) { return top === "report" ? "reports" : "pages"; }
+  function feedsNone(top) { return top === "report" ? "feeds no report" : "feeds no report page"; }
   var MAX_NODES = 600, NODE_W = 210, NODE_H = 34, GAP_X = 90, GAP_Y = 12;
 
   var byId = {}, up = {}, down = {};
@@ -519,9 +686,16 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     down[e[0]].push({ id: e[1], type: e[2] });
     up[e[1]].push({ id: e[0], type: e[2] });
   });
+  // An item's id in its own model ("table:X" -> "<model key>|table:X" when there are several)
+  function pid(n, local) { return n.m ? n.m + "|" + local : local; }
+  function where(n) { return MULTI && n.model && n.type !== "model" ? (n.group ? n.group + " · " : "") + n.model : n.group; }
+  var sourceModels = {};  // shared source id -> {model key: true}
+  (DATA.model_edges || []).forEach(function (e) {
+    if (byId[e[0]] && byId[e[0]].type === "source") (sourceModels[e[0]] = sourceModels[e[0]] || {})[byId[e[1]].m] = true;
+  });
 
   var state = { selected: null, marked: null, direction: "both", types: {}, query: "", unusedOnly: false,
-                scale: 1, tx: 0, ty: 0 };
+                model: "", scale: 1, tx: 0, ty: 0 };
   TYPES.forEach(function (t) { state.types[t] = true; });
 
   var $ = function (id) { return document.getElementById(id); };
@@ -547,8 +721,22 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   }).join(" · ") + (DATA.exact ? "" : " · dependencies by text matching");
   if ((DATA.rls || []).length) {
     $("rls").hidden = false;
-    $("rls").textContent = "🔒 Row-level security: " + DATA.rls.length + (DATA.rls.length === 1 ? " role" : " roles") +
-      " (" + DATA.rls.join(", ") + ") - viewers only see the rows their role allows. Share with care.";
+    $("rls").textContent = MULTI
+      ? "🔒 Row-level security in " + DATA.rls.length + (DATA.rls.length === 1 ? " model" : " models") +
+        " (" + DATA.rls.join(", ") + ") - viewers only see the rows their role allows. Share with care."
+      : "🔒 Row-level security: " + DATA.rls.length + (DATA.rls.length === 1 ? " role" : " roles") +
+        " (" + DATA.rls.join(", ") + ") - viewers only see the rows their role allows. Share with care.";
+  }
+  if (MULTI) {
+    $("everything").hidden = false;
+    $("guideMulti").hidden = false;
+    $("overview").title = "The start view: models, their reports and the sources they share";
+    var filter = $("modelFilter");
+    filter.hidden = false;
+    DATA.nodes.filter(function (n) { return n.type === "model"; })
+      .sort(function (a, b) { return a.label.localeCompare(b.label); })
+      .forEach(function (n) { var o = html("option", null, n.label); o.value = n.m; filter.appendChild(o); });
+    filter.addEventListener("change", function (e) { state.model = e.target.value; renderResults(); });
   }
 
   TYPES.forEach(function (t) {
@@ -568,8 +756,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var matches = DATA.nodes.filter(function (n) {
       if (!state.types[n.type]) return false;
       if (state.unusedOnly && !n.unused) return false;
+      if (state.model && n.m !== state.model && !(n.type === "source" && (sourceModels[n.id] || {})[state.model])) return false;
       if (!state.query) return true;
-      return (n.label + " " + n.group).toLowerCase().indexOf(state.query) >= 0;
+      return (n.label + " " + where(n)).toLowerCase().indexOf(state.query) >= 0;
     });
     matches.sort(function (a, b) {
       return TYPES.indexOf(b.type) - TYPES.indexOf(a.type) || a.group.localeCompare(b.group) ||
@@ -584,7 +773,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       var dot = html("span", "dot"); dot.style.background = color(n.type);
       row.appendChild(dot);
       row.appendChild(html("span", "name", n.label));
-      if (n.group) row.appendChild(html("span", "group", n.group));
+      if (MULTI && DATA.differs[n.id]) row.appendChild(html("span", "diff", "≠"));
+      if (where(n)) row.appendChild(html("span", "group", where(n)));
       row.title = TYPE_LABEL[n.type] + ": " + n.label + (n.unused ? " (unused)" : "");
       // Like the graph: click marks it (details on the right), double-click opens its lineage
       row.addEventListener("click", function () { mark(n.id); reveal(n.id); });
@@ -624,7 +814,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var keys = Object.keys(layers).map(Number).sort(function (a, b) { return a - b; });
     keys.forEach(function (k) {
       layers[k].sort(function (a, b) {
-        return byId[a].group.localeCompare(byId[b].group) || byId[a].label.localeCompare(byId[b].label);
+        return (byId[a].model || "").localeCompare(byId[b].model || "") ||
+               byId[a].group.localeCompare(byId[b].group) || byId[a].label.localeCompare(byId[b].label);
       });
     });
     var pos = {};
@@ -653,31 +844,78 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     return xy;
   }
 
-  // ---------- overview: sources -> tables -> pages (or reports) ----------
-  // A table feeds a page (report) when anything upstream of it belongs to the table (also
-  // through measures in other tables). Built once, on first use.
-  var overview = null;
-  function buildOverview() {
-    if (overview) return overview;
+  // ---------- overviews ----------
+  // Sources -> tables -> pages (or reports): the whole system (one model), one model of
+  // several ("model" view) or every model ("all" view). A table feeds a page (report) when
+  // anything upstream of it belongs to the table (also through measures in other tables).
+  // With several models the start view is a level higher: shared sources -> models -> reports.
+  // Each is built once, on first use.
+  var overviews = {};
+  function buildOverview(view) {
+    var key = view.kind + ":" + (view.id || "");
+    if (!overviews[key]) {
+      overviews[key] = MULTI && view.kind === "overview" ? modelOverview()
+        : flowOverview(view.kind === "model" ? byId[view.id].m : null);
+    }
+    return overviews[key];
+  }
+  function modelTop(m) {
+    var reports = DATA.nodes.filter(function (n) { return n.m === m && n.type === "report"; }).length;
+    return reports > 1 ? "report" : "page";
+  }
+  function flowOverview(m) {
+    var top = m ? modelTop(m) : TOP;
     var ids = DATA.nodes.filter(function (n) {
-      return n.type === "source" || n.type === "table" || n.type === TOP;
+      return (n.type === "table" || n.type === top) && (!m || n.m === m);
     }).map(function (n) { return n.id; });
-    var oUp = {}, oDown = {}, feeds = {};
-    ids.forEach(function (id) { oUp[id] = []; oDown[id] = []; });
+    var present = {}, oUp = {}, oDown = {}, feeds = {};
+    function add(id) { if (!present[id]) { present[id] = true; oUp[id] = []; oDown[id] = []; } }
+    ids.forEach(add);
     function link(a, b, type) { oDown[a].push({ id: b, type: type }); oUp[b].push({ id: a, type: type }); }
     DATA.edges.forEach(function (e) {
-      if (byId[e[0]] && byId[e[1]] && byId[e[0]].type === "source" && byId[e[1]].type === "table") link(e[0], e[1], e[2]);
+      if (byId[e[0]] && byId[e[1]] && byId[e[0]].type === "source" && present[e[1]] && byId[e[1]].type === "table") {
+        if (!present[e[0]]) { add(e[0]); ids.unshift(e[0]); }
+        link(e[0], e[1], e[2]);
+      }
     });
     ids.forEach(function (topId) {
-      if (byId[topId].type !== TOP) return;
+      if (byId[topId].type !== top) return;
       Object.keys(walk(topId, up)).forEach(function (id) {
-        if (byId[id].type === "table") { link(id, topId, "uses"); feeds[id] = true; }
+        if (present[id] && byId[id].type === "table") { link(id, topId, "uses"); feeds[id] = true; }
       });
     });
-    var unused = {};
-    ids.forEach(function (id) { if (byId[id].type === "table" && !feeds[id]) unused[id] = true; });
-    overview = { ids: ids, up: oUp, down: oDown, unused: unused };
-    return overview;
+    var unused = {}, count = { source: 0, table: 0 };
+    ids.forEach(function (id) {
+      var t = byId[id].type;
+      if (t === "table" && !feeds[id]) unused[id] = true;
+      count[t] = (count[t] || 0) + 1;
+    });
+    var n = Object.keys(unused).length;
+    var text = (m ? byId["model|" + m].label + ": " : MULTI ? "Everything: " : "Overview: ") +
+      count.source + " sources → " + count.table + " tables → " + (count[top] || 0) + " " + plural(top) +
+      (n ? " · " + n + (n === 1 ? " table " : " tables ") + (n === 1 ? feedsNone(top) : feedsNone(top).replace("feeds", "feed")) : "") +
+      " · click: details, double-click: lineage";
+    return { ids: ids, up: oUp, down: oDown, unused: unused, top: top, status: text };
+  }
+  // Several models, one level up: sources loaded by more than one model -> models -> reports
+  function modelOverview() {
+    var ids = [], present = {}, oUp = {}, oDown = {}, single = 0;
+    function add(id) { if (!present[id]) { present[id] = true; ids.push(id); oUp[id] = []; oDown[id] = []; } }
+    DATA.nodes.forEach(function (n) { if (n.type === "model") add(n.id); });
+    DATA.model_edges.forEach(function (e) {
+      var from = byId[e[0]], to = byId[e[1]];
+      if (!from || !to) return;
+      if (from.type === "source" && (from.shared || 0) < 2) return;  // one model's own: inside it
+      add(e[0]); add(e[1]);
+      oDown[e[0]].push({ id: e[1], type: e[2] }); oUp[e[1]].push({ id: e[0], type: e[2] });
+    });
+    DATA.nodes.forEach(function (n) { if (n.type === "source" && (n.shared || 0) < 2) single++; });
+    var count = {};
+    ids.forEach(function (id) { var t = byId[id].type; count[t] = (count[t] || 0) + 1; });
+    var text = (count.model || 0) + " models → " + (count.report || 0) + " reports · " + (count.source || 0) +
+      " sources shared by several models" + (single ? " (" + single + " more inside the models)" : "") +
+      " · double-click a model to open it, ☰ Show everything for all tables";
+    return { ids: ids, up: oUp, down: oDown, unused: {}, top: "report", status: text };
   }
 
   function renderGraph() {
@@ -687,13 +925,10 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (!view) { $("empty").style.display = "flex"; $("status").textContent = ""; return; }
     $("empty").style.display = "none";
 
-    if (view.kind === "overview") {
-      var ov = buildOverview(), n = Object.keys(ov.unused).length;
-      $("status").textContent = "Overview: " + DATA.stats.source + " sources → " + DATA.stats.table +
-        " tables → " + DATA.stats[TOP] + " " + TOP_PLURAL +
-        (n ? " · " + n + (n === 1 ? " table " : " tables ") + (n === 1 ? FEEDS_NONE : FEEDS_NONE.replace("feeds", "feed")) : "") +
-        " · click: details, double-click: lineage";
-      draw(ov.ids, ov.up, ov.down, null, ov.unused);
+    if (view.kind !== "item") {
+      var ov = buildOverview(view);
+      $("status").textContent = ov.status;
+      draw(ov.ids, ov.up, ov.down, null, ov.unused, feedsNone(ov.top));
       return;
     }
 
@@ -718,11 +953,12 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     $("status").textContent = ids.length + " items: " + TYPES.filter(function (t) { return counts[t]; })
       .map(function (t) { return counts[t] + " " + TYPE_LABEL[t].toLowerCase(); }).join(", ") +
       (truncated ? " (nearest " + MAX_NODES + " shown)" : "");
-    draw(ids, up, down, state.selected, null);
+    draw(ids, up, down, state.selected, null, "");
   }
 
-  // Draw nodes and edges (edges from downAdj); unusedSet marks extra "unused" nodes
-  function draw(ids, upAdj, downAdj, selectedId, unusedSet) {
+  // Draw nodes and edges (edges from downAdj); unusedSet marks extra "unused" nodes (tooltip:
+  // unusedText, e.g. "feeds no report")
+  function draw(ids, upAdj, downAdj, selectedId, unusedSet, unusedText) {
     var edgesG = $("edges"), nodesG = $("nodes");
     var present = {}; ids.forEach(function (id) { present[id] = true; });
     var xy = layout(ids, upAdj, downAdj);
@@ -749,10 +985,14 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       g.appendChild(el("rect", { width: 5, height: NODE_H, fill: color(n.type), stroke: "none" }));
       var label = n.label.length > 30 ? n.label.slice(0, 29) + "…" : n.label;
       g.appendChild(el("text", { x: 12, y: 15 }, label));
+      var sub = MULTI && n.model && n.type !== "model" ? n.model + (n.group ? " / " + n.group : "") : n.group;
       g.appendChild(el("text", { x: 12, y: 28, "class": "type" },
-        TYPE_LABEL[n.type] + (n.group ? " · " + (n.group.length > 26 ? n.group.slice(0, 25) + "…" : n.group) : "")));
-      g.appendChild(el("title", {}, TYPE_LABEL[n.type] + ": " + n.label + (n.group ? "\n" + n.group : "") +
-        (n.unused ? "\nUnused" : unused ? "\n" + FEEDS_NONE.charAt(0).toUpperCase() + FEEDS_NONE.slice(1) : "")));
+        TYPE_LABEL[n.type] + (sub ? " · " + (sub.length > 26 ? sub.slice(0, 25) + "…" : sub) : "")));
+      var differs = MULTI && DATA.differs[id];
+      if (differs) g.appendChild(el("text", { x: NODE_W - 16, y: 16, "class": "diff" }, "≠"));
+      g.appendChild(el("title", {}, TYPE_LABEL[n.type] + ": " + n.label + (where(n) ? "\n" + where(n) : "") +
+        (n.unused ? "\nUnused" : unused ? "\n" + unusedText.charAt(0).toUpperCase() + unusedText.slice(1) : "") +
+        (differs ? "\n≠ Not the same in another model (see its details)" : "")));
       // Click: mark it and show its details; double-click (or Enter): open its lineage
       g.addEventListener("click", function (ev) { ev.stopPropagation(); mark(id); });
       g.addEventListener("dblclick", function (ev) { ev.stopPropagation(); select(id); });
@@ -811,7 +1051,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var dd = html("dd", "links");
     ids.slice(0, 200).forEach(function (id) {
       var target = byId[id];
-      var a = html("a", null, TYPE_LABEL[target.type] + ": " + target.label + (target.group ? " (" + target.group + ")" : ""));
+      var a = html("a", null, TYPE_LABEL[target.type] + ": " + target.label + (where(target) ? " (" + where(target) + ")" : ""));
       a.addEventListener("click", function () { select(id); });
       dd.appendChild(a);
     });
@@ -823,15 +1063,26 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function renderDetails() {
     var body = $("detailsBody"); body.textContent = "";
     var view = current();
-    if (view && view.kind === "overview" && !state.marked) {
-      var ov = buildOverview();
-      body.appendChild(html("h2", null, "System overview"));
+    var byLabel = function (a, b) { return byId[a].label.localeCompare(byId[b].label); };
+    if (view && MULTI && view.kind === "overview" && !state.marked) {
+      var start = buildOverview(view);
+      body.appendChild(html("h2", null, "Lineage across models"));
+      body.appendChild(html("p", "muted", "The documented models, their reports, and the sources " +
+        "that more than one model loads. Double-click a model to open it; ☰ Show everything shows " +
+        "every table of every model."));
+      body.appendChild(linkList("Models", start.ids.filter(function (id) { return byId[id].type === "model"; }).sort(byLabel)));
+      body.appendChild(linkList("Sources shared by several models", start.ids.filter(function (id) { return byId[id].type === "source"; }).sort(byLabel)));
+      return;
+    }
+    if (view && view.kind !== "item" && !state.marked) {
+      var ov = buildOverview(view), modelNode = view.kind === "model" ? byId[view.id] : null;
+      body.appendChild(html("h2", null, modelNode ? modelNode.label : MULTI ? "Every model" : "System overview"));
+      if (modelNode) modelLink(body, modelNode);
       body.appendChild(html("p", "muted", "Where the data comes from (sources), the model tables it " +
-        "lands in, and the " + (TOP === "report" ? "reports" : "report pages") + " that use each table. Click an item for its " +
+        "lands in, and the " + (ov.top === "report" ? "reports" : "report pages") + " that use each table. Click an item for its " +
         "details, double-click it to open its full lineage."));
-      var byLabel = function (a, b) { return byId[a].label.localeCompare(byId[b].label); };
-      body.appendChild(linkList("Tables that " + FEEDS_NONE.replace("feeds", "feed"), Object.keys(ov.unused).sort(byLabel)));
-      body.appendChild(linkList(TOP === "report" ? "Reports" : "Pages", ov.ids.filter(function (id) { return byId[id].type === TOP; })));
+      body.appendChild(linkList("Tables that " + feedsNone(ov.top).replace("feeds", "feed"), Object.keys(ov.unused).sort(byLabel)));
+      body.appendChild(linkList(ov.top === "report" ? "Reports" : "Pages", ov.ids.filter(function (id) { return byId[id].type === ov.top; })));
       body.appendChild(linkList("Sources", ov.ids.filter(function (id) { return byId[id].type === "source"; }).sort(byLabel)));
       return;
     }
@@ -840,8 +1091,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var badge = html("span", "badge", TYPE_LABEL[n.type]); badge.style.background = color(n.type);
     var title = html("h2"); title.appendChild(badge); title.appendChild(document.createTextNode(n.label));
     body.appendChild(title);
-    if (n.group) body.appendChild(html("div", "muted", n.group));
-    if (n.id !== state.selected) {
+    if (where(n)) body.appendChild(html("div", "muted", where(n)));
+    if (n.type === "model") modelLink(body, n);
+    if (n.id !== state.selected && !(n.type === "model" && view && view.kind === "model" && view.id === n.id)) {
       var open = html("button", "btn primary", "Open its lineage");
       open.style.marginTop = "10px";
       open.title = "Same as double-clicking the item";
@@ -858,14 +1110,56 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       box.appendChild(dd); dl.appendChild(box);
     });
     body.appendChild(dl);
+    if (MULTI && DATA.same[n.id]) {
+      var pairs = DATA.same[n.id], apart = pairs.filter(function (p) { return !p[1]; });
+      body.insertBefore(html("div", "notice", apart.length
+        ? "≠ Not the same in " + apart.length + " other model" + (apart.length === 1 ? "" : "s") + ": " +
+          apart.map(function (p) { return byId[p[0]].model + " (" + p[2].join(", ") + ")"; }).join("; ") + "."
+        : "= The same in " + pairs.length + " other model" + (pairs.length === 1 ? "" : "s") + "."), dl);
+      body.appendChild(sameElsewhere(n, pairs));
+    }
+    if (n.type === "model") {
+      body.appendChild(linkList("Reports", (DATA.model_edges || []).filter(function (e) { return e[0] === n.id; })
+        .map(function (e) { return e[1]; })));
+      return;
+    }
     [["Built from", up], ["Used by", down]].forEach(function (pair) {
       var ids = pair[1][n.id].map(function (m) { return m.id; }).filter(function (id) { return byId[id]; });
       body.appendChild(linkList(pair[0], ids));
     });
   }
 
+  // The model's own lineage viewer (its full page, in a new tab)
+  function modelLink(body, n) {
+    if (!n.link) return;
+    var a = html("a", "btn", "Open its own lineage viewer ↗");
+    a.href = n.link; a.target = "_blank"; a.rel = "noopener";
+    a.style.marginTop = "8px"; a.style.display = "inline-block";
+    body.appendChild(a);
+  }
+
+  // The same measure / column / table in other models: identical, or what differs
+  function sameElsewhere(n, pairs) {
+    var box = html("div", "kv");
+    box.appendChild(html("dt", null, "Same " + TYPE_LABEL[n.type].toLowerCase() + " in other models (" + pairs.length + ")"));
+    var dd = html("dd", "links");
+    pairs.forEach(function (pair) {
+      var target = byId[pair[0]];
+      if (!target) return;
+      var a = html("a", null, (pair[1] ? "= identical · " : "≠ " + pair[2].join(", ") + " differs · ") + target.model +
+        (target.group ? " (" + target.group + ")" : ""));
+      a.title = pair[1] ? "The same (DAX formatting ignored)" : "Same name, different " + pair[2].join(", ");
+      a.addEventListener("click", function () { mark(target.id); });
+      a.addEventListener("dblclick", function () { select(target.id); });
+      dd.appendChild(a);
+    });
+    box.appendChild(dd);
+    return box;
+  }
+
   // ---------- views and history ----------
-  // A view is {kind: "overview"} or {kind: "item", id}; back/forward move through them
+  // A view is {kind: "overview"}, {kind: "item", id} or - several models - {kind: "model", id}
+  // (one model's overview) and {kind: "all"} (every model's tables); back/forward move through them
   var views = [], at = -1;
   function current() { return views[at]; }
   function show(view) {
@@ -879,7 +1173,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   }
   function render() {
     var view = current();
-    state.selected = view && view.kind === "item" ? view.id : null;
+    state.selected = view && view.kind !== "overview" && view.kind !== "all" ? view.id : null;
     state.marked = null;
     renderResults(); renderGraph(); renderDetails(); updateButtons();
     if (state.selected) $("app").classList.add("show-details");
@@ -888,18 +1182,22 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       history.replaceState(null, "", state.selected ? "#" + encodeURIComponent(state.selected) : location.pathname + location.search);
     } catch (e) { /* not allowed for this document: links to items just do not update */ }
   }
-  function select(id) { show({ kind: "item", id: id }); }
+  function select(id) { show(byId[id] && byId[id].type === "model" ? { kind: "model", id: id } : { kind: "item", id: id }); }
   function back() { if (at > 0) { at--; render(); } }
   function forward() { if (at < views.length - 1) { at++; render(); } }
 
-  // One level up: column/measure -> its table, visual -> its page, page -> its report,
-  // anything else -> overview
+  // One level up: column/measure -> its table, visual -> its page, page -> its report, (several
+  // models: table/report -> its model, model or everything -> the start view) else -> overview
   function parentOf(view) {
-    if (!view || view.kind !== "item") return null;
+    if (!view || view.kind === "overview") return null;
+    if (view.kind !== "item") return { kind: "overview" };
     var n = byId[view.id];
-    if ((n.type === "column" || n.type === "measure") && byId["table:" + n.group]) return { kind: "item", id: "table:" + n.group };
-    if (n.type === "visual" && byId["page:" + n.group]) return { kind: "item", id: "page:" + n.group };
-    if (n.type === "page" && byId["report:" + n.group]) return { kind: "item", id: "report:" + n.group };
+    var item = function (local) { var id = pid(n, local); return byId[id] ? { kind: "item", id: id } : null; };
+    var parent = (n.type === "column" || n.type === "measure") ? item("table:" + n.group)
+      : n.type === "visual" ? item("page:" + n.group)
+      : n.type === "page" ? item("report:" + n.group) : null;
+    if (parent) return parent;
+    if (MULTI && n.m && byId["model|" + n.m]) return { kind: "model", id: "model|" + n.m };
     return { kind: "overview" };
   }
   function levelUp() { var parent = parentOf(current()); if (parent) show(parent); }
@@ -910,10 +1208,11 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     $("forward").disabled = at >= views.length - 1;
     $("levelUp").disabled = !parent;
     $("levelUp").title = !parent ? "Already at the overview" : parent.kind === "overview"
-      ? "Zoom out one level: the system overview"
+      ? (MULTI ? "Zoom out one level: the start view (models)" : "Zoom out one level: the system overview")
       : "Zoom out one level: " + TYPE_LABEL[byId[parent.id].type].toLowerCase() + " " + byId[parent.id].label;
     $("overview").disabled = !!view && view.kind === "overview";
-    $("direction").disabled = !view || view.kind === "overview";
+    $("everything").disabled = !!view && view.kind === "all";
+    $("direction").disabled = !view || view.kind !== "item";
   }
 
   // ---------- pan & zoom ----------
@@ -952,6 +1251,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   $("forward").addEventListener("click", forward);
   $("levelUp").addEventListener("click", levelUp);
   $("overview").addEventListener("click", function () { show({ kind: "overview" }); });
+  $("everything").addEventListener("click", function () { show({ kind: "all" }); });
   $("panels").addEventListener("click", function () {
     $("app").classList.toggle("wide");
     requestAnimationFrame(function () { fit(); });
@@ -986,7 +1286,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   });
 
   // ---------- guide ----------
-  TYPES.forEach(function (t, i) {
+  TYPES.filter(function (t) { return t !== "model"; }).forEach(function (t, i) {  // the data flow
     if (i) $("guideFlow").appendChild(html("span", "muted", "→"));
     var step = html("span", "step"), dot = html("span", "dot");
     dot.style.background = color(t);

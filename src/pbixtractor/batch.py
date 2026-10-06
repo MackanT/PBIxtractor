@@ -23,6 +23,7 @@ from typing import Callable, Optional
 
 from . import devops, fabric
 from .azure_auth import ApiError
+from .catalog import rebuild_catalog
 from .pbix_model import LiveConnection, live_connection
 from .pipeline import (
     ExtractionOptions,
@@ -572,6 +573,7 @@ def _run_job(
         service_model=prepared.service_model,
         service_statistics=settings.service_statistics,
         catalog_dir=settings.catalog_dir,
+        catalog_rebuild=False,  # once, after the last model (run_batch)
     )
     result = run_extraction(
         options,
@@ -627,6 +629,12 @@ def run_batch(
         outcomes.append(outcome)
         if on_outcome:
             on_outcome(index, outcome)
+    if any(o.ok for o in outcomes):
+        progress("Updating the catalog", 0.99)
+        try:
+            rebuild_catalog(settings.catalog_dir)
+        except (OSError, ValueError) as error:
+            logger.warning(f"Updating the catalog {settings.catalog_dir} failed: {error}")
     progress("Done", 1.0)
     return outcomes
 

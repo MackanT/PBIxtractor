@@ -17,7 +17,7 @@ import pandas as pd
 
 from .constants import REPORT_COLUMNS
 from .dax import find_columns, find_measures
-from .extractors import FilterExtractor
+from .extractors import FilterExtractor, visual_title
 from .live_model import LiveStatistics
 from .readers import BookmarkDefinition, ReportDefinition, slicer_selection
 from .semantic_model import SemanticModel
@@ -165,6 +165,8 @@ class Documentation:
     bookmarks: list[BookmarkInfo] = field(default_factory=list)
     # (page, visual id) -> notes such as "Sync group: Year", "No effect on Table (a1b2)"
     interactivity: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    # (page, visual id) -> the visual's title, when it has one
+    visual_titles: dict[tuple[str, str], str] = field(default_factory=dict)
     # The documented reports, in order: name -> the file/folder it was read from
     reports: dict[str, str] = field(default_factory=dict)
 
@@ -654,6 +656,16 @@ def build_interactivity(
     return notes
 
 
+def build_visual_titles(report: ReportDefinition) -> dict[tuple[str, str], str]:
+    """(page, visual id) -> title, for the visuals that have a title (same keys as interactivity)."""
+    return {
+        (page.display_name, visual.name): title
+        for page in report.pages
+        for visual in page.visuals
+        if (title := visual_title(visual))
+    }
+
+
 def build_page_info(
     report: ReportDefinition, pages: dict[str, list[PageItem]], filter_strings: list[list]
 ) -> list[PageInfo]:
@@ -924,5 +936,6 @@ def build_documentation(
         page_info=build_page_info(report, pages, filter_strings) if report else [],
         bookmarks=build_bookmarks(report, report_info, pages, logger) if report else [],
         interactivity=build_interactivity(report, pages) if report else {},
+        visual_titles=build_visual_titles(report) if report else {},
         reports=(report.reports if report and report.reports else {report_name: ""}),
     )

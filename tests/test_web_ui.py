@@ -26,6 +26,9 @@ def sample(tmp_path, monkeypatch):
     (tmp_path / "Sample.bim").write_text(json.dumps(BIM), encoding="utf-8")
     monkeypatch.setattr(web_ui, "find_tabular_editor", lambda: None)
     monkeypatch.setattr(web_ui, "find_local_instances", lambda: [])
+    # The catalog in use is module state: another test's catalog must not show up (its rail
+    # entries would, e.g. "Lineage across models" - and "Lineage" is what tests wait for)
+    monkeypatch.setitem(web_ui._CATALOG, "dir", None)
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -124,6 +127,8 @@ def test_catalog_route_serves_only_catalog_files(tmp_path, monkeypatch):
     page = web_ui._serve_catalog_file("catalog.html")
     assert "sandbox" in page.headers["content-security-policy"]  # runs in an opaque origin
     assert web_ui._serve_catalog_file("models/k/x_lineage.html").status_code == 200
+    (catalog / "lineage.html").write_text("<html></html>")  # the lineage across models
+    assert web_ui._serve_catalog_file("lineage.html").status_code == 200
     for path in ("secret.txt", "notes/id_rsa", "models/../secret.txt", "../catalog/secret.txt"):
         with pytest.raises(HTTPException):
             web_ui._serve_catalog_file(path)
@@ -413,6 +418,7 @@ def test_dropped_reports_on_different_models_are_documented_separately(sample):
         assert (sample / "output" / "Second" / "Second.xlsx").is_file()
         assert sorted(e["name"] for e in list_entries(sample / "output" / "_catalog")) == ["First", "Second"]
         await user.should_see(marker="batch_catalog")
+        await user.should_see(marker="batch_cross_lineage")  # both models in one lineage viewer
         # A model's Details: its full result, as after a single run
         user.find(marker="batch_details").click()
         await user.should_see("Unused measures")

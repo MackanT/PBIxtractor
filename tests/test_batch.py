@@ -216,6 +216,9 @@ def test_run_batch_documents_each_model_into_one_catalog(files):
     assert outcomes[1].message == "Download failed: HTTP 403: no access"  # and the batch went on
     assert (files / "out" / "A" / "A.xlsx").is_file() and (files / "out" / "B" / "B.xlsx").is_file()
     assert sorted(e["name"] for e in list_entries(files / "catalog")) == ["A", "B"]
+    # The pages are built once, after the last model: both models in the lineage across models
+    lineage = (files / "catalog" / "lineage.html").read_text(encoding="utf-8")
+    assert (files / "catalog" / "catalog.html").is_file() and lineage.count('"type":"model"') == 2
     assert seen[0] == (0, "running") and (2, "running") in seen
     assert summary(outcomes).startswith("2 of 3 models documented")
 

@@ -179,7 +179,10 @@ src/pbixtractor/
                     report:/page:/visual:/table:/column:/measure:/source:, edge types contains
                     (report→page, page→visual, table→field)/uses/filters/depends_on/
                     relationship/loads_from). Every page gets a node (also empty ones), labelled
-                    with its own title.
+                    with its own title. Visual/Slicer items have "title" when the visual has one
+                    (Documentation.visual_titles from extractors.visual_title(): vcObjects /
+                    visualContainerObjects title.text, "fx: T[F]" when bound); lineage labels use
+                    it ("Card: Revenue YTD") instead of the field names.
   lineage_html.py   write_lineage_html(path, documentation_to_dict(...)) → <name>_lineage.html:
                     one self-contained offline page (vanilla JS + SVG, data embedded as JSON,
                     "</" escaped). Edges re-oriented to flow data → report (source → table →
@@ -193,6 +196,20 @@ src/pbixtractor/
                     #<node id> in the URL opens that item (kept in sync via replaceState). Left
                     list = graph: click marks (highlight + details, reveal() pans to it),
                     double-click/Enter opens the lineage.
+                    Several models (the catalog's lineage.html): build_multi_viewer_data([(entry,
+                    build_viewer_data)]) → ids "<key>|<id>", nodes carry m (key) + model (name);
+                    same-named sources merged ("source|<name lower, no brackets>", shared = count,
+                    details Models); model nodes "model|<key>" (group "File" or the source label,
+                    link = its own lineage page) + model_edges (source → model → report, only for
+                    overviews, never in the lineage walk); one global layering (deepest measure
+                    chain decides visual/page/report columns); same = measure id → [[same-named
+                    measure in another model, identical DAX (whitespace/case ignored)?]]. The
+                    template's MULTI mode (DATA.multi): start view = shared sources → models →
+                    reports; {kind:"model"} = that model's sources → tables → pages/reports
+                    (double-click a model); {kind:"all"} = "☰ Show everything" (explicit, owner:
+                    never by default); Up a level: table/report → model → start; details show
+                    "Same measure in other models" (= / ≠ DAX) and "Open its own lineage viewer";
+                    model filter for the left list; RLS banner names the models only.
   documentation.py  Analysis stage, no file output: build_documentation() → Documentation
                     (report_info, filter_strings, pages: {page: [PageItem]}, model, objects
                     [OBJECT_COLUMNS], relations, unused_columns/measures, exact deps, BPA,
@@ -282,6 +299,16 @@ src/pbixtractor/
                     (warned: "unused" may be incomplete). CLI --all-reports / --all-workspaces /
                     --also; UI switch "All reports on its semantic model". Output named after the
                     model (pipeline.model_name()).
+  compare.py        The same item in several models: compare_entries(catalog entries) →
+                    {measure|column|table|visual: [groups]}; same = measure by name, column by
+                    table[column], table by name, visual by type + title (untitled not compared;
+                    a title one report uses for different fields is generic → left out), in ≥2
+                    models (visuals ≥2 reports). Compared: measure DAX (whitespace/case ignored)
+                    + format; column data type, kind, expression; table sources, storage mode,
+                    column set (note: columns only some have); visual fields. Group: name,
+                    members [{entry, id, where, version, values}], differs (value names),
+                    versions (1 = most common). differences(a, b) = pairwise. Used by
+                    catalog.rebuild_catalog (DATA.compare) and lineage multi (same/differs).
   batch.py          Many models in one go (catalog step 2). plan_files(reports, models, chosen,
                     make_client) groups report files by model: its own (.pbix) / <name>.bim /
                     PBIP; one given .bim (or `chosen`) = all reports on it; live-connected →
@@ -303,11 +330,26 @@ src/pbixtractor/
                     model folders (definition.pbism / .pbidataset) without a report. Downloads to
                     <root>/_devops/<project>/<repo>/<version>. select(jobs, patterns) for --only.
   catalog.py        Catalog folder (options.catalog_dir / --catalog / UI "Add to catalog"):
-                    entries/<key>.json = one SLIM entry per semantic model (reports+pages,
-                    tables/columns/measures with DAX, usage field→pages, DAX depends_on, unused
-                    flags; no BPA/bookmarks/partitions), models/<key>/ = copied lineage viewer +
-                    workbook (relative links, deep links #measure:T[M]), catalog.json + one offline
-                    catalog.html (search names/DAX, filters, details, "Loaded by" across models).
+                    entries/<key>.json = one SLIM entry per semantic model (reports+pages, each
+                    page's visuals as items [{id, type, label, fields}], tables/columns/measures
+                    with DAX, usage field→pages, DAX depends_on, unused flags; no
+                    BPA/bookmarks/partitions), models/<key>/ = copied lineage viewer + workbook
+                    (relative links, deep links #measure:T[M]) + lineage.json (its
+                    build_viewer_data), catalog.json + one offline catalog.html (search names/DAX,
+                    visuals by label/fields, filters, details, "Loaded by" across models, "Used by
+                    visuals"; home: "Measures in several models" → compare view #compare|<name>
+                    (DAX versions, most common first, pages/visuals per model), "Sources loaded by
+                    several models"; DATA.compare → "≠ differs" badges in results, "Differences
+                    only" filter, a notice on measure/column/table/visual pages ("≠ Not the same in
+                    N other models: <model> (DAX)" / "= The same in N"), start page "Differences
+                    across models" per kind, compare view #compare|<kind>|<index> = "the same
+                    everywhere" values + each version's differing values) + lineage.html
+                    (rebuild_lineage → lineage_html.render_multi_lineage_html over the entries
+                    with lineage.json; removed when none; linked from catalog.html's header, the
+                    web UI rail / buttons "Lineage across models", served at /catalog/lineage.html).
+                    add_to_catalog(rebuild=False) leaves the pages for later: batch.run_batch
+                    rebuilds once after its last model (ExtractionOptions.catalog_rebuild).
+                    Entries added before visuals/lineage.json existed show neither until re-added.
                     Key from origin (source_identity): fabric-<model id> | devops-<proj>-<repo>-
                     <hash> | file-<name>-<hash>; same model again replaces the entry (latest only).
                     CLI `catalog add|list|remove|rebuild FOLDER`. Web UI serves it at /catalog/
@@ -564,6 +606,17 @@ Open, by owner priority:
   one catalog; workspaces/repositories list the models first and only the ticked ones run (CLI:
   --list / --only). Follow-ups: removing catalog entries of models that no longer exist; a tag
   or older commit for "Whole repository" in the UI (the CLI's --ref already does it).
+- **Across models (owner, 2026-10-06), built 2026-10-06**: the catalog's lineage.html (models
+  first, shared sources, one model at a time, "Show everything" only on request), visuals
+  searchable in the catalog, and differences flagged (compare.py): measures, columns, tables and
+  titled visuals that exist in several models/reports but are not the same → "≠" notices,
+  "Differences only", compare views; lineage nodes marked ≠ with the same notice. Checked in
+  Edge on 12 real local models (258 measures / 41 tables differ - many _Measures tables only by
+  their dummy columns) and on 8 re-documented local reports (19 of 38 titled visuals differ,
+  e.g. a "% BU" card on another budget measure). Next steps (not built): fuzzy matching
+  (similar names, nearly identical DAX); maybe ignoring tables without sources (measure tables)
+  in the column-set check if it stays noisy; older documentation JSON without report items or
+  visual titles: re-document.
 - Module + stand-alone (owner, 2026-09-30): PBIxtractor must work stand-alone AND as a module
   inside the owner's private data-platform NiceGUI app (read only via `gh api`; never clone it
   or store its content on this PC). Phase 1 done: theme.py + restyled stand-alone UI.

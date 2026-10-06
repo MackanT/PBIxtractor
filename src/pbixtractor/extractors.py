@@ -187,6 +187,24 @@ def merge_object_properties(entries: Any) -> dict:
     return merged
 
 
+def property_text(prop: Any) -> str:
+    """Read a formatting property: a literal value, or the field it is bound to (fx)."""
+    if not isinstance(prop, dict):
+        return ""
+    expr = prop.get("expr", {})
+    if "Literal" in expr:
+        return clean_literal(expr["Literal"].get("Value", ""))
+    resolved = resolve_field(expr, {})
+    if resolved:
+        return f"fx: {resolved[0]}[{resolved[1]}]"
+    return ""
+
+
+def visual_title(visual: VisualDefinition) -> str:
+    """A visual's title text ("" when it has none; "fx: T[F]" when bound to a field)."""
+    return property_text(merge_object_properties(visual.container_objects.get("title")).get("text")).strip()
+
+
 @dataclass
 class ReportContext:
     """Report-wide lookups needed while extracting a single page."""
@@ -513,15 +531,7 @@ class VisualExtractor(BaseExtractor):
 
     def _property_text(self, prop: Any) -> str:
         """Read a formatting property: a literal value, or the field it is bound to (fx)."""
-        if not isinstance(prop, dict):
-            return ""
-        expr = prop.get("expr", {})
-        if "Literal" in expr:
-            return clean_literal(expr["Literal"].get("Value", ""))
-        resolved = resolve_field(expr, {})
-        if resolved:
-            return f"fx: {resolved[0]}[{resolved[1]}]"
-        return ""
+        return property_text(prop)
 
 
 class FilterExtractor(BaseExtractor):
