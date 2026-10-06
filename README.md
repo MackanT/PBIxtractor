@@ -60,7 +60,8 @@ the model inside the `.pbix` itself (no `.bim` needed), else `<name>.bim` next t
 PBIP project's semantic model as `model.bim` or TMDL
 (the `definition` folder newer Power BI Desktop versions write). After a run the
 page shows the lineage viewer inline, the Best Practice Analyzer findings, unused objects,
-bookmarks and download links for all output files. Everything runs locally.
+bookmarks, row-level security roles (flagged, so protected reports are shared with care) and
+download links for all output files. Everything runs locally.
 
 ### Command line
 

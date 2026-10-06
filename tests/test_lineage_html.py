@@ -153,3 +153,9 @@ def test_the_report_is_the_level_above_its_pages(data):
     assert nodes["page:Sales"]["group"] == "Sample"  # "up a level" from a page goes here
     assert report["details"]["Pages"] == 2 and report["details"]["File"] == "Sample.pbix"
     assert data["stats"]["report"] == 1  # one report: the overview still shows pages
+
+
+def test_rls_is_shown(data):
+    assert data["rls"] == ["Nordics"]
+    sales = next(n for n in data["nodes"] if n["id"] == "table:Sales")
+    assert sales["details"]["Row-level security"].startswith("Nordics: ")

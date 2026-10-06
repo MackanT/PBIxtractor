@@ -51,6 +51,7 @@ def test_run_adds_a_slim_entry(sample):
     assert entry["source"]["kind"] == "file"
     assert [r["name"] for r in entry["reports"]] == ["Sample"]
     assert [p["name"] for p in entry["reports"][0]["pages"]] == ["Sales", "Detail"]
+    assert entry["rls"] == ["Nordics"]  # the card shows the model is protected
     # Where things are used: visual fields and filters
     assert entry["usage"]["Sales[Amount]"] == ["Sales"]
     assert "Sales[Total Amount]" in entry["depends_on"]["Sales[Dynamic]"]

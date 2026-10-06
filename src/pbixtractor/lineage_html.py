@@ -61,6 +61,11 @@ def _details(doc: dict) -> dict[str, dict]:
     details: dict[str, dict] = {}
     unused = set(doc["unused"]["columns"]) | set(doc["unused"]["measures"])
 
+    rls: dict[str, list[str]] = {}  # table -> "Role: filter" lines
+    for role in doc["model"].get("roles", []):
+        for table, dax in (role.get("filters") or {}).items():
+            rls.setdefault(table, []).append(f"{role['name']}: {' '.join((dax or '').split())}")
+
     for table in doc["model"]["tables"]:
         details[f"table:{table['name']}"] = {
             "Storage mode": table.get("storage_mode"),
@@ -70,6 +75,7 @@ def _details(doc: dict) -> dict[str, dict]:
             "Size (MB)": round(table["size_bytes"] / 1e6, 2) if table.get("size_bytes") else None,
             "Hidden": table.get("hidden") or None,
             "Description": table.get("description"),
+            "Row-level security": "\n".join(rls.get(table["name"], [])) or None,
         }
         for column in table["columns"]:
             ref = f"{table['name']}[{column['name']}]"
@@ -231,6 +237,8 @@ def build_viewer_data(doc: dict) -> dict:
         "report": doc["report"]["name"],
         "generator": doc.get("generator", ""),
         "exact": doc.get("dependencies_exact", False),
+        # Row-level security roles: the page says the model is protected
+        "rls": [role["name"] for role in doc["model"].get("roles", [])],
         "nodes": viewer_nodes,
         "edges": edges,
         "stats": counts,
@@ -288,6 +296,8 @@ input[type=search] { width: 100%; padding: 7px 9px; border: 1px solid var(--bord
 #results { overflow: auto; flex: 1; padding: 4px 0; }
 .result { padding: 5px 16px; cursor: pointer; display: flex; gap: 8px; align-items: baseline; }
 .result:hover, .result.active { background: var(--bg); }
+.rls { margin-top: 8px; padding: 6px 9px; border-radius: 8px; font-size: 12px;
+  border-left: 3px solid var(--attn); background: var(--bg); }
 .result .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .result .group { color: var(--muted); font-size: 11px; white-space: nowrap; }
 main { position: relative; min-width: 0; min-height: 0; }
@@ -367,6 +377,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     <header>
       <h1 id="title"></h1>
       <div class="muted" id="summary"></div>
+      <div class="rls" id="rls" hidden></div>
     </header>
     <div class="section">
       <input type="search" id="search" placeholder="Search tables, columns, measures, visuals, pages" aria-label="Search">
@@ -532,6 +543,11 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   $("summary").textContent = TYPES.map(function (t) {
     return DATA.stats[t] + " " + TYPE_LABEL[t].toLowerCase() + (DATA.stats[t] === 1 ? "" : "s");
   }).join(" · ") + (DATA.exact ? "" : " · dependencies by text matching");
+  if ((DATA.rls || []).length) {
+    $("rls").hidden = false;
+    $("rls").textContent = "🔒 Row-level security: " + DATA.rls.length + (DATA.rls.length === 1 ? " role" : " roles") +
+      " (" + DATA.rls.join(", ") + ") - viewers only see the rows their role allows. Share with care.";
+  }
 
   TYPES.forEach(function (t) {
     var chip = html("label", "chip");

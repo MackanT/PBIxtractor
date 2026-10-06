@@ -128,7 +128,10 @@ src/pbixtractor/
                     register_routes() + ui.run(index, reload=False). Local tool: binds
                     127.0.0.1, no auth. Unmatched URLs get the root page (HTTP 200).
                     Drag & drop (ui.upload) copies .pbix/.bim to output/_uploads/ (browsers
-                    never expose a dropped file's path). Files arriving within DROP_SECONDS (30)
+                    never expose a dropped file's path).
+                    RLS: a notice under the status, an "RLS roles" tile and a Security tab when the
+                    model has roles (also in the lineage viewer header/table details and the
+                    catalog card/model: entry["rls"]). Files arriving within DROP_SECONDS (30)
                     of each other are one drop: several reports + one model → model mode (chips
                     "Documented together", removable); several models → _shared_model() refuses
                     ("one model is documented at a time"). start() opens a browser tab only if no

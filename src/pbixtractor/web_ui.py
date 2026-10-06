@@ -265,6 +265,8 @@ def _stats(report_json: dict) -> list[tuple[str, object, str]]:
         ("Visuals", sum(1 for i in items if i["type"] in ("Visual", "Slicer")), "primary"),
         ("Tables", len(report_json["model"]["tables"]), "primary"),
         ("Measures", measures, "primary"),
+        # Row-level security: worth seeing at a glance (the model protects its data)
+        *([("RLS roles", len(roles), "warning")] if (roles := report_json["model"].get("roles")) else []),
         ("Unused columns", len(report_json["unused"]["columns"]), "warning"),
         ("Unused measures", len(report_json["unused"]["measures"]), "warning"),
         ("Buttons", sum(1 for i in items if i["type"] == "Button"), "primary"),
@@ -331,6 +333,19 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                 _log_text(result.logs)
             return
 
+        roles = result.report_json["model"].get("roles") or []
+        if roles:
+            # Protected data: the documentation describes it and the filters that protect it
+            with ui.card().classes("w-full edge-attn tint-warning").props("flat").mark("rls_notice"):
+                with ui.row().classes("items-center no-wrap gap-2"):
+                    ui.icon("lock", color="secondary", size="sm")
+                    ui.label(
+                        f"Row-level security: {len(roles)} role{'s' if len(roles) != 1 else ''} "
+                        f"({', '.join(r['name'] for r in roles)}). Viewers of the report only see "
+                        "the rows their role allows - share this documentation with care: it "
+                        "describes the protected data and the filters that protect it."
+                    ).classes("text-sm")
+
         token = secrets.token_urlsafe(8)
         _OUTPUT_DIRS[token] = options.output_dir
 
@@ -366,6 +381,7 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
             quality_tab = ui.tab("Model quality", icon="rule")
             unused_tab = ui.tab("Unused", icon="block")
             bookmarks_tab = ui.tab("Bookmarks", icon="bookmarks")
+            security_tab = ui.tab("Security", icon="lock") if roles else None
             log_count = _log_count(result.logs)
             log_tab = ui.tab(f"Log ({log_count})" if log_count else "Log", icon="article")
         with ui.tab_panels(tabs, value=lineage_tab).classes("w-full pbx-results"):
@@ -470,6 +486,28 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                     ],
                     "No bookmarks.",
                 )
+            if security_tab is not None:
+                with ui.tab_panel(security_tab):
+                    _table(
+                        [
+                            {
+                                "_id": f"{role['name']}/{table}",
+                                "role": role["name"],
+                                "permission": role.get("permission") or "",
+                                "table": table,
+                                "filter": " ".join((dax or "").split()),
+                            }
+                            for role in roles
+                            for table, dax in ((role.get("filters") or {}).items() or [("", "")])
+                        ],
+                        [
+                            ("role", "Role"),
+                            ("permission", "Permission"),
+                            ("table", "Table"),
+                            ("filter", "Filter (DAX)"),
+                        ],
+                        "No roles.",
+                    )
             with ui.tab_panel(log_tab):
                 if result.logs:
                     _log_text(result.logs)

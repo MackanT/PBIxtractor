@@ -93,6 +93,10 @@ def test_run_shows_results_and_serves_lineage(sample):
         await user.should_see("Lineage")
         await user.should_see("Unused measures")
         assert (sample / "output" / "Sample" / "Sample.xlsx").is_file()
+        # The sample model has an RLS role: the page says the model is protected
+        await user.should_see(marker="rls_notice")
+        await user.should_see("RLS roles")
+        await user.should_see("Security")
 
         # The lineage iframe is served through the /files route
         token = next(t for t, f in web_ui._OUTPUT_DIRS.items() if f == sample / "output" / "Sample")

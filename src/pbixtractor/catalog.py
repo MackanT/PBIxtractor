@@ -222,6 +222,8 @@ def build_entry(doc: dict, identity: dict, name: str, links: dict) -> dict:
         "depends_on": depends_on,
         # Reports on the model that could not be documented: "unused" may be incomplete
         "not_included": doc.get("not_included", []),
+        # Row-level security roles: the catalog card shows the model is protected
+        "rls": [role["name"] for role in doc["model"].get("roles", [])],
     }
 
 
@@ -365,6 +367,11 @@ main { overflow: auto; padding: 20px 28px 40px; min-width: 0; }
   margin-right: 6px; vertical-align: 2px; }
 .warn { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   border: 1px solid var(--unused); color: var(--unused); margin-left: 6px; }
+/* Row-level security: copper (attention), not the red of "unused" */
+span.rls { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  border: 1px solid var(--attn); color: var(--attn); margin-left: 6px; }
+div.rls { margin: 8px 0; padding: 6px 9px; border-radius: 8px; border-left: 3px solid var(--attn);
+  background: var(--bg); }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;
   cursor: pointer; box-shadow: var(--shadow); }
@@ -591,6 +598,7 @@ ul.list li { padding: 2px 0; break-inside: avoid; }
       card.appendChild(el("div", null, e.reports.length + " report" + (e.reports.length === 1 ? "" : "s") + " · " + pages +
         " pages · " + e.tables.length + " tables · " + measures + " measures"));
       if (unused) card.appendChild(el("span", "warn", unused + " unused"));
+      if ((e.rls || []).length) card.appendChild(el("span", "rls", "🔒 RLS: " + e.rls.length + (e.rls.length === 1 ? " role" : " roles")));
       card.appendChild(el("div", "muted", "documented " + e.documented));
       card.addEventListener("click", function () { select(e.key); });
       cards.appendChild(card);
@@ -608,6 +616,10 @@ ul.list li { padding: 2px 0; break-inside: avoid; }
     kv([["Documented", e.documented + " (" + e.generator + ")"], ["Reports", e.reports.length], ["Pages", pages],
         ["Tables", e.tables.length], ["Columns", columns + (unusedC ? " (" + unusedC + " unused)" : "")],
         ["Measures", measures + (unusedM ? " (" + unusedM + " unused)" : "")]]);
+    if ((e.rls || []).length) {
+      $("main").appendChild(el("div", "rls", "🔒 Row-level security: " + e.rls.join(", ") +
+        " - viewers only see the rows their role allows. Share with care."));
+    }
     if ((e.not_included || []).length) {
       $("main").appendChild(el("span", "warn", "Not included - 'unused' may be incomplete:"));
       var ul = el("ul", "list");
