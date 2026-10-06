@@ -120,9 +120,16 @@ def metadata():
     db.close()
 
 
+def test_the_compatibility_level_is_raised_only_for_dynamic_format_strings(metadata):
+    metadata.execute('UPDATE "Measure" SET "FormatStringDefinitionID" = NULL')
+    assert database_from_metadata(metadata, name="M")["compatibilityLevel"] == 1567
+
+
 def test_the_metadata_becomes_a_tmsl_document(metadata):
     database = database_from_metadata(metadata, name="Sales report")
-    assert database["name"] == "Sales report" and database["compatibilityLevel"] >= 1550
+    assert database["name"] == "Sales report"
+    # A measure with a dynamic format string: Tabular Editor only loads that at level 1601+
+    assert database["compatibilityLevel"] == 1601
     model = database["model"]
     # The internal H$ table goes; a calculated table (field parameter, SystemFlags 2) stays
     assert [t["name"] for t in model["tables"]] == ["Sales", "Dates", "Time Calc", "Target"]

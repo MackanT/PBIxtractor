@@ -29,8 +29,10 @@ from .live_model import ColumnStatistics, LiveStatistics
 logger = logging.getLogger("pbixtractor")
 
 # Compatibility level written to a generated .bim (the metadata does not store it; Power BI
-# Desktop models are 1550+). Only Tabular Editor reads it.
+# Desktop models are 1550+). Only Tabular Editor reads it - and it refuses a property newer than
+# the level ("Unrecognized JSON property"): dynamic measure format strings need 1601
 COMPATIBILITY_LEVEL = 1567
+DYNAMIC_FORMAT_LEVEL = 1601
 
 # TOM enumerations as stored in metadata.sqlitedb -> their TMSL (.bim) names
 DATA_TYPES = {1: "automatic", 2: "string", 6: "int64", 8: "double", 9: "dateTime", 10: "decimal",
@@ -409,7 +411,13 @@ def database_from_metadata(db: sqlite3.Connection, name: str = "Model") -> dict:
     ):
         if values:
             model[key] = values
-    return {"name": name, "compatibilityLevel": COMPATIBILITY_LEVEL, "model": model}
+    dynamic_formats = any(
+        "formatStringDefinition" in measure
+        for table in model.get("tables", [])
+        for measure in table.get("measures", [])
+    )
+    level = DYNAMIC_FORMAT_LEVEL if dynamic_formats else COMPATIBILITY_LEVEL
+    return {"name": name, "compatibilityLevel": level, "model": model}
 
 
 def statistics_from_metadata(
