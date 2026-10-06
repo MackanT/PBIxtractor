@@ -127,8 +127,12 @@ src/pbixtractor/
                     Model quality (BPA per rule), Unused, Bookmarks, Log. start() =
                     register_routes() + ui.run(index, reload=False). Local tool: binds
                     127.0.0.1, no auth. Unmatched URLs get the root page (HTTP 200).
-                    Drag & drop (ui.upload) copies .pbix/.bim to output/_uploads/ (browsers
-                    never expose a dropped file's path).
+                    Local files: the drop zone (ui.upload, "+") is the way in - it copies
+                    .pbix/.bim to output/_uploads/ (browsers never expose a dropped file's path);
+                    selection() shows "Report: <chips> · Model: inside the report / <x>.bim /
+                    published (Fabric when you run) / not found" (_model_status). Path fields +
+                    PathPicker sit in a collapsed "Use files on this PC instead" expansion (local
+                    only: PBIP folders cannot be uploaded); the output folder is under Options.
                     RLS: a notice under the status, an "RLS roles" tile and a Security tab when the
                     model has roles (also in the lineage viewer header/table details and the
                     catalog card/model: entry["rls"]). Files arriving within DROP_SECONDS (30)

@@ -53,9 +53,10 @@ pbixtractor
 pbixtractor web --port 8090 --no-browser
 ```
 
-Pick a report (`.pbix`, `.pbip` or a `.Report` folder; drag & drop works too - drop several
-reports with their one `.bim` to document them together), or choose one from a Fabric workspace
-or an Azure DevOps repository. The model is found automatically:
+Drop a report (`.pbix`) on the page or click + to add it - drop several reports with their one
+`.bim` to document them together. A PBIP project (`.pbip` or a `.Report` folder) is chosen under
+"Use files on this PC instead"; or pick a report from a Fabric workspace or an Azure DevOps
+repository. The model is found automatically:
 the model inside the `.pbix` itself (no `.bim` needed), else `<name>.bim` next to the report, or a
 PBIP project's semantic model as `model.bim` or TMDL
 (the `definition` folder newer Power BI Desktop versions write). After a run the

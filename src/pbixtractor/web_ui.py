@@ -515,6 +515,17 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                     ui.label("No warnings.").classes("text-grey-7")
 
 
+def _model_status(report: Path, model_value: str) -> tuple[str, str]:
+    """(text, colour) saying where the model of a report comes from."""
+    if model_value:
+        if Path(model_value) == report:
+            return "inside the report", "grey-7"
+        return Path(model_value).name, "grey-7"
+    if live_connection(report) is not None:
+        return "published in the Power BI service - downloaded from Fabric when you run", "grey-7"
+    return "not found - drop the report's .bim too (or use a path on this PC)", "warning"
+
+
 class _PublishedModelDownload:
     """For download_remote_report(): the published model of a live-connected .pbix, from
     Fabric (the Fabric source's sign-in)."""
@@ -782,15 +793,23 @@ def build_page(
 
                         ui.button(icon="folder_open", on_click=pick).props("flat round")
 
-                    # Server paths and the server-side file browser only when the browser runs on
-                    # the server's own PC; otherwise these stay hidden and uploads fill them
-                    with ui.row().classes("w-full items-center no-wrap").mark("report_row") as report_row:
+                    # Files are dropped (or added with +). Paths and the server-side file browser
+                    # only when the browser runs on the server's own PC - and only for what a
+                    # browser cannot upload (a PBIP project folder); otherwise uploads fill them
+                    paths = (
+                        ui.expansion("Use files on this PC instead (e.g. a PBIP project folder)", icon="folder_open")
+                        .classes("w-full")
+                        .props("dense")
+                        .mark("paths")
+                    )
+                    paths.set_visibility(local)
+                    with paths, ui.row().classes("w-full items-center no-wrap").mark("report_row") as report_row:
                         report_input = ui.input(
                             "Report (.pbix, .pbip or .Report folder)",
                             placeholder=r"C:\Reports\Sales.pbix",
                         ).classes("grow").mark("report")
                         picker_button(report_input, REPORT_SUFFIXES, report_folders=True)
-                    with ui.row().classes("w-full items-center no-wrap").mark("model_row") as model_row:
+                    with paths, ui.row().classes("w-full items-center no-wrap").mark("model_row") as model_row:
                         model_input = ui.input(
                             "Model (.bim or TMDL model.tmdl) - found automatically; a .pbix with "
                             "its own model needs none"
@@ -825,15 +844,11 @@ def build_page(
                             model_input.value = str(drop["models"][0])
                         else:
                             report_input.value = str(drop["reports"][0])
-                        together.refresh()
-                        ui.notify(f"{name} copied to {target.parent}", type="positive")
+                        selection.refresh()
+                        # (no toast: the summary below the drop zone shows what was added)
 
                     ui.upload(
-                        label=(
-                            "…or drop a .pbix and/or .bim file here"
-                            if local
-                            else "Drop a .pbix and/or .bim file here, or click +"
-                        ),
+                        label="Drop .pbix and .bim files here, or click + to add them",
                         multiple=True,
                         auto_upload=True,
                         on_upload=on_upload,
@@ -853,30 +868,45 @@ def build_page(
                         return []
 
                     def remove_from_drop(path: Path) -> None:
-                        drop["reports"].remove(path)
+                        if path in drop["reports"]:
+                            drop["reports"].remove(path)
                         if drop["reports"]:
                             report_input.value = str(drop["reports"][0])
-                        together.refresh()
+                        else:  # nothing left: start over
+                            if model_input.value in (str(path), auto_model["value"]):
+                                model_input.value = ""
+                            report_input.value = ""
+                        selection.refresh()
 
                     @ui.refreshable
-                    def together() -> None:
-                        if not drop_extras():
+                    def selection() -> None:
+                        """What will be documented: the report(s), and where the model comes from."""
+                        value = (report_input.value or "").strip('"')
+                        if not value:
                             return
+                        dropped = bool(drop["reports"]) and value == str(drop["reports"][0])
+                        reports = list(drop["reports"]) if dropped else [Path(value)]
                         # Said right away, not only when the run is refused: reports that each
                         # carry their own model (and no shared .bim) are separate models
-                        separate = len(drop["models"]) > 1 or (
-                            not drop["models"] and all(has_embedded_model(r) for r in drop["reports"])
+                        separate = len(reports) > 1 and (
+                            len(drop["models"]) > 1
+                            or (not drop["models"] and all(has_embedded_model(r) for r in reports))
                         )
-                        with ui.row().classes("w-full items-center gap-1").mark("together"):
-                            ui.label("Dropped:" if separate else "Documented together:").classes(
-                                "text-sm text-grey-7"
-                            )
-                            for path in drop["reports"]:
+                        title = "Report:" if len(reports) == 1 else (
+                            "Dropped:" if separate else "Documented together:"
+                        )
+                        marker = "together" if len(reports) > 1 else "selected"
+                        with ui.row().classes("w-full items-center gap-1").mark(marker):
+                            ui.label(title).classes("text-sm text-grey-7")
+                            for path in reports:
                                 ui.chip(
                                     report_name(path),
                                     removable=True,
                                     on_value_change=lambda _, p=path: remove_from_drop(p),
                                 ).props("dense outline color=primary")
+                        if not separate:
+                            text, tone = _model_status(reports[0], (model_input.value or "").strip('"'))
+                            ui.label(f"Model: {text}").classes(f"text-sm text-{tone}").mark("model_status")
                         if len(drop["models"]) > 1:
                             ui.label(
                                 "Several models were dropped - one model is documented at a time: "
@@ -889,7 +919,9 @@ def build_page(
                                 "drop the .bim they share"
                             ).classes("text-sm text-warning").mark("separate_models")
 
-                    together()
+                    selection()
+                    paths.move(local_box)  # after the drop zone: the exception, not the way in
+                    model_input.on_value_change(lambda _: selection.refresh())
                 local_box.bind_visibility_from(source, "value", value="local")
 
                 # Remote sources: pick a report; it is downloaded when the documentation runs
@@ -907,7 +939,7 @@ def build_page(
                 output_input = ui.input("Output folder").classes("w-full").mark("output")
                 output_input.set_visibility(local)  # a server path: output_root()/<name> otherwise
 
-                with ui.expansion("Options", icon="tune").classes("w-full"):
+                with ui.expansion("Options", icon="tune").classes("w-full") as options_box:
                     te_analysis = ui.switch(
                         "Tabular Editor analysis: Best Practice Analyzer, exact DAX dependencies, "
                         "live statistics (runs locally)",
@@ -946,6 +978,7 @@ def build_page(
                             )
                             .mark("catalog_dir")
                         )
+                    output_input.move(options_box, target_index=0)  # filled in automatically
                     description_tag = ui.input(
                         "Description tag in DAX", value=ExtractionOptions.description_tag
                     ).classes("w-48")
@@ -1064,7 +1097,7 @@ def build_page(
             model_input.value = str(model) if model else ""
             auto_model["value"] = model_input.value or None
         output_input.value = auto_output["value"] = str(output_root() / report_name(path))
-        together.refresh()  # typing another report leaves a drop's other reports out
+        selection.refresh()  # typing another report leaves a drop's other reports out
         if local:
             background_tasks.create(refresh_desktop(delay=0.5), name="refresh_desktop")
 

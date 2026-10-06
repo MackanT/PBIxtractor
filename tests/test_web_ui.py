@@ -489,3 +489,41 @@ def test_dropped_pbix_files_with_their_own_models_are_flagged_at_once(sample):
         await user.should_not_see("Documented together:")
 
     _simulate(scenario)
+
+
+def test_the_page_says_where_the_model_comes_from(sample):
+    import io
+    import zipfile
+
+    def with_entry(name: str, content) -> bytes:
+        buffer = io.BytesIO((sample / "Sample.pbix").read_bytes())
+        with zipfile.ZipFile(buffer, "a") as archive:
+            archive.writestr(name, content)
+        return buffer.getvalue()
+
+    thick = with_entry("DataModel", b"\x00")
+    thin = with_entry("Connections", json.dumps({"Connections": [{
+        "ConnectionType": "pbiServiceLive", "PbiModelDatabaseName": "44444444-4444-4444-4444-444444444444",
+        "ConnectionString": "Data Source=pbiazure://api.powerbi.com"}]}))
+
+    async def scenario(user):
+        await user.open("/")
+        upload = _element(user, "upload")
+        await _drop(upload, ("Thick.pbix", thick))
+        await user.should_see("Model: inside the report")
+        _element(user, "selected")  # the report shows as a chip
+        web_ui.DROP_SECONDS, saved = -1, web_ui.DROP_SECONDS  # the next file is a new drop
+        try:
+            await _drop(upload, ("Thin.pbix", thin))
+            await user.should_see("downloaded from Fabric when you run")
+            await _drop(upload, ("Plain.pbix", (sample / "Sample.pbix").read_bytes()))
+            await user.should_see("Model: not found")
+        finally:
+            web_ui.DROP_SECONDS = saved
+        # Removing the last report starts over
+        chip = next(e for e in user.client.elements.values() if isinstance(e, ui.chip))
+        chip.value = False
+        await _wait_for(lambda: _value(user, "report") == "")
+        await user.should_not_see(marker="selected")
+
+    _simulate(scenario)
