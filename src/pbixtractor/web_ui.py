@@ -30,11 +30,11 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from nicegui import app, background_tasks, events, run, ui
 
-from . import __version__, web_config
+from . import __version__, fabric, web_config, web_sources
 from .azure_auth import ApiError
 from .data import DATA_DIR
 from .live_model import find_local_instances
-from .pbix_model import has_embedded_model
+from .pbix_model import LiveConnection, has_embedded_model, live_connection
 from .pipeline import (
     REPORT_SUFFIXES,
     ExtractionOptions,
@@ -44,6 +44,7 @@ from .pipeline import (
     report_name,
     run_extraction,
 )
+from .service_stats import ServiceModel
 from .tabular_editor import add_tabular_editor_location, find_tabular_editor
 from .theme import apply_theme, card_header, page_title, serve_fonts, stat_tile
 from .web_config import output_root, stored_choices, url
@@ -474,6 +475,23 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
                     _log_text(result.logs)
                 else:
                     ui.label("No warnings.").classes("text-grey-7")
+
+
+class _PublishedModelDownload:
+    """For download_remote_report(): the published model of a live-connected .pbix, from
+    Fabric (the Fabric source's sign-in)."""
+
+    def __init__(self, reference: LiveConnection):
+        self.reference = reference
+
+    def fetch(self, progress: Callable[[str], None]) -> fabric.FetchedModel:
+        return fabric.fetch_connected_model(
+            web_sources.make_fabric_client(),
+            self.reference.model_id,
+            self.reference.workspace,
+            output_root() / "_fabric",
+            progress,
+        )
 
 
 def _shared_model(
@@ -1073,7 +1091,7 @@ def build_page(
             if fetched is None:
                 return
             report, model, extra_reports = fetched.report_folder, fetched.model_path, fetched.extra_reports
-            name = fetched.name
+            name, service_model = fetched.name, fetched.service_model
             if fetched.model_mode and output_input.value == suggested_output["value"]:
                 output_input.value = str(output_root() / name)  # named after the model
             not_included = list(fetched.skipped)  # also logged as warnings of the run
@@ -1086,7 +1104,7 @@ def build_page(
                     timeout=30000,
                 )
         else:
-            extra_reports, name, not_included = [], "", []
+            extra_reports, name, not_included, service_model = [], "", [], None
             report = Path((report_input.value or "").strip('"'))
             model_value = (model_input.value or "").strip('"')
             if not report_input.value or not report.exists():
@@ -1106,10 +1124,20 @@ def build_page(
                     output_input.value = str(output_root() / name)  # named after the model
             else:
                 model = Path(model_value) if model_value else find_model_for_report(report)
+                reference = live_connection(report) if model is None else None
+                if reference is not None:
+                    # A live-connected .pbix: its model is published - get it from Fabric
+                    published = await download_remote_report(_PublishedModelDownload(reference))
+                    if published is None:
+                        return
+                    model = published.model_path
+                    service_model = ServiceModel(
+                        published.workspace_id, published.model_id, published.model
+                    )
             if model is None or not model.exists():
                 ui.notify(
                     "Choose the model (.bim, or model.tmdl of a TMDL model) that belongs to the "
-                    "report.",
+                    "report: this .pbix carries no model of its own that could be read.",
                     type="warning",
                 )
                 return
@@ -1127,6 +1155,7 @@ def build_page(
             not_included=not_included,
             service_statistics=service_stats.value,
             catalog_dir=Path(catalog_input.value) if add_catalog.value and catalog_input.value else None,
+            service_model=service_model,
         )
         remembered = stored_choices()
         remembered["catalog_enabled"] = add_catalog.value

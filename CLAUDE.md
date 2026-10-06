@@ -46,7 +46,9 @@ folder says otherwise. The model is auto-found (`find_model_for_report`): a .pbi
 model IS the model (pbix_model.py, no .bim needed; preferred over a sibling .bim, which can be
 older/newer than the report); else `<name>.bim`, then the PBIP model folder from `<name>.Report/definition.pbir`
 (`datasetReference.byPath`), `<name>.SemanticModel`, `<name>.Dataset` - each as model.bim or
-TMDL `definition/`; `extract` exits 2
+TMDL `definition/`. A live-connected .pbix (no model inside) gets its published model from
+Fabric (pbix_model.live_connection → fabric.fetch_connected_model; sign-in, Contributor on the
+model). `extract` exits 2
 when there is none. The model is read from the `.bim` / TMDL on every run; a
 `documentation.tsv` is only used with `--tabular-editor-tsv` (ExtractionOptions.tabular_editor_tsv).
 Real test reports (local only, never commit; the paths below are on the owner's first PC - on
@@ -215,7 +217,9 @@ src/pbixtractor/
                     download_folder (items $format=zip). fetch_report() downloads only the
                     .Report folder + the model folder its pbir byPath points to, keeping repo
                     paths under output/_devops/<project>/<repo>/<version>; byConnection reports
-                    → error pointing to Fabric. parse_devops_url() takes browser URLs
+                    → fetch_report(connected_model=hook) gets the published model (CLI/web pass a
+                    hook calling fabric.fetch_connected_model; model mode matches other reports
+                    by the same model id); without a hook → error pointing to Fabric. parse_devops_url() takes browser URLs
                     (?path=...&version=GB|GT|GC...; also the short /org/_git/Repo form). Works
                     for encrypted-label reports (git holds plain PBIP). Safety: only
                     dev.azure.com / *.visualstudio.com over https (more hosts:
@@ -279,6 +283,9 @@ src/pbixtractor/
   fabric.py         Fabric REST (stdlib urllib): FabricClient (workspaces/reports/
                     semanticModels lists, getDefinition as long-running operation with
                     polling), fetch_report() → <report>.Report + <model>.SemanticModel (TMDL)
+                    (model part via download_semantic_model()); fetch_connected_model(client,
+                    model_id, workspace?, root) = find_semantic_model() (named workspace first, else
+                    every workspace you can open) + download into <root>/<workspace>/
                     + fabric_source.json; definition.pbir rewritten to byPath. Model found via
                     semanticmodelid in the pbir connection string (other workspace by name).
                     Sign-in via azure_auth.get_credential(). getDefinition needs Contributor

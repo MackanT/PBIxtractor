@@ -299,3 +299,43 @@ def test_cli_devops_list(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit):
         main(["devops", "list", "contoso", "BI Team", "reports", "--history", "/Reports/Sample.Report"])
     assert "a1b2c3d4  2026-09-01  Ada: Fix KPI" in capsys.readouterr().out
+
+
+def _bound_to_service(files: dict, report: str, model_id: str) -> dict:
+    files[f"{report}/definition.pbir"] = json.dumps({"version": "4.0", "datasetReference": {"byConnection": {
+        "connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/Sales%20WS;"
+                            f"semanticmodelid={model_id}"}}}).encode()
+    return files
+
+
+def test_a_report_on_a_published_model_gets_it_from_the_service(tmp_path):
+    """No model in git: the connected_model hook (Fabric in the app) supplies it, and model mode
+    finds the other reports on the same published model."""
+    from pbixtractor.semantic_model import read_model
+
+    model_id, other_model = "44444444-4444-4444-4444-444444444444", "99999999-9999-9999-9999-999999999999"
+    files = _repo_files(tmp_path, bound_by_path=False)
+    for path, content in list(files.items()):
+        if path.startswith("/Reports/Sample.Report/"):
+            files[path.replace("/Reports/Sample.Report/", "/Detail/Detail.Report/")] = content
+            files[path.replace("/Reports/Sample.Report/", "/Other/Other.Report/")] = content
+    for report, model in (("/Reports/Sample.Report", model_id), ("/Detail/Detail.Report", model_id),
+                          ("/Other/Other.Report", other_model)):
+        _bound_to_service(files, report, model)
+
+    model_folder = tmp_path / "service" / "Sample Model.SemanticModel"
+    asked = []
+
+    def connected_model(pbir: dict) -> Path:
+        asked.append(pbir)
+        for name, text in SAMPLE_TMDL.items():
+            target = model_folder / "definition" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        return model_folder
+
+    fetched = fetch_report(FakeDevOps(files), "BI Team", "reports", "/Reports/Sample.Report",
+                           tmp_path / "out", "main", all_reports=True, connected_model=connected_model)
+    assert fetched.model_path == model_folder and len(asked) == 1
+    assert sorted(f.name for f in fetched.report_folders) == ["Detail.Report", "Sample.Report"]
+    assert read_model(fetched.model_path).tables

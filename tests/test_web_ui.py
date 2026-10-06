@@ -411,6 +411,62 @@ def test_a_later_drop_starts_over(sample, monkeypatch):
     _simulate(scenario)
 
 
+def test_an_uploaded_live_connected_pbix_gets_its_model_from_fabric(sample, monkeypatch):
+    import zipfile
+
+    from .test_fabric import MODEL_ID, WS_MODELS, FakeFabric, _report_parts
+
+    with zipfile.ZipFile(sample / "Sample.pbix", "a") as archive:
+        archive.writestr("Connections", json.dumps({"Version": 3, "Connections": [{
+            "ConnectionType": "pbiServiceLive", "PbiModelDatabaseName": MODEL_ID,
+            "ConnectionString": "Data Source=pbiazure://api.powerbi.com"}]}))
+    client = FakeFabric(_report_parts(sample / "x", "Shared Models"), model_workspace=WS_MODELS)
+    monkeypatch.setattr(web_sources, "make_fabric_client", lambda: client)
+    monkeypatch.setattr("pbixtractor.service_stats.make_client", lambda: client)
+
+    async def scenario(user):
+        await user.open("/")
+        await _drop(_element(user, "upload"), ("Thin.pbix", (sample / "Sample.pbix").read_bytes()))
+        await _wait_for(lambda: _value(user, "report").endswith("Thin.pbix"))
+        assert _value(user, "model") == ""  # no model of its own
+        user.find("Create documentation").click()
+        await user.should_see("Lineage", retries=100)
+        doc = json.loads((sample / "output" / "Thin" / "Thin.json").read_text(encoding="utf-8"))
+        assert next(t for t in doc["model"]["tables"] if t["name"] == "Sales")["rows"] == 1000
+        assert (sample / "output" / "_fabric" / "Shared Models" / "Sample Model.SemanticModel").is_dir()
+
+    _simulate(scenario)
+
+
+def test_a_devops_report_on_a_published_model_gets_it_from_fabric(sample, monkeypatch):
+    from .test_devops import FakeDevOps, _bound_to_service, _repo_files
+    from .test_fabric import MODEL_ID, WS_SALES, FakeFabric, _report_parts
+
+    files = _bound_to_service(_repo_files(sample, bound_by_path=False), "/Reports/Sample.Report", MODEL_ID)
+    devops_client = FakeDevOps(files)
+    fabric_client = FakeFabric(_report_parts(sample / "x", "Sales WS"), model_workspace=WS_SALES)
+    monkeypatch.setattr(web_sources, "make_devops_client", lambda org: devops_client)
+    monkeypatch.setattr(web_sources, "make_fabric_client", lambda: fabric_client)
+    monkeypatch.setattr("pbixtractor.service_stats.make_client", lambda: fabric_client)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "devops")
+        await _choose(user, "devops_org", "contoso")
+        user.find(marker="devops_load").click()
+        await _wait_for(lambda: _options(user, "devops_project"))
+        await _choose(user, "devops_project", "BI Team", until=lambda: _options(user, "devops_repo"))
+        await _choose(user, "devops_repo", "reports", until=lambda: _value(user, "devops_branch"))
+        await _wait_for(lambda: _options(user, "devops_report"))
+        await _choose(user, "devops_report", "/Reports/Sample.Report")
+        user.find("Create documentation").click()
+        await user.should_see("Lineage", retries=100)
+        doc = json.loads((sample / "output" / "Sample" / "Sample.json").read_text(encoding="utf-8"))
+        assert next(t for t in doc["model"]["tables"] if t["name"] == "Sales")["rows"] == 1000
+
+    _simulate(scenario)
+
+
 def test_dropped_pbix_files_with_their_own_models_are_flagged_at_once(sample):
     import io
     import zipfile

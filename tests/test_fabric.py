@@ -427,3 +427,49 @@ def test_a_service_principal_in_the_environment_never_opens_a_browser(monkeypatc
 
     monkeypatch.delenv("AZURE_CLIENT_SECRET")
     assert not azure_auth.service_principal_configured()  # id without a secret: not enough
+
+
+def test_a_published_model_is_found_by_id_and_downloaded(tmp_path):
+    """A live-connected report only knows its model's id: search the workspaces, download it."""
+    from pbixtractor.fabric import fetch_connected_model
+    from pbixtractor.semantic_model import read_model
+
+    client = FakeFabric(_report_parts(tmp_path, "Shared Models"), model_workspace=WS_MODELS)
+    steps = []
+    fetched = fetch_connected_model(client, MODEL_ID, None, tmp_path / "_fabric", steps.append)
+    assert fetched.model_path == tmp_path / "_fabric" / "Shared Models" / "Sample Model.SemanticModel"
+    assert (fetched.workspace_id, fetched.model_id, fetched.model) == (WS_MODELS, MODEL_ID, "Sample Model")
+    assert read_model(fetched.model_path).tables
+    assert any("Shared Models" in step for step in steps)
+
+    client.calls.clear()  # a named workspace (from the connection string) is searched first
+    fetch_connected_model(client, MODEL_ID, "Shared Models", tmp_path / "again")
+    assert [u for _, u in client.calls if u.endswith("/semanticModels")][0] == (
+        f"workspaces/{WS_MODELS}/semanticModels"
+    )
+    with pytest.raises(FabricError, match="not in any workspace you can open"):
+        fetch_connected_model(client, "99999999-9999-9999-9999-999999999999", None, tmp_path / "x")
+
+
+def test_cli_documents_a_live_connected_pbix_with_its_published_model(tmp_path, monkeypatch, capsys):
+    import zipfile
+
+    from .sample_layout import write_sample_pbix
+
+    report = tmp_path / "Thin.pbix"
+    write_sample_pbix(report)
+    with zipfile.ZipFile(report, "a") as archive:
+        archive.writestr("Connections", json.dumps({"Version": 3, "Connections": [{
+            "ConnectionType": "pbiServiceLive", "PbiModelDatabaseName": MODEL_ID,
+            "ConnectionString": "Data Source=pbiazure://api.powerbi.com;Initial Catalog=x"}]}))
+    client = FakeFabric(_report_parts(tmp_path, "Shared Models"), model_workspace=WS_MODELS)
+    monkeypatch.setattr("pbixtractor.cli._fabric_client", lambda args: client)
+    monkeypatch.setattr("pbixtractor.service_stats.make_client", lambda: client)
+    output = tmp_path / "doc"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", str(report), "-o", str(output), "--no-tabular-editor", "-q"])
+    assert exit_info.value.code == 0, capsys.readouterr().err
+    assert (output / "source" / "_fabric" / "Shared Models" / "Sample Model.SemanticModel").is_dir()
+    document = json.loads((output / "Thin.json").read_text(encoding="utf-8"))
+    sales = next(t for t in document["model"]["tables"] if t["name"] == "Sales")
+    assert sales["rows"] == 1000  # the published model's row counts, from the service

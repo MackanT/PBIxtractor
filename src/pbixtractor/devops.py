@@ -9,9 +9,10 @@
     location = parse_devops_url("https://dev.azure.com/org/Proj/_git/Repo?path=/Sales.Report&version=GBmain")
 
 Only the report folder and the semantic model folder it references (definition.pbir byPath)
-are downloaded (as zip archives), not the whole repository. Reports bound to a model in the
-service (byConnection) have no model in git - use the Fabric source for those. Files in git
-are never encrypted, so this also works for reports with an encrypting sensitivity label.
+are downloaded (as zip archives), not the whole repository. A report bound to a published model
+in the service (byConnection) has no model in git: fetch_report(connected_model=...) gets it
+from there (fabric.fetch_connected_model), else it stops with a message. Files in git are never
+encrypted, so this also works for reports with an encrypting sensitivity label.
 
 Sign-in: see azure_auth.py (same login as Fabric). A personal access token in the
 AZURE_DEVOPS_PAT environment variable (scope Code: Read) is used instead when set.
@@ -405,6 +406,7 @@ def fetch_report(
     version_type: str = "branch",
     progress: Optional[Callable[[str], None]] = None,
     all_reports: bool = False,
+    connected_model: Optional[Callable[[dict], Path]] = None,
 ) -> DevOpsFetched:
     """
     Download a PBIP report folder and the semantic model it references.
@@ -419,6 +421,9 @@ def fetch_report(
         progress: Called with a short status text per step
         all_reports: Also download every other report in the repository whose
             definition.pbir points to the same model folder (model mode)
+        connected_model: For a report bound to a published model (byConnection): given its
+            definition.pbir, downloads that model and returns its local folder (e.g. via
+            fabric.fetch_connected_model). Without it such a report is an error.
 
     Returns:
         DevOpsFetched with the local report and model folders
@@ -436,18 +441,35 @@ def fetch_report(
         destination,
     )
 
-    model_path = _model_reference((report_folder / "definition.pbir").read_bytes(), report_path)
+    from .fabric import model_reference  # noqa: PLC0415 - only for service-bound reports
+
+    pbir = (report_folder / "definition.pbir").read_bytes()
+    model_path = _model_reference(pbir, report_path)
+    service_model = None  # the published model's id, for a report bound byConnection
     if model_path is None:
-        raise ApiError(
-            f"{report_path} is bound to a semantic model in the Power BI service (not stored in "
-            "the repository) - document it from the Fabric workspace instead."
+        service_model = model_reference(json.loads(pbir.decode("utf-8-sig")))[0]
+        if connected_model is None or not service_model:
+            raise ApiError(
+                f"{report_path} is bound to a semantic model in the Power BI service (not stored "
+                "in the repository) - document it from the Fabric workspace instead."
+            )
+        say("The report uses a published semantic model: getting it from the Power BI service")
+        model_folder = connected_model(json.loads(pbir.decode("utf-8-sig")))
+    else:
+        say(f"Downloading {model_path}")
+        model_folder = extract_folder(
+            client.download_folder(project, repo, model_path, version, version_type),
+            model_path,
+            destination,
         )
-    say(f"Downloading {model_path}")
-    model_folder = extract_folder(
-        client.download_folder(project, repo, model_path, version, version_type),
-        model_path,
-        destination,
-    )
+
+    def same_model(other_pbir: bytes, other: str) -> bool:
+        """Another report on this report's model: the same folder, or the same published model."""
+        if service_model:
+            return (model_reference(json.loads(other_pbir.decode("utf-8-sig")))[0] or "").lower() == (
+                service_model.lower()
+            )
+        return (_model_reference(other_pbir, other) or "").lower() == model_path.lower()
 
     def write_source(folder: Path, path: str) -> None:
         (folder.parent / f"{folder.stem}.devops_source.json").write_text(
@@ -457,7 +479,7 @@ def fetch_report(
                     "project": project,
                     "repository": repo,
                     "report": path,
-                    "semantic_model": model_path,
+                    "semantic_model": model_path or f"service:{service_model}",
                     "version": version,
                     "version_type": version_type,
                     "fetched": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -479,8 +501,8 @@ def fetch_report(
         if other.lower() == report_path.lower():
             continue
         try:
-            pbir = client.read_file(project, repo, f"{other}/definition.pbir", version, version_type)
-            if (_model_reference(pbir, other) or "").lower() != model_path.lower():
+            other_pbir = client.read_file(project, repo, f"{other}/definition.pbir", version, version_type)
+            if not same_model(other_pbir, other):
                 continue
             say(f"Downloading {other}")
             folder = extract_folder(

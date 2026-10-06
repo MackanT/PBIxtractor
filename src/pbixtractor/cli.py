@@ -9,7 +9,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import __version__
 
@@ -249,8 +249,29 @@ def _devops_client(args: argparse.Namespace, org: str):
     return DevOpsClient(org, get_credential(getattr(args, "tenant", None)))
 
 
-def _devops_fetch(args: argparse.Namespace, url: str, destination: Optional[Path]):
-    """Download the report at a DevOps URL (raises ApiError/ValueError)."""
+def _connected_models(args: argparse.Namespace, root: Path, fetched: list) -> Callable[[dict], Path]:
+    """A devops.fetch_report connected_model hook: gets a published model via Fabric (sign-in)
+    into <root>/<workspace>/, and keeps the FetchedModel in `fetched` (for statistics)."""
+    from .fabric import fetch_connected_model, model_reference
+
+    def get(pbir: dict) -> Path:
+        model_id, workspace = model_reference(pbir)
+        model = fetch_connected_model(_fabric_client(args), model_id, workspace, root, _progress(args))
+        fetched.append(model)
+        return model.model_path
+
+    return get
+
+
+def _progress(args: argparse.Namespace):
+    return None if getattr(args, "quiet", False) else lambda text: print(f"  {text}")
+
+
+def _devops_fetch(
+    args: argparse.Namespace, url: str, destination: Optional[Path], connected: Optional[list] = None
+):
+    """Download the report at a DevOps URL (raises ApiError/ValueError). A report bound to a
+    published model gets that model from Fabric; `connected` receives its FetchedModel."""
     from .devops import fetch_report, parse_devops_url, parse_version
 
     location = parse_devops_url(url)
@@ -265,8 +286,11 @@ def _devops_fetch(args: argparse.Namespace, url: str, destination: Optional[Path
         destination,
         version,
         version_type,
-        progress=None if getattr(args, "quiet", False) else lambda text: print(f"  {text}"),
+        progress=_progress(args),
         all_reports=getattr(args, "all_reports", False),
+        connected_model=_connected_models(
+            args, (destination or Path("output")) / "_fabric", connected if connected is not None else []
+        ),
     )
 
 
@@ -327,6 +351,8 @@ def run_catalog(args: argparse.Namespace) -> int:
 def run_extract(args: argparse.Namespace) -> int:
     """Handle `pbixtractor extract`. Returns the process exit code."""
     from .azure_auth import ApiError
+    from .fabric import FetchedModel, fetch_connected_model
+    from .pbix_model import live_connection
     from .pipeline import (
         ExtractionOptions,
         find_model_for_report,
@@ -334,6 +360,9 @@ def run_extract(args: argparse.Namespace) -> int:
         report_name,
         run_extraction,
     )
+    from .service_stats import ServiceModel
+
+    connected: list[FetchedModel] = []  # a published model fetched for a live-connected report
 
     if sum(bool(x) for x in (args.report, args.fabric, args.devops)) != 1:
         print(
@@ -349,7 +378,7 @@ def run_extract(args: argparse.Namespace) -> int:
             if args.fabric:
                 fetched = _fetch(args, args.fabric, source)
             else:
-                fetched = _devops_fetch(args, args.devops, source)
+                fetched = _devops_fetch(args, args.devops, source, connected)
         except (ApiError, ValueError, OSError) as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 1
@@ -370,6 +399,20 @@ def run_extract(args: argparse.Namespace) -> int:
             args.name = model_name(model_path) if model_path else None
 
     model = args.model or find_model_for_report(args.report)
+    reference = live_connection(args.report) if model is None else None
+    if reference is not None:
+        # A live-connected .pbix: its model is published in the service - get it from there
+        if not args.quiet:
+            print(f"{Path(args.report).name} uses a published semantic model: getting it from Fabric")
+        root = (args.output / "source" if args.output else Path("output")) / "_fabric"
+        try:
+            connected.append(fetch_connected_model(
+                _fabric_client(args), reference.model_id, reference.workspace, root, _progress(args)
+            ))
+        except (ApiError, ValueError, OSError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        model = connected[-1].model_path
     if model is None:
         print(
             f"No model found for {args.report}: a .pbix normally carries its own; else expected "
@@ -392,6 +435,11 @@ def run_extract(args: argparse.Namespace) -> int:
         not_included=not_included,
         service_statistics=not args.no_service_statistics,
         catalog_dir=args.catalog,
+        service_model=(
+            ServiceModel(connected[-1].workspace_id, connected[-1].model_id, connected[-1].model)
+            if connected
+            else None
+        ),
     )
     if args.description_tag:
         options.description_tag = args.description_tag

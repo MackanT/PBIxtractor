@@ -303,6 +303,96 @@ def _write_source(report_folder: Path, ws: dict, rep: dict, model_ws: dict, mode
     )
 
 
+def download_semantic_model(
+    client: FabricClient, workspace: dict, model: dict, destination: Path, say=None
+) -> Path:
+    """Download a semantic model (TMDL) to <destination>/<model>.SemanticModel."""
+    say = say or (lambda text: None)
+    say(f"Downloading semantic model {model['displayName']}")
+    parts = client.get_definition(
+        workspace["id"],
+        model["id"],
+        "semanticModels",
+        "TMDL",
+        progress=lambda s: say(f"Semantic model {model['displayName']}: Fabric is preparing it ({s:.0f} s)"),
+    )
+    folder = Path(destination) / f"{safe_name(model['displayName'])}.SemanticModel"
+    write_parts(parts, folder)
+    return folder
+
+
+def find_semantic_model(
+    client: FabricClient, model_id: str, workspace: Optional[str] = None, say=None
+) -> tuple[dict, dict]:
+    """
+    The workspace and semantic model with this id: in the named workspace when known (a
+    connection string may say), else in each workspace you can open, until found.
+
+    Raises:
+        FabricError: Not in any workspace you can open
+    """
+    say = say or (lambda text: None)
+    workspaces = client.workspaces()
+    if workspace:
+        named = [w for w in workspaces if workspace.lower() in (w["id"].lower(), w["displayName"].lower())]
+        workspaces = named + [w for w in workspaces if w not in named]
+    for ws in workspaces:
+        say(f"Looking for the semantic model in {ws['displayName']}")
+        try:
+            models = client.semantic_models(ws["id"])
+        except ApiError as error:  # e.g. a workspace you see but cannot list items in
+            logger.debug(f"Could not list semantic models in {ws['displayName']}: {error}")
+            continue
+        for model in models:
+            if model["id"].lower() == model_id.lower():
+                return ws, model
+    raise FabricError(
+        f"Semantic model {model_id} is not in any workspace you can open"
+        + (f" (the report names workspace {workspace})" if workspace else "")
+        + ". Ask for access to the model's workspace (Contributor, to download it)."
+    )
+
+
+@dataclass
+class FetchedModel:
+    """A published semantic model downloaded for a live-connected report."""
+
+    model_path: Path  # <model>.SemanticModel
+    model: str
+    model_id: str
+    workspace: str
+    workspace_id: str
+
+
+def fetch_connected_model(
+    client: FabricClient,
+    model_id: str,
+    workspace: Optional[str],
+    destination_root: Path,
+    progress: Optional[Callable[[str], None]] = None,
+) -> FetchedModel:
+    """
+    Download the published semantic model a live-connected report uses (a thin .pbix, or a
+    PBIP report bound "byConnection"), so the report can be documented without a .bim.
+
+    Args:
+        client: FabricClient
+        model_id: The model's id (pbix_model.live_connection / model_reference())
+        workspace: Its workspace name, when the connection says (faster: no search)
+        destination_root: The model goes to <root>/<workspace>/<model>.SemanticModel (the
+            Fabric source's layout, e.g. output/_fabric)
+        progress: Called with a short status text per step
+
+    Raises:
+        FabricError: Model not found, or not downloadable (needs Contributor on it)
+    """
+    say = progress or (lambda text: None)
+    ws, model = find_semantic_model(client, model_id, workspace, say)
+    destination = Path(destination_root) / safe_name(ws["displayName"])
+    folder = download_semantic_model(client, ws, model, destination, say)
+    return FetchedModel(folder, model["displayName"], model["id"], ws["displayName"], ws["id"])
+
+
 def reports_on_model(
     client: FabricClient,
     model_id: str,
@@ -392,16 +482,7 @@ def fetch_report(
             f"{ws['displayName']} and its workspace is unknown."
         )
 
-    say(f"Downloading semantic model {model['displayName']}")
-    model_parts = client.get_definition(
-        model_ws["id"],
-        model["id"],
-        "semanticModels",
-        "TMDL",
-        progress=lambda s: say(f"Semantic model {model['displayName']}: Fabric is preparing it ({s:.0f} s)"),
-    )
-    model_folder = destination / f"{safe_name(model['displayName'])}.SemanticModel"
-    write_parts(model_parts, model_folder)
+    model_folder = download_semantic_model(client, model_ws, model, destination, say)
     _bind_to_local_model(report_folder, pbir, model_folder)
     _write_source(report_folder, ws, rep, model_ws, model)
 

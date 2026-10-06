@@ -20,6 +20,7 @@ from nicegui import run, ui
 from . import devops, fabric
 from .azure_auth import ApiError
 from .pipeline import model_name
+from .service_stats import ServiceModel
 from .web_config import output_root, stored_choices
 
 logger = logging.getLogger("pbixtractor")
@@ -33,6 +34,8 @@ class Fetched:
     model_path: Path
     extra_reports: list[Path] = field(default_factory=list)  # model mode: the other reports
     skipped: list[str] = field(default_factory=list)  # reports that could not be downloaded
+    # A published model fetched for a report bound to the service (statistics come from it)
+    service_model: Optional[ServiceModel] = None
 
     @property
     def model_mode(self) -> bool:
@@ -320,6 +323,19 @@ class DevOpsPanel:
         return bool(self.project.value and self.repo.value and self.branch.value and self.report.value)
 
     def fetch(self, progress: Callable[[str], None]) -> Fetched:
+        """Blocking download; a report bound to a published model gets it from Fabric (the
+        same sign-in)."""
+        connected: list[fabric.FetchedModel] = []
+
+        def connected_model(pbir: dict) -> Path:
+            model_id, workspace = fabric.model_reference(pbir)
+            connected.append(
+                fabric.fetch_connected_model(
+                    make_fabric_client(), model_id, workspace, output_root() / "_fabric", progress
+                )
+            )
+            return connected[-1].model_path
+
         commit = self.version.value or ""
         version, version_type = (commit, "commit") if commit else (self.branch.value, "branch")
         fetched = devops.fetch_report(
@@ -336,7 +352,20 @@ class DevOpsPanel:
             version_type,
             progress=progress,
             all_reports=self.all_reports.value,
+            connected_model=connected_model,
         )
         return Fetched(
-            fetched.report_folder, fetched.model_path, fetched.report_folders[1:], fetched.skipped
+            fetched.report_folder,
+            fetched.model_path,
+            fetched.report_folders[1:],
+            fetched.skipped,
+            service_model=connected_service_model(connected),
         )
+
+
+def connected_service_model(connected: list) -> Optional[ServiceModel]:
+    """The published model of a service-bound report, for statistics (None if there was none)."""
+    if not connected:
+        return None
+    model = connected[-1]
+    return ServiceModel(model.workspace_id, model.model_id, model.model)
