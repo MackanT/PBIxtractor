@@ -81,9 +81,12 @@ src/pbixtractor/
                     2 no model/bad args); `fabric list [WS]`, `fabric fetch WS/REPORT [-o]`
                     (default download folder output/_fabric/<ws>; with extract -o: <o>/source);
                     `catalog list|remove|rebuild FOLDER [KEY]`; `catalog add FOLDER [FILE ...] |
-                    --fabric-workspace WS [...] [--all-workspaces] [-o ROOT] [--no-tabular-editor]
+                    --fabric-workspace WS [...] [--all-workspaces] | --devops REPO_URL [--ref]
+                    [--only NAME ...] [--list] [-o ROOT] [--no-tabular-editor]
                     [--no-service-statistics] [--no-log-file] [-q]` (batch.py; .bim files among
-                    FILE are models; exit 1 if any model failed). `--ref` was `--version` (still
+                    FILE are models; a ?path= in the repo URL limits it to a folder; --only =
+                    batch.select (model or report name, wildcards); --list = plan only; exit 1 if
+                    any model failed). `--ref` was `--version` (still
                     accepted); top-level `pbixtractor --version` prints the program version.
                     Fetch errors (ApiError/ValueError/OSError) → "ERROR: ..." + exit 1; anything
                     else keeps its traceback on purpose (a bug).
@@ -137,7 +140,8 @@ src/pbixtractor/
                     of each other are one drop: several reports + one model → model mode (chips
                     "Documented together", removable); several models → a batch (drop_plan() =
                     batch.plan_files; selection() says "N models: each is documented separately"
-                    before the run). Batches (also Fabric "Whole workspaces") run via run_batch():
+                    before the run). Batches (also the ticked models of Fabric "Whole workspaces" / DevOps
+                    "Whole repository": panel.selected_jobs()) run via run_batch():
                     _batch_results() = summary + one live row per model (Waiting/Running/Done/
                     Failed/Skipped + reason), Details = that model's full result re-read from its
                     JSON (_render_result), lineage in a new tab, "Open catalog"; "Stop after this
@@ -232,7 +236,13 @@ src/pbixtractor/
                     paths under output/_devops/<project>/<repo>/<version>; byConnection reports
                     → fetch_report(connected_model=hook) gets the published model (CLI/web pass a
                     hook calling fabric.fetch_connected_model; model mode matches other reports
-                    by the same model id); without a hook → error pointing to Fabric. parse_devops_url() takes browser URLs
+                    by the same model id); without a hook → error pointing to Fabric.
+                    fetch_model_reports(client, project, repo, model, report_paths, dest, version)
+                    for batch.py (model = repo path or "service:<id>" via connected_model; failed
+                    reports → skipped); model_of_report(pbir, path) → (model path, published id);
+                    _write_source() = <report>.devops_source.json (catalog identity), shared with
+                    fetch_report. parse_devops_url(url, report=False) = a repository URL (?path=
+                    optional: a folder). parse_devops_url() takes browser URLs
                     (?path=...&version=GB|GT|GC...; also the short /org/_git/Repo form). Works
                     for encrypted-label reports (git holds plain PBIP). Safety: only
                     dev.azure.com / *.visualstudio.com over https (more hosts:
@@ -286,6 +296,12 @@ src/pbixtractor/
                     name; several: the model's; duplicates "(<workspace>)" / "(2)"), always added
                     to the catalog; a failure never stops the rest; should_stop between models.
                     summary() = "3 of 4 models documented (1 with warnings), 1 failed, 2 skipped".
+                    plan_devops(client, project, repo, version, version_type, folder) = one job
+                    per model folder (definition.pbir byPath) or published model id (byConnection,
+                    downloaded from Fabric) with all its reports; reads every report's pbir (one
+                    call each); skipped: unreadable pbir, no model named, model folder missing,
+                    model folders (definition.pbism / .pbidataset) without a report. Downloads to
+                    <root>/_devops/<project>/<repo>/<version>. select(jobs, patterns) for --only.
   catalog.py        Catalog folder (options.catalog_dir / --catalog / UI "Add to catalog"):
                     entries/<key>.json = one SLIM entry per semantic model (reports+pages,
                     tables/columns/measures with DAX, usage field→pages, DAX depends_on, unused
@@ -303,9 +319,15 @@ src/pbixtractor/
                     "vw_x", Schema/Item "dbo.vw_x") - cross-model source matching needs server/db
                     (with 6b).
   web_sources.py    Web UI panels FabricPanel (workspace → report; or scope "Whole workspaces":
-                    multi-select + "Also find their reports in my other workspaces", plan() →
-                    batch.plan_fabric, is_batch) and DevOpsPanel (org →
-                    project → repo → branch → report → version/commit); ready(), blocking
+                    multi-select + "Also find their reports in my other workspaces") and
+                    DevOpsPanel (org → project → repo → branch → report → version/commit; or scope
+                    "Whole repository" at the branch's latest, optional folder). Whole scopes:
+                    PlanPicker ("List models" → plan() in a thread with progress → a ui.table with
+                    checkboxes, NOTHING ticked at first (owner: only what is chosen is
+                    documented), filter + "Select all" (of the filtered rows) / "Select none",
+                    "Cannot be documented (N)" expansion with the reasons; cleared when the scope
+                    inputs change); is_batch, selected_jobs(); markers <fabric|devops>_plan_*.
+                    ready(), blocking
                     fetch(progress) → (report folder, model folder). make_fabric_client /
                     make_devops_client are the test seams. Choices remembered in
                     app.storage.general (.nicegui/, gitignored).
@@ -536,11 +558,12 @@ tag exists yet (none on origin either), so the data-platform pin below cannot in
 is pushed; pyproject.toml and `__init__.__version__` both carry the version (keep them equal).
 
 Open, by owner priority:
-- **Catalog step 2 (owner, 2026-10-06), v1 built 2026-10-06** (batch.py; automated tests only
-  so far - real-workspace checks in MANUAL_TESTS.md): whole Fabric workspaces and multi-model
-  drops/file lists → one documentation per model, all in one catalog. Follow-ups: a whole Azure
-  DevOps repository (same core: plan per model path / published model id); removing catalog
-  entries of models that no longer exist; maybe a plan preview before a long run.
+- **Catalog step 2 (owner, 2026-10-06), built 2026-10-06** (batch.py; automated tests only so
+  far - real-workspace checks in MANUAL_TESTS.md): whole Fabric workspaces, a whole Azure DevOps
+  repository (or folder) and multi-model drops/file lists → one documentation per model, all in
+  one catalog; workspaces/repositories list the models first and only the ticked ones run (CLI:
+  --list / --only). Follow-ups: removing catalog entries of models that no longer exist; a tag
+  or older commit for "Whole repository" in the UI (the CLI's --ref already does it).
 - Module + stand-alone (owner, 2026-09-30): PBIxtractor must work stand-alone AND as a module
   inside the owner's private data-platform NiceGUI app (read only via `gh api`; never clone it
   or store its content on this PC). Phase 1 done: theme.py + restyled stand-alone UI.

@@ -134,7 +134,7 @@ def report_folder_path(path: str) -> str:
     raise ValueError(f"Not a PBIP report path (expected a .pbip file or <name>.Report folder): {path}")
 
 
-def parse_devops_url(url: str) -> DevOpsLocation:
+def parse_devops_url(url: str, report: bool = True) -> DevOpsLocation:
     """
     Parse a report URL as copied from the Azure DevOps web UI.
 
@@ -142,9 +142,11 @@ def parse_devops_url(url: str) -> DevOpsLocation:
         url: e.g. https://dev.azure.com/org/Project/_git/Repo?path=/Sales.Report&version=GBmain
             (also https://org.visualstudio.com/Project/_git/Repo?...); version GB = branch,
             GT = tag, GC = commit
+        report: The URL points to a report (path required, normalised to its .Report folder);
+            False: a repository, where a path is optional and limits it to a folder
 
     Returns:
-        DevOpsLocation (path normalised to the .Report folder)
+        DevOpsLocation (path: the .Report folder, or the folder; "" = the whole repository)
     """
     parts = urllib.parse.urlsplit(url.strip())
     segments = [urllib.parse.unquote(s) for s in parts.path.strip("/").split("/")]
@@ -158,12 +160,18 @@ def parse_devops_url(url: str) -> DevOpsLocation:
     project = segments[git - 1] if git > (1 if on_dev_azure else 0) else repo
     query = urllib.parse.parse_qs(parts.query)
     path = query.get("path", [""])[0]
-    if not repo or not path:
+    if not repo or (report and not path):
         raise ValueError(f"The URL must point to a report inside a repository (?path=...): {url}")
     version, version_type = query.get("version", [""])[0], "branch"
     if version[:2] in _URL_VERSION_PREFIX:
         version_type, version = _URL_VERSION_PREFIX[version[:2]], version[2:]
-    return DevOpsLocation(org, project, repo, report_folder_path(path), version, version_type)
+    if report:
+        path = report_folder_path(path)
+    elif path.strip("/"):
+        path = safe_repo_path(path)
+    else:
+        path = ""
+    return DevOpsLocation(org, project, repo, path, version, version_type)
 
 
 def parse_version(value: str) -> tuple[str, str]:
@@ -472,21 +480,8 @@ def fetch_report(
         return (_model_reference(other_pbir, other) or "").lower() == model_path.lower()
 
     def write_source(folder: Path, path: str) -> None:
-        (folder.parent / f"{folder.stem}.devops_source.json").write_text(
-            json.dumps(
-                {
-                    "organization": client.org,
-                    "project": project,
-                    "repository": repo,
-                    "report": path,
-                    "semantic_model": model_path or f"service:{service_model}",
-                    "version": version,
-                    "version_type": version_type,
-                    "fetched": time.strftime("%Y-%m-%d %H:%M:%S"),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+        _write_source(
+            folder, client, project, repo, path, model_path or f"service:{service_model}", version, version_type
         )
 
     write_source(report_folder, report_path)
@@ -514,6 +509,117 @@ def fetch_report(
         write_source(folder, other)
         fetched.report_folders.append(folder)
     return fetched
+
+
+def _write_source(
+    folder: Path,
+    client: DevOpsClient,
+    project: str,
+    repo: str,
+    path: str,
+    semantic_model: str,
+    version: str,
+    version_type: str,
+) -> None:
+    """<report>.devops_source.json next to a downloaded report: where it came from (the
+    catalog identity; semantic_model is the model's repository path or "service:<id>")."""
+    (folder.parent / f"{folder.stem}.devops_source.json").write_text(
+        json.dumps(
+            {
+                "organization": client.org,
+                "project": project,
+                "repository": repo,
+                "report": path,
+                "semantic_model": semantic_model,
+                "version": version,
+                "version_type": version_type,
+                "fetched": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def model_of_report(pbir: bytes, report_path: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    The model a report's definition.pbir points to.
+
+    Returns:
+        (repository path of the model folder, published model id); one of them is None (both
+        when the file names no model)
+    """
+    model_path = _model_reference(pbir, report_path)
+    if model_path:
+        return model_path, None
+    from .fabric import model_reference  # noqa: PLC0415 - only for service-bound reports
+
+    return None, model_reference(json.loads(pbir.decode("utf-8-sig")))[0]
+
+
+def fetch_model_reports(
+    client: DevOpsClient,
+    project: str,
+    repo: str,
+    model: str,
+    report_paths: list[str],
+    destination: Path,
+    version: str,
+    version_type: str = "branch",
+    progress: Optional[Callable[[str], None]] = None,
+    connected_model: Optional[Callable[[dict], Path]] = None,
+) -> DevOpsFetched:
+    """
+    Download the given reports and the model they use (batch.py: one model of a repository),
+    keeping repository paths below `destination`. A report that cannot be downloaded is listed
+    in `skipped`.
+
+    Args:
+        model: The model folder's repository path, or "service:<id>" for a published model -
+            then connected_model(<a report's definition.pbir>) downloads it (fabric)
+        report_paths: The reports' .Report folders in the repository
+        version, version_type: The branch / tag / commit to read (not "": resolve it first)
+
+    Raises:
+        ApiError: The model, or every one of the reports, could not be downloaded
+    """
+    say = progress or (lambda text: None)
+    destination = Path(destination)
+    downloaded: list[tuple[str, Path]] = []
+    skipped: list[str] = []
+    for path in report_paths:
+        say(f"Downloading {path}")
+        try:
+            downloaded.append(
+                (path, extract_folder(client.download_folder(project, repo, path, version, version_type),
+                                      path, destination))
+            )
+        except (ApiError, ValueError) as error:
+            skipped.append(f"{path}: {error}")
+    if not downloaded:
+        raise ApiError(f"None of the reports on {model} could be downloaded: " + "; ".join(skipped))
+    if model.startswith("service:"):
+        if connected_model is None:
+            raise ApiError(f"{model} is a published semantic model - Fabric is needed to get it")
+        say("The reports use a published semantic model: getting it from the Power BI service")
+        pbir = json.loads((downloaded[0][1] / "definition.pbir").read_bytes().decode("utf-8-sig"))
+        model_folder = connected_model(pbir)
+    else:
+        say(f"Downloading {model}")
+        model_folder = extract_folder(
+            client.download_folder(project, repo, model, version, version_type), model, destination
+        )
+    for path, folder in downloaded:
+        _write_source(folder, client, project, repo, path, model, version, version_type)
+    return DevOpsFetched(
+        project,
+        repo,
+        version,
+        downloaded[0][1],
+        model_folder,
+        report_folders=[folder for _, folder in downloaded],
+        skipped=skipped,
+    )
 
 
 def default_destination(project: str, repo: str, version: str) -> Path:

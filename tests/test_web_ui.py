@@ -208,6 +208,11 @@ def _element(user, marker: str):
     return next(iter(user.find(marker=marker).elements))
 
 
+def _any_element(user, marker: str):
+    """An element by marker, also while it is hidden (user.find only sees visible ones)."""
+    return next(e for e in list(user.client.elements.values()) if marker in e._markers)
+
+
 def _value(user, marker: str):
     return _element(user, marker).value
 
@@ -443,17 +448,25 @@ def test_a_whole_fabric_workspace_is_documented_model_by_model(sample, monkeypat
         await user.open("/")
         await _choose(user, "source", "fabric")
         await _choose(user, "fabric_scope", "workspace")
-        user.find("Create documentation").click()
-        await user.should_see("Choose one or more workspaces first.")
+        user.find(marker="fabric_plan_list").click()
+        await user.should_see("Choose one or more workspaces first")
         user.find(marker="fabric_load").click()
         await _wait_for(lambda: _options(user, "fabric_workspaces"))
         await _choose(user, "fabric_workspaces", [WS_REPORTS["id"]])
+        user.find(marker="fabric_plan_list").click()
+        await _wait_for(lambda: len(_any_element(user, "fabric_plan_table").rows) == 2)
+        # What cannot be documented is listed with the reason
+        assert {e.text for e in user.find(marker="fabric_plan_skipped").elements} == {"Cannot be documented (3)"}
+        await user.should_see("Paginated report - not supported")
+        # Nothing is ticked at first: nothing runs
+        user.find("Create documentation").click()
+        await user.should_see("List the models and tick the ones to document first.")
+        user.find(marker="fabric_plan_all").click()
+        await user.should_see("2 of 2 models selected")
         user.find("Create documentation").click()
         await _batch_done(user)
-        # Two models documented (one per model, with all its reports); the rest skipped, saying why
+        # Two models documented (one per model, with all its reports)
         await user.should_see("2 of 2 models documented")
-        await user.should_see("Paginated report - not supported")
-        await user.should_see("No report on this model in the chosen workspaces")
         doc = json.loads(
             (sample / "output" / "Sales Model" / "Sales Model.json").read_text(encoding="utf-8")
         )
@@ -590,5 +603,41 @@ def test_the_page_says_where_the_model_comes_from(sample):
         chip.value = False
         await _wait_for(lambda: _value(user, "report") == "")
         await user.should_not_see(marker="selected")
+
+    _simulate(scenario)
+
+
+def test_only_the_ticked_models_of_a_devops_repository_are_documented(sample, monkeypatch):
+    from .test_batch import BatchFabric, _devops_repo
+    from .test_devops import FakeDevOps
+
+    devops_client = FakeDevOps(_devops_repo(sample / "repo"))
+    monkeypatch.setattr(web_sources, "make_devops_client", lambda org: devops_client)
+    monkeypatch.setattr(web_sources, "make_fabric_client", lambda: BatchFabric(sample / "parts"))
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "devops")
+        await _choose(user, "devops_scope", "repository")
+        await _choose(user, "devops_org", "contoso")
+        user.find(marker="devops_load").click()
+        await _wait_for(lambda: _options(user, "devops_project"))
+        await _choose(user, "devops_project", "BI Team", until=lambda: _options(user, "devops_repo"))
+        await _choose(user, "devops_repo", "reports", until=lambda: _value(user, "devops_branch"))
+        user.find(marker="devops_plan_list").click()
+        await _wait_for(lambda: len(_any_element(user, "devops_plan_table").rows) == 3)
+        await user.should_see("0 of 3 models selected")
+        # "Select all" ticks what the filter shows
+        await _choose(user, "devops_plan_filter", "other")
+        user.find(marker="devops_plan_all").click()
+        await user.should_see("1 of 3 models selected")
+        user.find("Create documentation").click()
+        await _batch_done(user)
+        await user.should_see("1 of 1 model documented")
+        assert (sample / "output" / "Other" / "Other.xlsx").is_file()
+        assert not (sample / "output" / "Sample").exists()
+        # Another scope (here: a folder): the listed models no longer apply
+        await _choose(user, "devops_folder", "/Reports")
+        await _wait_for(lambda: not _any_element(user, "devops_plan_table").rows)
 
     _simulate(scenario)

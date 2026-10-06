@@ -57,8 +57,9 @@ Drop a report (`.pbix`) on the page or click + to add it - several reports with 
 `.bim` are documented together; reports on different models get one documentation each, all
 added to the catalog. A PBIP project (`.pbip` or a `.Report` folder) is chosen under "Use files
 on this PC instead"; or pick a report from a Fabric workspace or an Azure DevOps repository.
-Fabric's "Whole workspaces" documents every semantic model used in the chosen workspaces (one
-documentation per model, with all its reports) into one searchable catalog. The model is found automatically:
+Fabric's "Whole workspaces" and Azure DevOps' "Whole repository" list the semantic models found
+("List models"); the ones you tick are documented - one documentation per model, with all its
+reports - into one searchable catalog. The model is found automatically:
 the model inside the `.pbix` itself (no `.bim` needed), else `<name>.bim` next to the report, or a
 PBIP project's semantic model as `model.bim` or TMDL
 (the `definition` folder newer Power BI Desktop versions write). After a run the
@@ -85,6 +86,8 @@ pbixtractor devops fetch "<url>" --ref commit:a1b2c3d       # only download an o
 pbixtractor extract Sales.pbix --catalog output\_catalog
 pbixtractor catalog add output\_catalog --fabric-workspace "Sales WS"  # every model in a workspace
 pbixtractor catalog add output\_catalog A.pbix B.pbix C.pbix            # one documentation per model
+pbixtractor catalog add output\_catalog --devops "https://dev.azure.com/org/Proj/_git/Repo" --list
+pbixtractor catalog add output\_catalog --devops "<repo url>" --only "Sales*"  # just those models
 pbixtractor catalog list output\_catalog
 ```
 
@@ -174,7 +177,8 @@ uv run --frozen ruff check src/ tests/
 - ✅ Catalog: search measures, DAX and usage across models
 - ✅ Bookmarks: the filters and slicer selections they apply (changed ones marked)
 - 🔄 Source database lineage (views → base tables)
-- ✅ Whole Fabric workspaces (or many files) documented into the catalog in one go
+- ✅ Whole Fabric workspaces, Azure DevOps repositories or many files documented into the
+  catalog in one go (you pick the models)
 
 ## Known Issues
 

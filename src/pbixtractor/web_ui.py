@@ -1210,18 +1210,14 @@ def build_page(
     auto_output = {"value": None}  # the output folder on_report_change suggested last
     report_input.on_value_change(lambda _: on_report_change())
 
-    async def download_remote_report(
-        fetch: Callable[[Callable[[str], None]], object],
-        start: str = "Downloading the report…",
-        failed: str = "Download failed",
-    ):
-        """Run a blocking download (or listing) - e.g. a panel's fetch - with its progress
+    async def download_remote_report(fetch: Callable[[Callable[[str], None]], object]):
+        """Run a blocking download - a panel's fetch, a published model's - with its progress
         texts; None on error.
 
         The download has no measurable fraction (Fabric prepares the definition in the
         background), so the bar is indeterminate and the label shows the current step.
         """
-        step_label.text = start
+        step_label.text = "Downloading the report…"
         messages: queue.Queue = queue.Queue()
 
         def show_progress() -> None:
@@ -1235,11 +1231,11 @@ def build_page(
         try:
             return await run.io_bound(fetch, messages.put)
         except (ApiError, ValueError, OSError) as error:
-            ui.notify(f"{failed}: {error}", type="negative", multi_line=True, timeout=20000)
+            ui.notify(f"Download failed: {error}", type="negative", multi_line=True, timeout=20000)
             return None
         except Exception as error:  # UI boundary: never let a click end without any message
-            logging.getLogger("pbixtractor").exception(f"{failed} unexpectedly: {error}")
-            ui.notify(f"{failed}: {error}", type="negative", multi_line=True, timeout=20000)
+            logging.getLogger("pbixtractor").exception(f"Download failed unexpectedly: {error}")
+            ui.notify(f"Download failed: {error}", type="negative", multi_line=True, timeout=20000)
             return None
         finally:
             timer.cancel()
@@ -1338,20 +1334,15 @@ def build_page(
             panel = remote[source.value]
             whole = getattr(panel, "is_batch", False)
             if not panel.ready():
-                ui.notify("Choose one or more workspaces first." if whole else "Choose a report first.",
-                          type="warning")
+                ui.notify(
+                    "List the models and tick the ones to document first." if whole
+                    else "Choose a report first.",
+                    type="warning",
+                )
                 return
             result_box.clear()
-            if whole:  # every model used in the chosen workspaces, one documentation each
-                jobs = await download_remote_report(
-                    panel.plan, "Listing the workspaces…", "Listing the workspaces failed"
-                )
-                if jobs is None:
-                    return
-                if not jobs:
-                    ui.notify("No reports or semantic models in these workspaces.", type="warning")
-                    return
-                await run_batch(jobs)
+            if whole:  # the ticked models of the workspaces / repository, one documentation each
+                await run_batch(panel.selected_jobs())
                 return
             fetched = await download_remote_report(panel.fetch)
             if fetched is None:

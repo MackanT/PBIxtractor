@@ -1,8 +1,11 @@
-"""Document many semantic models in one go - a whole Fabric workspace (or several), or several
-report files - one documentation run per model, each added to one catalog.
+"""Document many semantic models in one go - whole Fabric workspaces, an Azure DevOps
+repository, or several report files - one documentation run per model, each added to one
+catalog.
 
     jobs = plan_fabric(client, ["Sales WS"], output_root=Path("output"))  # list calls only
+    jobs = plan_devops(devops_client, "Project", "Repo", "main")           # list + read pbir
     jobs = plan_files([Path("A.pbix"), Path("B.pbix")])                    # local files
+    jobs = select(jobs, ["Sales*"])                                        # or pick in the UI
     outcomes = run_batch(jobs, BatchSettings(Path("output"), Path("output/_catalog")))
 
 Planning only lists items, so it is quick; a job downloads its model and reports when its turn
@@ -11,13 +14,14 @@ reports found (so "unused" means unused by all of them, and its catalog entry is
 failing model never stops the others - its outcome says why.
 """
 
+import fnmatch
 import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import fabric
+from . import devops, fabric
 from .azure_auth import ApiError
 from .pbix_model import LiveConnection, live_connection
 from .pipeline import (
@@ -342,6 +346,181 @@ def plan_fabric(
         )
     jobs.sort(key=lambda j: (j.model.lower(), j.qualifier.lower()))
     return jobs + skipped
+
+
+# ============================================================================
+# Planning: an Azure DevOps repository
+# ============================================================================
+
+
+def _report_label(path: str) -> str:
+    return path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".Report")
+
+
+def _devops_prepare(
+    client,
+    project: str,
+    repo: str,
+    model: str,
+    reports: list[str],
+    destination: Path,
+    version: str,
+    version_type: str,
+    make_client: Optional[Callable[[], "fabric.FabricClient"]],
+    output_root: Path,
+):
+    def prepare(say: Say) -> Prepared:
+        connected: list[fabric.FetchedModel] = []
+
+        def connected_model(pbir: dict) -> Path:
+            model_id, workspace = fabric.model_reference(pbir)
+            connected.append(
+                fabric.fetch_connected_model(make_client(), model_id, workspace, Path(output_root) / "_fabric", say)
+            )
+            return connected[-1].model_path
+
+        fetched = devops.fetch_model_reports(
+            client, project, repo, model, reports, destination, version, version_type, say,
+            connected_model if make_client else None,
+        )
+        published = connected[-1] if connected else None
+        return Prepared(
+            fetched.report_folders,
+            fetched.model_path,
+            model=published.model if published else "",
+            name=published.model if published and len(fetched.report_folders) > 1 else "",
+            service_model=(
+                ServiceModel(published.workspace_id, published.model_id, published.model) if published else None
+            ),
+            not_included=list(fetched.skipped),
+        )
+
+    return prepare
+
+
+def plan_devops(
+    client: "devops.DevOpsClient",
+    project: str,
+    repo: str,
+    version: str = "",
+    version_type: str = "branch",
+    folder: str = "",
+    output_root: Path = Path("output"),
+    make_client: Optional[Callable[[], "fabric.FabricClient"]] = None,
+    progress: Optional[Say] = None,
+) -> list[BatchJob]:
+    """
+    Every semantic model used by a report in a repository (or one of its folders) at a branch,
+    tag or commit: one job per model, with all its reports there.
+
+    Args:
+        client: DevOpsClient
+        project, repo: The repository
+        version, version_type: Branch / tag / commit ("" = the default branch)
+        folder: Only the reports (and models) below this repository folder ("" = all)
+        output_root: Downloads go to <root>/_devops/<project>/<repo>/<version>
+        make_client: Makes a FabricClient, for reports bound to a published model
+        progress: Called with a short status text per step
+
+    Returns:
+        Jobs sorted by model name; jobs that cannot run (unreadable definition.pbir, no model
+        named, a model folder missing from the repository, models without a report) last
+    """
+    say = progress or (lambda text: None)
+    if not version:
+        say(f"Finding the default branch of {repo}")
+        version, version_type = client.default_branch(project, repo), "branch"
+    say(f"Listing the files of {repo} ({version_type} {version})")
+    files = client.files(project, repo, version, version_type)
+    scope = folder.strip("/").lower()
+
+    def in_scope(path: str) -> bool:
+        return not scope or path.strip("/").lower().startswith(scope + "/")
+
+    reports = sorted(
+        {p.rsplit("/", 1)[0] for p in files if p.lower().endswith(".report/definition.pbir") and in_scope(p)},
+        key=str.lower,
+    )
+    model_folders = {
+        p.rsplit("/", 1)[0].lower(): p.rsplit("/", 1)[0]
+        for p in files
+        if p.lower().endswith((".semanticmodel/definition.pbism", ".dataset/definition.pbidataset")) and in_scope(p)
+    }
+    source = f"Azure DevOps · {repo} @ {version}"
+    where = f" in {folder}" if scope else " in the repository"
+    skipped: list[BatchJob] = []
+
+    def skip(report: str, reason: str) -> None:
+        skipped.append(BatchJob(_report_label(report), [_report_label(report)], source, skip_reason=reason))
+
+    groups: dict[str, list[str]] = {}  # model folder path or "service:<id>" -> report folders
+    for report in reports:
+        say(f"Reading {report}")
+        try:
+            pbir = client.read_file(project, repo, f"{report}/definition.pbir", version, version_type)
+            model_path, service_id = devops.model_of_report(pbir, report)
+        except (ApiError, ValueError) as error:
+            skip(report, f"Its definition.pbir could not be read: {error}")
+            continue
+        if model_path:
+            if not any(f.lower().startswith(model_path.lower() + "/") for f in files):
+                skip(report, f"Its model folder {model_path} is not in the repository")
+                continue
+            groups.setdefault(model_path, []).append(report)
+        elif service_id:
+            groups.setdefault(f"service:{service_id.lower()}", []).append(report)
+        else:
+            skip(report, "Its definition.pbir names no semantic model")
+    used = {key.lower() for key in groups}
+    for key, model_folder in sorted(model_folders.items()):
+        if key not in used:
+            skipped.append(
+                BatchJob(model_name(model_folder), [], source, skip_reason=f"No report on this model{where}")
+            )
+
+    destination = Path(output_root) / devops.default_destination(project, repo, version).relative_to("output")
+    jobs: list[BatchJob] = []
+    for model, group in groups.items():
+        names = [_report_label(r) for r in group]
+        if len(set(n.lower() for n in names)) < len(names):  # same name in several folders
+            names = [r.lstrip("/") for r in group]
+        prepare = _devops_prepare(
+            client, project, repo, model, group, destination, version, version_type, make_client, output_root
+        )
+        if model.startswith("service:"):
+            jobs.append(
+                BatchJob(
+                    "Published model",
+                    names,
+                    f"{source} (published model)",
+                    prepare if make_client else None,
+                    skip_reason="" if make_client else "Its model is published in the Power BI service",
+                    name=names[0] if len(group) == 1 else "",
+                    downloads=True,
+                )
+            )
+        else:
+            parent = model.rstrip("/").rsplit("/", 1)[0].rsplit("/", 1)[-1]
+            jobs.append(BatchJob(model_name(model), names, source, prepare, qualifier=parent, downloads=True))
+    runnable = sorted((j for j in jobs if not j.skip_reason), key=lambda j: (j.model.lower(), j.qualifier.lower()))
+    return runnable + [j for j in jobs if j.skip_reason] + skipped
+
+
+def select(jobs: list[BatchJob], patterns: list[str]) -> list[BatchJob]:
+    """
+    The jobs that can run and whose model, or one of whose reports, matches a pattern
+    (case-insensitive; wildcards * and ?) - e.g. the CLI's --only.
+    """
+    patterns = [p.lower() for p in patterns]
+
+    def matches(name: str) -> bool:
+        return any(fnmatch.fnmatchcase(name.lower(), p) for p in patterns)
+
+    return [
+        job
+        for job in jobs
+        if job.prepare and not job.skip_reason and (matches(job.model) or any(matches(r) for r in job.reports))
+    ]
 
 
 # ============================================================================

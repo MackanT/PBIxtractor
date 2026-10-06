@@ -34,6 +34,9 @@ Examples:
                                                   Document every model of a workspace into
                                                   one searchable catalog
   pbixtractor catalog add output/_catalog A.pbix B.pbix C.pbix   One documentation per model
+  pbixtractor catalog add output/_catalog --devops "https://dev.azure.com/org/Proj/_git/Repo" --list
+                                                  The models in a repository (then pick with
+                                                  --only "Sales*")
 """
 
 
@@ -183,10 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
     catalog_add = catalog_commands.add_parser(
         "add",
-        help="document many models at once: whole Fabric workspaces, or several report files",
+        help="document many models at once: Fabric workspaces, a DevOps repository, or files",
         description="Document every semantic model used by the given reports (or by the reports "
-        "in whole Fabric workspaces) - one documentation per model, all added to the catalog. "
-        "Reports on the same model are documented together.",
+        "in whole Fabric workspaces / an Azure DevOps repository) - one documentation per model, "
+        "all added to the catalog. Reports on the same model are documented together. "
+        "--list shows what was found; --only picks models.",
     )
     catalog_list = catalog_commands.add_parser("list", help="the models in a catalog")
     catalog_remove = catalog_commands.add_parser("remove", help="remove a model (by its key)")
@@ -216,6 +220,29 @@ def build_parser() -> argparse.ArgumentParser:
         "you can access (slower; makes 'unused' complete)",
     )
     catalog_add.add_argument(
+        "--devops",
+        metavar="URL",
+        help="document every model used by a report in this Azure DevOps repository (its URL "
+        "as shown in the browser; a ?path= folder limits it to that folder)",
+    )
+    catalog_add.add_argument(
+        "--ref",
+        dest="repo_version",
+        metavar="REF",
+        help="with --devops: branch name, tag:<name> or commit:<id> (default: the URL's "
+        "version, else the default branch)",
+    )
+    catalog_add.add_argument(
+        "--only",
+        action="append",
+        metavar="NAME",
+        help="only the models whose name, or one of whose reports' names, matches (wildcards "
+        "* and ?; repeat for more)",
+    )
+    catalog_add.add_argument(
+        "--list", action="store_true", help="only list the models found; document nothing"
+    )
+    catalog_add.add_argument(
         "-o", "--output", type=Path, help="root of the models' output folders (default: output)"
     )
     catalog_add.add_argument("--no-tabular-editor", action="store_true",
@@ -223,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_add.add_argument("--no-service-statistics", action="store_true",
                              help="do not read row counts / distinct values from the Power BI service")
     catalog_add.add_argument("--no-log-file", action="store_true", help="do not write logs/*.txt")
-    catalog_add.add_argument("--tenant", help="Entra tenant id for the Fabric sign-in")
+    catalog_add.add_argument("--tenant", help="Entra tenant id for the Fabric / DevOps sign-in")
     catalog_add.add_argument("-q", "--quiet", action="store_true", help="only print the result")
 
     web = commands.add_parser("web", help="start the web UI (default)")
@@ -370,10 +397,19 @@ def run_devops(args: argparse.Namespace) -> int:
 def run_catalog_add(args: argparse.Namespace) -> int:
     """Handle `pbixtractor catalog add`: plan, then document every model (exit 1 if any failed)."""
     from .azure_auth import ApiError
-    from .batch import BatchSettings, plan_fabric, plan_files, run_batch, summary
+    from .batch import (
+        BatchSettings,
+        plan_devops,
+        plan_fabric,
+        plan_files,
+        run_batch,
+        select,
+        summary,
+    )
+    from .devops import parse_devops_url, parse_version
 
-    if bool(args.files) == bool(args.fabric_workspace):
-        print("Give report files or --fabric-workspace (not both).", file=sys.stderr)
+    if sum(bool(x) for x in (args.files, args.fabric_workspace, args.devops)) != 1:
+        print("Give one of: report files, --fabric-workspace or --devops.", file=sys.stderr)
         return 2
     output_root = args.output or Path("output")
     say = _progress(args)
@@ -381,6 +417,22 @@ def run_catalog_add(args: argparse.Namespace) -> int:
         if args.fabric_workspace:
             jobs = plan_fabric(
                 _fabric_client(args), args.fabric_workspace, args.all_workspaces, output_root, say
+            )
+        elif args.devops:
+            location = parse_devops_url(args.devops, report=False)
+            version, version_type = location.version, location.version_type
+            if args.repo_version:
+                version, version_type = parse_version(args.repo_version)
+            jobs = plan_devops(
+                _devops_client(args, location.org),
+                location.project,
+                location.repo,
+                version,
+                version_type,
+                location.path,
+                output_root,
+                lambda: _fabric_client(args),
+                say,
             )
         else:
             models = [f for f in args.files if f.suffix.lower() == ".bim"]
@@ -396,13 +448,22 @@ def run_catalog_add(args: argparse.Namespace) -> int:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
-    if not args.quiet:
+    if args.only:
+        chosen = select(jobs, args.only)
+        jobs = chosen + [job for job in jobs if job.skip_reason]  # the reasons are still shown
+        if not chosen:
+            print(f"No model or report matches {', '.join(args.only)}.", file=sys.stderr)
+    if not args.quiet or args.list:
         runnable = sum(1 for job in jobs if not job.skip_reason)
-        print(f"{runnable} model{'s' if runnable != 1 else ''} to document:")
+        print(f"{runnable} model{'s' if runnable != 1 else ''} {'found' if args.list else 'to document'}:")
         for job in jobs:
             reports = ", ".join(job.reports) or "-"
             print(f"  {job.model} [{job.source}] - reports: {reports}"
                   + (f" - skipped: {job.skip_reason}" if job.skip_reason else ""))
+    if args.list:
+        return 0
+    if args.only and not any(not job.skip_reason for job in jobs):
+        return 1
 
     last = {"step": None}
 

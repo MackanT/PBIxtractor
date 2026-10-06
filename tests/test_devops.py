@@ -13,6 +13,7 @@ from pbixtractor.cli import main
 from pbixtractor.devops import (
     DevOpsClient,
     extract_folder,
+    fetch_model_reports,
     fetch_report,
     normalize_org,
     parse_devops_url,
@@ -339,3 +340,38 @@ def test_a_report_on_a_published_model_gets_it_from_the_service(tmp_path):
     assert fetched.model_path == model_folder and len(asked) == 1
     assert sorted(f.name for f in fetched.report_folders) == ["Detail.Report", "Sample.Report"]
     assert read_model(fetched.model_path).tables
+
+
+def test_parse_a_repository_url():
+    whole = parse_devops_url("https://dev.azure.com/contoso/BI%20Team/_git/reports", report=False)
+    assert (whole.project, whole.repo, whole.path, whole.version) == ("BI Team", "reports", "", "")
+    folder = parse_devops_url(
+        "https://dev.azure.com/contoso/BI%20Team/_git/reports?path=/Reports/Finance&version=GBdev",
+        report=False,
+    )
+    assert (folder.path, folder.version, folder.version_type) == ("/Reports/Finance", "dev", "branch")
+    with pytest.raises(ApiError, match="Unsafe"):
+        parse_devops_url("https://dev.azure.com/c/P/_git/R?path=/../x", report=False)
+
+
+def test_fetch_model_reports_downloads_the_reports_and_their_model(tmp_path):
+    class Failing(FakeDevOps):
+        def download_folder(self, project, repo, path, version="", version_type="branch"):
+            if path == "/Other/Other.Report":
+                raise ApiError("HTTP 404: not found")
+            return super().download_folder(project, repo, path, version, version_type)
+
+    client = Failing(_with_sibling_reports(_repo_files(tmp_path)))
+    fetched = fetch_model_reports(
+        client, "BI Team", "reports", "/Reports/Sample.SemanticModel",
+        ["/Reports/Sample.Report", "/Detail/Sample Detail.Report", "/Other/Other.Report"],
+        tmp_path / "dl", "main",
+    )
+    assert [f.name for f in fetched.report_folders] == ["Sample.Report", "Sample Detail.Report"]
+    assert fetched.model_path == tmp_path / "dl" / "Reports" / "Sample.SemanticModel"
+    assert fetched.skipped == ["/Other/Other.Report: HTTP 404: not found"]
+    source = json.loads((tmp_path / "dl" / "Detail" / "Sample Detail.devops_source.json").read_text(encoding="utf-8"))
+    assert source["semantic_model"] == "/Reports/Sample.SemanticModel" and source["version"] == "main"
+    with pytest.raises(ApiError, match="published semantic model"):
+        fetch_model_reports(client, "BI Team", "reports", "service:abc", ["/Reports/Sample.Report"],
+                            tmp_path / "dl2", "main")

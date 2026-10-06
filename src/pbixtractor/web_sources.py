@@ -7,10 +7,15 @@ downloads it as a local PBIP project when the documentation is created:
     panel.ready()                                     # a report is chosen
     report_folder, model_path = panel.fetch(progress) # blocking: call via run.io_bound
 
+Or, scope "Whole workspaces" / "Whole repository" (panel.is_batch): "List models" shows every
+semantic model found (PlanPicker); the ticked ones are documented (panel.selected_jobs(),
+batch.run_batch).
+
 API calls block (and the first one may open a browser sign-in), so they run in threads.
 """
 
 import logging
+import queue
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -87,9 +92,174 @@ def _set_options(select: ui.select, options: dict, value=None) -> None:
     select.set_options(options, value=value if value in options else None)
 
 
+PLAN_COLUMNS = [
+    {"name": "model", "label": "Semantic model", "field": "model", "align": "left", "sortable": True},
+    {"name": "reports", "label": "Reports", "field": "reports", "align": "left",
+     "style": "white-space: normal"},
+    {"name": "where", "label": "Where", "field": "where", "align": "left", "sortable": True},
+]
+
+
+class PlanPicker:
+    """
+    The semantic models found (in workspaces / a repository), to tick the ones to document.
+    Nothing is ticked at first: only what is chosen is documented.
+
+        picker = PlanPicker(plan=lambda progress: batch.plan_fabric(...), check=lambda: "")
+        picker.selected_jobs()   # the ticked models' BatchJobs
+        picker.clear()           # the scope changed: list again
+    """
+
+    def __init__(
+        self,
+        plan: Callable[[Callable[[str], None]], list[batch.BatchJob]],
+        check: Callable[[], str],
+        marker: str,
+    ):
+        """
+        Args:
+            plan: Blocking: lists the models (batch.plan_fabric / batch.plan_devops)
+            check: "" when the models can be listed, else what to choose first
+            marker: Prefix of the elements' markers ("fabric" -> "fabric_plan_list", ...)
+        """
+        self._plan = plan
+        self._check = check
+        self.jobs: list[batch.BatchJob] = []
+        with ui.row().classes("w-full items-center no-wrap gap-2"):
+            self.list_button = (
+                ui.button("List models", icon="checklist", on_click=self.refresh)
+                .props("outline no-caps")
+                .mark(f"{marker}_plan_list")
+            )
+            self.status = ui.label("").classes("text-sm text-grey-7").mark(f"{marker}_plan_status")
+        with ui.column().classes("w-full gap-1") as self.box:
+            with ui.row().classes("w-full items-center no-wrap gap-2"):
+                self.filter = (
+                    ui.input(placeholder="Filter models and reports")
+                    .props("dense clearable")
+                    .classes("grow")
+                    .mark(f"{marker}_plan_filter")
+                )
+                ui.button("Select all", on_click=self.select_all).props("flat dense no-caps").tooltip(
+                    "Every model shown (matching the filter)"
+                ).mark(f"{marker}_plan_all")
+                ui.button("Select none", on_click=self.select_none).props("flat dense no-caps").mark(
+                    f"{marker}_plan_none"
+                )
+            self.table = (
+                ui.table(
+                    columns=PLAN_COLUMNS,
+                    rows=[],
+                    row_key="id",
+                    selection="multiple",
+                    pagination={"rowsPerPage": 0},
+                    on_select=lambda _: self._show_count(),
+                )
+                .props("dense flat bordered hide-bottom")
+                .classes("w-full")
+                .style("max-height: 24rem")
+                .mark(f"{marker}_plan_table")
+            )
+            self.filter.bind_value_to(self.table, "filter")
+            self.skipped = ui.expansion("").props("dense").classes("w-full text-sm").mark(f"{marker}_plan_skipped")
+            with self.skipped:
+                self.skipped_list = ui.column().classes("gap-0")
+        self.box.visible = False
+
+    async def refresh(self) -> None:
+        """List the models (in a thread, with progress), then show them - none ticked."""
+        problem = self._check()
+        if problem:
+            ui.notify(problem, type="warning")
+            return
+        messages: queue.Queue = queue.Queue()
+
+        def show_progress() -> None:
+            while not messages.empty():
+                self.status.text = messages.get_nowait()
+
+        timer = ui.timer(0.2, show_progress)
+        self.list_button.props("loading")
+        jobs = None
+        try:
+            jobs = await run.io_bound(self._plan, messages.put)
+        except (ApiError, ValueError, OSError) as error:
+            ui.notify(f"Listing failed: {error}", type="negative", multi_line=True, timeout=15000)
+        except Exception as error:  # UI boundary: never let a click end without any message
+            logger.exception(f"Listing failed unexpectedly: {error}")
+            ui.notify(f"Listing failed: {error}", type="negative", multi_line=True, timeout=15000)
+        finally:
+            timer.cancel()
+            self.list_button.props(remove="loading")
+        if jobs is None:
+            self.status.text = ""
+            return
+        self.show(jobs)
+
+    def show(self, jobs: list[batch.BatchJob]) -> None:
+        self.jobs = jobs
+        self.table.rows = [
+            {
+                "id": index,
+                "model": job.model,
+                "reports": ", ".join(job.reports) or "-",
+                "where": job.source.partition(" · ")[2] or job.source,
+            }
+            for index, job in enumerate(jobs)
+            if job.prepare and not job.skip_reason
+        ]
+        self.table.selected = []
+        self.table.update()
+        unusable = [job for job in jobs if job.skip_reason or not job.prepare]
+        self.skipped.text = f"Cannot be documented ({len(unusable)})"
+        self.skipped.visible = bool(unusable)
+        self.skipped_list.clear()
+        with self.skipped_list:
+            for job in unusable:
+                reports = f" ({', '.join(job.reports)})" if job.reports and job.reports != [job.model] else ""
+                ui.label(f"{job.model}{reports}: {job.skip_reason or 'nothing to document'}").classes(
+                    "text-sm text-grey-7"
+                )
+        self.box.visible = True
+        self._show_count()
+
+    def _show_count(self) -> None:
+        total, chosen = len(self.table.rows), len(self.table.selected)
+        self.status.text = (
+            f"{chosen} of {total} model{'s' if total != 1 else ''} selected" if total else "No models found"
+        )
+
+    def select_all(self) -> None:
+        text = (self.filter.value or "").strip().lower()
+        chosen = {row["id"] for row in self.table.selected}
+        shown = [
+            row for row in self.table.rows
+            if not text or text in f"{row['model']} {row['reports']} {row['where']}".lower()
+        ]
+        self.table.selected = list(self.table.selected) + [r for r in shown if r["id"] not in chosen]
+        self._show_count()
+
+    def select_none(self) -> None:
+        self.table.selected = []
+        self._show_count()
+
+    def selected_jobs(self) -> list[batch.BatchJob]:
+        return [self.jobs[row["id"]] for row in self.table.selected if row["id"] < len(self.jobs)]
+
+    def clear(self) -> None:
+        """The scope changed: what was listed no longer applies."""
+        self.jobs = []
+        self.table.rows = []
+        self.table.selected = []
+        self.table.update()
+        self.box.visible = False
+        self.status.text = ""
+
+
 class FabricPanel:
     """Workspace -> report; the report's semantic model is downloaded with it. Or whole
-    workspaces: every model used by their reports, one documentation each (batch.py)."""
+    workspaces: the models used by their reports are listed, the ticked ones documented
+    (one documentation each, batch.py)."""
 
     def __init__(self, on_choose: Callable[[str], None]):
         self._on_choose = on_choose
@@ -143,8 +313,9 @@ class FabricPanel:
         one_report.bind_visibility_from(self.scope, "value", value="report")
         with ui.column().classes("w-full gap-1") as whole:
             ui.label(
-                "Every semantic model used by a report in these workspaces is documented - one "
-                "documentation per model, with all its reports - and added to the catalog."
+                "List the semantic models used by the reports in these workspaces, then tick the "
+                "ones to document - one documentation per model, with all its reports, added to "
+                "the catalog."
             ).classes("text-caption text-grey-7")
             self.batch_all_workspaces = (
                 ui.switch("Also find their reports in my other workspaces (slower)")
@@ -154,12 +325,23 @@ class FabricPanel:
                 )
                 .mark("fabric_batch_all_workspaces")
             )
+            self.picker = PlanPicker(
+                self.plan,
+                lambda: "" if self.workspaces.value else "Choose one or more workspaces first (Sign in / load).",
+                "fabric",
+            )
         whole.bind_visibility_from(self.scope, "value", value="workspace")
+        self.workspaces.on_value_change(lambda _: self.picker.clear())
+        self.batch_all_workspaces.on_value_change(lambda _: self.picker.clear())
 
     @property
     def is_batch(self) -> bool:
-        """Whole workspaces: plan() + batch.run_batch() instead of fetch()."""
+        """Whole workspaces: selected_jobs() + batch.run_batch() instead of fetch()."""
         return self.scope.value == "workspace"
+
+    def selected_jobs(self) -> list[batch.BatchJob]:
+        """The models ticked in the list (whole workspaces)."""
+        return self.picker.selected_jobs()
 
     def _get_client(self):
         if self._client is None:
@@ -199,7 +381,7 @@ class FabricPanel:
 
     def ready(self) -> bool:
         if self.is_batch:
-            return bool(self.workspaces.value)
+            return bool(self.selected_jobs())
         return bool(self.workspace.value and self.report.value)
 
     def plan(self, progress: Callable[[str], None]) -> list[batch.BatchJob]:
@@ -229,7 +411,9 @@ class FabricPanel:
 
 
 class DevOpsPanel:
-    """Organisation -> project -> repository -> branch -> report -> version (commit)."""
+    """Organisation -> project -> repository -> branch -> report -> version (commit). Or the
+    whole repository (optionally one folder): its models are listed, the ticked ones
+    documented (one documentation each, batch.py)."""
 
     def __init__(self, on_choose: Callable[[str], None]):
         self._on_choose = on_choose
@@ -240,6 +424,11 @@ class DevOpsPanel:
             "repository, at the latest version of a branch or at an older commit. Same sign-in "
             "as Fabric, or a personal access token in AZURE_DEVOPS_PAT."
         ).classes("text-caption text-grey-7")
+        self.scope = (
+            ui.toggle({"report": "One report", "repository": "Whole repository"}, value="report")
+            .props("dense unelevated")
+            .mark("devops_scope")
+        )
         with ui.row().classes("w-full items-center no-wrap gap-2"):
             self.org = (
                 ui.input(
@@ -273,17 +462,64 @@ class DevOpsPanel:
             self.report = (
                 ui.select({}, label="Report", with_input=True, on_change=self._report_changed)
                 .classes("w-2/3")
+                .bind_visibility_from(self.scope, "value", value="report")
                 .mark("devops_report")
             )
-        self.version = (
-            ui.select({"": "Latest on the branch"}, label="Version", value="")
-            .classes("w-full")
-            .mark("devops_version")
-        )
-        self.all_reports = (
-            ui.switch("All reports on its semantic model")
-            .tooltip(MODEL_MODE_HELP + " (reports in this repository at the chosen version)")
-            .mark("devops_all_reports")
+            self.folder = (
+                ui.input("Only this folder (optional)", placeholder="/Reports/Finance")
+                .classes("w-2/3")
+                .bind_visibility_from(self.scope, "value", value="repository")
+                .mark("devops_folder")
+            )
+        with ui.column().classes("w-full gap-2") as one_report:
+            self.version = (
+                ui.select({"": "Latest on the branch"}, label="Version", value="")
+                .classes("w-full")
+                .mark("devops_version")
+            )
+            self.all_reports = (
+                ui.switch("All reports on its semantic model")
+                .tooltip(MODEL_MODE_HELP + " (reports in this repository at the chosen version)")
+                .mark("devops_all_reports")
+            )
+        one_report.bind_visibility_from(self.scope, "value", value="report")
+        with ui.column().classes("w-full gap-1") as whole:
+            ui.label(
+                "List the semantic models used by the reports in this repository (latest on the "
+                "branch), then tick the ones to document - one documentation per model, with all "
+                "its reports, added to the catalog."
+            ).classes("text-caption text-grey-7")
+            self.picker = PlanPicker(
+                self.plan,
+                lambda: "" if self.project.value and self.repo.value and self.branch.value
+                else "Choose the project, repository and branch first (Sign in / load).",
+                "devops",
+            )
+        whole.bind_visibility_from(self.scope, "value", value="repository")
+        for element in (self.project, self.repo, self.branch, self.folder):
+            element.on_value_change(lambda _: self.picker.clear())
+
+    @property
+    def is_batch(self) -> bool:
+        """Whole repository: selected_jobs() + batch.run_batch() instead of fetch()."""
+        return self.scope.value == "repository"
+
+    def selected_jobs(self) -> list[batch.BatchJob]:
+        """The models ticked in the list (whole repository)."""
+        return self.picker.selected_jobs()
+
+    def plan(self, progress: Callable[[str], None]) -> list[batch.BatchJob]:
+        """Blocking: list the repository's reports (and their models), one job per model."""
+        return batch.plan_devops(
+            self._get_client(),
+            self.project.value,
+            self.repo.value,
+            self.branch.value,
+            "branch",
+            (self.folder.value or "").strip(),
+            output_root(),
+            make_fabric_client,  # reports bound to a published model
+            progress,
         )
 
     def _get_client(self):
@@ -370,6 +606,8 @@ class DevOpsPanel:
         return (self.project.value, self.repo.value, self.branch.value, self.report.value)[:depth]
 
     def ready(self) -> bool:
+        if self.is_batch:
+            return bool(self.selected_jobs())
         return bool(self.project.value and self.repo.value and self.branch.value and self.report.value)
 
     def fetch(self, progress: Callable[[str], None]) -> Fetched:

@@ -10,9 +10,11 @@ from pbixtractor.batch import (
     BatchJob,
     BatchSettings,
     Prepared,
+    plan_devops,
     plan_fabric,
     plan_files,
     run_batch,
+    select,
     summary,
 )
 from pbixtractor.catalog import list_entries
@@ -288,3 +290,101 @@ def test_cli_catalog_add_needs_files_or_a_workspace(tmp_path, capsys):
     with pytest.raises(SystemExit) as exit_info:
         main(["catalog", "add", str(tmp_path / "catalog")])
     assert exit_info.value.code == 2
+
+
+# ---------------------------------------------------------------- Azure DevOps repository
+
+
+def _devops_repo(tmp_path: Path) -> dict[str, bytes]:
+    """Sample + Sample Detail on /Reports/Sample.SemanticModel, Other on its own model, Live on
+    a published model, Broken pointing to a missing model, and a model without reports."""
+    from .test_devops import _repo_files, _with_sibling_reports
+
+    files = _with_sibling_reports(_repo_files(tmp_path))
+    model = {p: c for p, c in files.items() if p.startswith("/Reports/Sample.SemanticModel/")}
+    for folder in ("/Other/Other.SemanticModel", "/Models/Lonely.SemanticModel"):
+        files.update({p.replace("/Reports/Sample.SemanticModel", folder): c for p, c in model.items()})
+    for folder in ("/Reports/Sample.SemanticModel", "/Other/Other.SemanticModel", "/Models/Lonely.SemanticModel"):
+        files[f"{folder}/definition.pbism"] = b'{"version": "4.0"}'
+    report = {p: c for p, c in files.items() if p.startswith("/Reports/Sample.Report/")}
+    for name, reference in (
+        ("Live", {"byConnection": {"connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/"
+                                   f"Shared Models;semanticmodelid={SALES['id']}"}}),
+        ("Broken", {"byPath": {"path": "../Missing.SemanticModel"}}),
+    ):
+        files.update({p.replace("/Reports/Sample.Report", f"/{name}/{name}.Report"): c for p, c in report.items()})
+        files[f"/{name}/{name}.Report/definition.pbir"] = json.dumps({"datasetReference": reference}).encode()
+    return files
+
+
+def test_a_repository_plan_groups_reports_by_model_folder_or_published_model(tmp_path):
+    from .test_devops import FakeDevOps
+
+    jobs = plan_devops(FakeDevOps(_devops_repo(tmp_path)), "BI Team", "reports",
+                       make_client=lambda: BatchFabric(tmp_path), output_root=tmp_path / "out")
+    assert [(j.model, j.reports) for j in jobs if not j.skip_reason] == [
+        ("Other", ["Other"]),
+        ("Published model", ["Live"]),
+        ("Sample", ["Sample Detail", "Sample"]),
+    ]
+    assert jobs[0].source == "Azure DevOps · reports @ main"  # the default branch
+    assert {j.model: j.skip_reason for j in jobs if j.skip_reason} == {
+        "Broken": "Its model folder /Broken/Missing.SemanticModel is not in the repository",
+        "Lonely": "No report on this model in the repository",
+    }
+
+
+def test_a_repository_plan_can_be_limited_to_a_folder(tmp_path):
+    from .test_devops import FakeDevOps
+
+    jobs = plan_devops(FakeDevOps(_devops_repo(tmp_path)), "BI Team", "reports", "main", folder="/Reports")
+    assert [(j.model, j.reports, j.skip_reason) for j in jobs] == [("Sample", ["Sample"], "")]
+
+
+def test_a_repository_is_documented_model_by_model(tmp_path):
+    from .test_devops import FakeDevOps
+
+    jobs = plan_devops(FakeDevOps(_devops_repo(tmp_path)), "BI Team", "reports", "main",
+                       make_client=lambda: BatchFabric(tmp_path / "parts"), output_root=tmp_path / "out")
+    outcomes = run_batch(jobs, BatchSettings(tmp_path / "out", tmp_path / "catalog", **SETTINGS))
+    assert [(o.job.model, o.ok) for o in outcomes if o.status != "skipped"] == [
+        ("Other", True), ("Sales Model", True), ("Sample", True)  # the published model's real name
+    ]
+    doc = json.loads((tmp_path / "out" / "Sample" / "Sample.json").read_text(encoding="utf-8"))
+    assert [r["name"] for r in doc["reports"]] == ["Sample Detail", "Sample"]
+    assert (tmp_path / "out" / "Live" / "Live.xlsx").is_file()  # one report on it: its name
+    keys = {e["name"]: e["key"] for e in list_entries(tmp_path / "catalog")}
+    assert keys["Sample"].startswith("devops-bi-team-reports-") and len(keys) == 3
+
+
+def test_select_picks_models_by_model_or_report_name(tmp_path):
+    from .test_devops import FakeDevOps
+
+    jobs = plan_devops(FakeDevOps(_devops_repo(tmp_path)), "BI Team", "reports", "main",
+                       make_client=lambda: BatchFabric(tmp_path))
+    assert [j.model for j in select(jobs, ["oth*"])] == ["Other"]
+    assert [j.model for j in select(jobs, ["Sample Detail", "live"])] == ["Published model", "Sample"]
+    assert select(jobs, ["Broken", "Lonely"]) == []  # those cannot run
+
+
+def test_cli_catalog_add_devops_list_and_only(tmp_path, monkeypatch, capsys):
+    import pbixtractor.cli as cli
+
+    from .test_devops import FakeDevOps
+
+    client = FakeDevOps(_devops_repo(tmp_path))
+    monkeypatch.setattr(cli, "_devops_client", lambda args, org: client)
+    monkeypatch.setattr(cli, "_fabric_client", lambda args: BatchFabric(tmp_path / "parts"))
+    monkeypatch.chdir(tmp_path)
+    url = "https://dev.azure.com/contoso/BI%20Team/_git/reports"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["catalog", "add", "catalog", "--devops", url, "--list"])
+    assert exit_info.value.code == 0
+    printed = capsys.readouterr().out
+    assert "3 models found" in printed and "Sample [Azure DevOps · reports @ main]" in printed
+    assert not (tmp_path / "catalog").exists()  # nothing documented
+    with pytest.raises(SystemExit) as exit_info:
+        main(["catalog", "add", "catalog", "--devops", url, "--only", "Oth*",
+              "--no-tabular-editor", "--no-service-statistics", "-q"])
+    assert exit_info.value.code == 0
+    assert [e["name"] for e in list_entries(tmp_path / "catalog")] == ["Other"]
