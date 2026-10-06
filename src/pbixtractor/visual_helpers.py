@@ -4,7 +4,7 @@ import re
 from typing import Optional, Tuple
 
 # Custom (imported) visuals: "<name>" + a GUID, e.g. "PowerApps_PBI_CV_C29F1DCC_81F5_4973_94AD_
-# 0517D44CC06A" or "castellumCharts9A467DB81DD645A3AF0FB12DA8C0231E"; older marketplace visuals
+# 0517D44CC06A" or "contosoCharts0F1E2D3C4B5A69788796A5B4C3D2E1F0"; older marketplace visuals
 # use a 13-digit timestamp instead ("ChicletSlicer1448559807354")
 _CUSTOM_VISUAL = re.compile(
     r"^(?P<name>[A-Za-z][A-Za-z0-9]*?)(?:(?:_PBI_CV)?_?"

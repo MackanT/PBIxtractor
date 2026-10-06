@@ -183,3 +183,7 @@ catalog/
 Input/
 PBIxtractor/PBIxtractor/
 *.bat
+
+# Local notes: this PC's real reports/paths and manual test checklist (the repo is public)
+CLAUDE.local.md
+MANUAL_TESTS.md
