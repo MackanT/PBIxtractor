@@ -30,6 +30,10 @@ Examples:
                                                   copied from the browser; add --ref)
   pbixtractor devops list myorg                   Projects (then: myorg Proj, myorg Proj Repo)
   pbixtractor devops fetch "<url>" --ref commit:a1b2c3d   Download an older version
+  pbixtractor catalog add output/_catalog --fabric-workspace "Sales WS"
+                                                  Document every model of a workspace into
+                                                  one searchable catalog
+  pbixtractor catalog add output/_catalog A.pbix B.pbix C.pbix   One documentation per model
 """
 
 
@@ -177,12 +181,50 @@ def build_parser() -> argparse.ArgumentParser:
         description="Manage a catalog folder (add models with: extract ... --catalog FOLDER).",
     )
     catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
+    catalog_add = catalog_commands.add_parser(
+        "add",
+        help="document many models at once: whole Fabric workspaces, or several report files",
+        description="Document every semantic model used by the given reports (or by the reports "
+        "in whole Fabric workspaces) - one documentation per model, all added to the catalog. "
+        "Reports on the same model are documented together.",
+    )
     catalog_list = catalog_commands.add_parser("list", help="the models in a catalog")
     catalog_remove = catalog_commands.add_parser("remove", help="remove a model (by its key)")
     catalog_rebuild = catalog_commands.add_parser("rebuild", help="regenerate catalog.html")
-    for sub in (catalog_list, catalog_remove, catalog_rebuild):
+    for sub in (catalog_add, catalog_list, catalog_remove, catalog_rebuild):
         sub.add_argument("folder", type=Path, help="the catalog folder")
     catalog_remove.add_argument("key", help="entry key, as shown by 'catalog list'")
+    catalog_add.add_argument(
+        "files",
+        type=Path,
+        nargs="*",
+        metavar="FILE",
+        help=".pbix / .pbip / .Report reports, and .bim models (one .bim: used for all the "
+        "reports; several: each report uses the one named like it)",
+    )
+    catalog_add.add_argument(
+        "--fabric-workspace",
+        action="append",
+        metavar="WORKSPACE",
+        help="document every model used by a report in this workspace (name or id; repeat for "
+        "more workspaces). Needs Contributor access to download",
+    )
+    catalog_add.add_argument(
+        "--all-workspaces",
+        action="store_true",
+        help="with --fabric-workspace: also find the models' reports in every other workspace "
+        "you can access (slower; makes 'unused' complete)",
+    )
+    catalog_add.add_argument(
+        "-o", "--output", type=Path, help="root of the models' output folders (default: output)"
+    )
+    catalog_add.add_argument("--no-tabular-editor", action="store_true",
+                             help="skip the Tabular Editor analysis (faster)")
+    catalog_add.add_argument("--no-service-statistics", action="store_true",
+                             help="do not read row counts / distinct values from the Power BI service")
+    catalog_add.add_argument("--no-log-file", action="store_true", help="do not write logs/*.txt")
+    catalog_add.add_argument("--tenant", help="Entra tenant id for the Fabric sign-in")
+    catalog_add.add_argument("-q", "--quiet", action="store_true", help="only print the result")
 
     web = commands.add_parser("web", help="start the web UI (default)")
     web.add_argument("--port", type=int, default=8081, help="port (default: 8081)")
@@ -325,10 +367,74 @@ def run_devops(args: argparse.Namespace) -> int:
         return 1
 
 
+def run_catalog_add(args: argparse.Namespace) -> int:
+    """Handle `pbixtractor catalog add`: plan, then document every model (exit 1 if any failed)."""
+    from .azure_auth import ApiError
+    from .batch import BatchSettings, plan_fabric, plan_files, run_batch, summary
+
+    if bool(args.files) == bool(args.fabric_workspace):
+        print("Give report files or --fabric-workspace (not both).", file=sys.stderr)
+        return 2
+    output_root = args.output or Path("output")
+    say = _progress(args)
+    try:
+        if args.fabric_workspace:
+            jobs = plan_fabric(
+                _fabric_client(args), args.fabric_workspace, args.all_workspaces, output_root, say
+            )
+        else:
+            models = [f for f in args.files if f.suffix.lower() == ".bim"]
+            reports = [f for f in args.files if f.suffix.lower() != ".bim"]
+            missing = [str(f) for f in args.files if not f.exists()]
+            if missing or not reports:
+                print(f"Not found: {', '.join(missing)}" if missing else "No report files given.",
+                      file=sys.stderr)
+                return 2
+            jobs = plan_files(reports, models, make_client=lambda: _fabric_client(args),
+                              output_root=output_root)
+    except (ApiError, ValueError, OSError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    if not args.quiet:
+        runnable = sum(1 for job in jobs if not job.skip_reason)
+        print(f"{runnable} model{'s' if runnable != 1 else ''} to document:")
+        for job in jobs:
+            reports = ", ".join(job.reports) or "-"
+            print(f"  {job.model} [{job.source}] - reports: {reports}"
+                  + (f" - skipped: {job.skip_reason}" if job.skip_reason else ""))
+
+    last = {"step": None}
+
+    def progress(step: str, fraction: float) -> None:
+        if not args.quiet and step != last["step"]:
+            last["step"] = step
+            print(f"[{fraction:4.0%}] {step}")
+
+    outcomes = run_batch(
+        jobs,
+        BatchSettings(
+            output_root=output_root,
+            catalog_dir=args.folder,
+            tabular_editor_analysis=not args.no_tabular_editor,
+            service_statistics=not args.no_service_statistics,
+            write_log_file=not args.no_log_file,
+        ),
+        progress=progress,
+    )
+    print(f"\n{summary(outcomes)}. Catalog: {Path(args.folder) / 'catalog.html'}")
+    for outcome in outcomes:
+        detail = str(outcome.options.output_dir) if outcome.ok and outcome.options else outcome.message
+        print(f"  {outcome.status:8} {outcome.job.model}: {detail}")
+    return 1 if any(o.status == "error" for o in outcomes) else 0
+
+
 def run_catalog(args: argparse.Namespace) -> int:
-    """Handle `pbixtractor catalog list|remove|rebuild`. Returns the process exit code."""
+    """Handle `pbixtractor catalog add|list|remove|rebuild`. Returns the process exit code."""
     from .catalog import list_entries, rebuild_catalog, remove_from_catalog
 
+    if args.catalog_command == "add":
+        return run_catalog_add(args)
     if args.catalog_command == "list":
         entries = list_entries(args.folder)
         for entry in entries:

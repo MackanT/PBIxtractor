@@ -53,10 +53,12 @@ pbixtractor
 pbixtractor web --port 8090 --no-browser
 ```
 
-Drop a report (`.pbix`) on the page or click + to add it - drop several reports with their one
-`.bim` to document them together. A PBIP project (`.pbip` or a `.Report` folder) is chosen under
-"Use files on this PC instead"; or pick a report from a Fabric workspace or an Azure DevOps
-repository. The model is found automatically:
+Drop a report (`.pbix`) on the page or click + to add it - several reports with their one
+`.bim` are documented together; reports on different models get one documentation each, all
+added to the catalog. A PBIP project (`.pbip` or a `.Report` folder) is chosen under "Use files
+on this PC instead"; or pick a report from a Fabric workspace or an Azure DevOps repository.
+Fabric's "Whole workspaces" documents every semantic model used in the chosen workspaces (one
+documentation per model, with all its reports) into one searchable catalog. The model is found automatically:
 the model inside the `.pbix` itself (no `.bim` needed), else `<name>.bim` next to the report, or a
 PBIP project's semantic model as `model.bim` or TMDL
 (the `definition` folder newer Power BI Desktop versions write). After a run the
@@ -81,6 +83,8 @@ pbixtractor devops fetch "<url>" --ref commit:a1b2c3d       # only download an o
 
 # Catalog: one searchable page over every documented model
 pbixtractor extract Sales.pbix --catalog output\_catalog
+pbixtractor catalog add output\_catalog --fabric-workspace "Sales WS"  # every model in a workspace
+pbixtractor catalog add output\_catalog A.pbix B.pbix C.pbix            # one documentation per model
 pbixtractor catalog list output\_catalog
 ```
 
@@ -170,7 +174,7 @@ uv run --frozen ruff check src/ tests/
 - ✅ Catalog: search measures, DAX and usage across models
 - ✅ Bookmarks: the filters and slicer selections they apply (changed ones marked)
 - 🔄 Source database lineage (views → base tables)
-- 🔄 Documenting a whole workspace into the catalog
+- ✅ Whole Fabric workspaces (or many files) documented into the catalog in one go
 
 ## Known Issues
 

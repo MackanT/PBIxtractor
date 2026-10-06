@@ -505,21 +505,95 @@ def fetch_report(
     for other_ws, other in found:
         if other["id"] == rep["id"]:
             continue
-        name = safe_name(other["displayName"])
-        if f"{name}.report".lower() in used_names:  # same name in another workspace
-            name = safe_name(f"{other['displayName']} ({other_ws['displayName']})")
-        used_names.add(f"{name}.report".lower())
-        folder = destination / f"{name}.Report"
         try:
-            other_pbir = _download_report(client, other_ws, other, folder, say)
+            folder = _fetch_bound_report(
+                client, other_ws, other, destination, used_names, model_ws, model, model_folder, say
+            )
         except FabricError as error:
             # Reported as a warning of the documentation run (ExtractionOptions.not_included)
             fetched.skipped.append(f"{other['displayName']} ({other_ws['displayName']}): {error}")
             continue
-        _bind_to_local_model(folder, other_pbir, model_folder)
-        _write_source(folder, other_ws, other, model_ws, model)
         fetched.report_folders.append(folder)
     logger.debug(
         f"Fetched {len(fetched.report_folders)} report(s) and {model['displayName']} to {destination}"
     )
     return fetched
+
+
+def _fetch_bound_report(
+    client: FabricClient,
+    ws: dict,
+    rep: dict,
+    destination: Path,
+    used_names: set[str],
+    model_ws: dict,
+    model: dict,
+    model_folder: Path,
+    say,
+) -> Path:
+    """Download a report on an already downloaded model into <destination>/<report>.Report
+    (" (<workspace>)" added when another report there has the same name), bound to it."""
+    name = safe_name(rep["displayName"])
+    if f"{name}.report".lower() in used_names:  # same name in another workspace
+        name = safe_name(f"{rep['displayName']} ({ws['displayName']})")
+    used_names.add(f"{name}.report".lower())
+    folder = Path(destination) / f"{name}.Report"
+    pbir = _download_report(client, ws, rep, folder, say)
+    _bind_to_local_model(folder, pbir, model_folder)
+    _write_source(folder, ws, rep, model_ws, model)
+    return folder
+
+
+def fetch_model_reports(
+    client: FabricClient,
+    model_ws: dict,
+    model: dict,
+    reports: list[tuple[dict, dict]],
+    destination: Path,
+    progress: Optional[Callable[[str], None]] = None,
+) -> FetchedReport:
+    """
+    Download a semantic model and the given reports on it as one PBIP project (batch.py: one
+    model of a whole workspace). A report that cannot be downloaded is listed in `skipped`.
+
+    Args:
+        client: FabricClient
+        model_ws: The model's workspace ({"id", "displayName"})
+        model: The model ({"id", "displayName"})
+        reports: [(workspace, report as {"id", "displayName"})], all bound to the model
+        destination: Folder for <model>.SemanticModel and the <report>.Report folders
+        progress: Called with a short status text per step
+
+    Raises:
+        FabricError: The model, or every one of its reports, could not be downloaded
+    """
+    say = progress or (lambda text: None)
+    model_folder = download_semantic_model(client, model_ws, model, destination, say)
+    folders: list[Path] = []
+    downloaded: list[tuple[dict, dict]] = []
+    skipped: list[str] = []
+    used_names: set[str] = set()
+    for ws, rep in reports:
+        try:
+            folders.append(
+                _fetch_bound_report(client, ws, rep, destination, used_names, model_ws, model, model_folder, say)
+            )
+            downloaded.append((ws, rep))
+        except FabricError as error:
+            skipped.append(f"{rep['displayName']} ({ws['displayName']}): {error}")
+    if not folders:
+        raise FabricError(
+            f"None of the reports on {model['displayName']} could be downloaded: " + "; ".join(skipped)
+        )
+    first_ws, first = downloaded[0]
+    return FetchedReport(
+        workspace=first_ws["displayName"],
+        report=first["displayName"],
+        model=model["displayName"],
+        report_folder=folders[0],
+        model_path=model_folder,
+        model_id=model["id"],
+        model_workspace_id=model_ws["id"],
+        report_folders=folders,
+        skipped=skipped,
+    )

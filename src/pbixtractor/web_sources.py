@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 from nicegui import run, ui
 
-from . import devops, fabric
+from . import batch, devops, fabric
 from .azure_auth import ApiError
 from .pipeline import model_name
 from .service_stats import ServiceModel
@@ -88,7 +88,8 @@ def _set_options(select: ui.select, options: dict, value=None) -> None:
 
 
 class FabricPanel:
-    """Workspace -> report; the report's semantic model is downloaded with it."""
+    """Workspace -> report; the report's semantic model is downloaded with it. Or whole
+    workspaces: every model used by their reports, one documentation each (batch.py)."""
 
     def __init__(self, on_choose: Callable[[str], None]):
         self._on_choose = on_choose
@@ -99,32 +100,66 @@ class FabricPanel:
             "Contributor (or higher) access; reports with an encrypting sensitivity label cannot "
             "be downloaded - use Azure DevOps for those."
         ).classes("text-caption text-grey-7")
+        self.scope = (
+            ui.toggle({"report": "One report", "workspace": "Whole workspaces"}, value="report")
+            .props("dense unelevated")
+            .mark("fabric_scope")
+        )
         with ui.row().classes("w-full items-center no-wrap gap-2"):
             self.workspace = (
                 ui.select({}, label="Workspace", with_input=True, on_change=self._workspace_changed)
                 .classes("grow")
+                .bind_visibility_from(self.scope, "value", value="report")
                 .mark("fabric_workspace")
+            )
+            self.workspaces = (
+                ui.select({}, label="Workspaces", multiple=True, with_input=True, value=[])
+                .props("use-chips")
+                .classes("grow")
+                .bind_visibility_from(self.scope, "value", value="workspace")
+                .mark("fabric_workspaces")
             )
             ui.button("Sign in / load", icon="login", on_click=self.load_workspaces).props(
                 "flat"
             ).mark("fabric_load")
-        self.report = (
-            ui.select({}, label="Report", with_input=True, on_change=self._report_changed)
-            .classes("w-full")
-            .mark("fabric_report")
-        )
-        with ui.row().classes("items-center gap-4"):
-            self.all_reports = (
-                ui.switch("All reports on its semantic model").tooltip(MODEL_MODE_HELP).mark(
-                    "fabric_all_reports"
+        with ui.column().classes("w-full gap-2") as one_report:
+            self.report = (
+                ui.select({}, label="Report", with_input=True, on_change=self._report_changed)
+                .classes("w-full")
+                .mark("fabric_report")
+            )
+            with ui.row().classes("items-center gap-4"):
+                self.all_reports = (
+                    ui.switch("All reports on its semantic model").tooltip(MODEL_MODE_HELP).mark(
+                        "fabric_all_reports"
+                    )
                 )
+                self.all_workspaces = (
+                    ui.switch("Search all my workspaces (slower)")
+                    .tooltip("Default: only the report's and the model's workspace")
+                    .bind_visibility_from(self.all_reports, "value")
+                    .mark("fabric_all_workspaces")
+                )
+        one_report.bind_visibility_from(self.scope, "value", value="report")
+        with ui.column().classes("w-full gap-1") as whole:
+            ui.label(
+                "Every semantic model used by a report in these workspaces is documented - one "
+                "documentation per model, with all its reports - and added to the catalog."
+            ).classes("text-caption text-grey-7")
+            self.batch_all_workspaces = (
+                ui.switch("Also find their reports in my other workspaces (slower)")
+                .tooltip(
+                    "A model's reports in workspaces you did not choose are documented with it "
+                    "too, so 'unused' is complete"
+                )
+                .mark("fabric_batch_all_workspaces")
             )
-            self.all_workspaces = (
-                ui.switch("Search all my workspaces (slower)")
-                .tooltip("Default: only the report's and the model's workspace")
-                .bind_visibility_from(self.all_reports, "value")
-                .mark("fabric_all_workspaces")
-            )
+        whole.bind_visibility_from(self.scope, "value", value="workspace")
+
+    @property
+    def is_batch(self) -> bool:
+        """Whole workspaces: plan() + batch.run_batch() instead of fetch()."""
+        return self.scope.value == "workspace"
 
     def _get_client(self):
         if self._client is None:
@@ -139,6 +174,9 @@ class FabricPanel:
             w["id"]: w["displayName"] for w in sorted(items, key=lambda w: w["displayName"].lower())
         }
         _set_options(self.workspace, self._workspaces, stored_choices().get("fabric_workspace"))
+        self.workspaces.set_options(
+            self._workspaces, value=[w for w in (self.workspaces.value or []) if w in self._workspaces]
+        )
         if not items:
             ui.notify("No workspaces found for this account.", type="warning")
 
@@ -160,7 +198,19 @@ class FabricPanel:
             self._on_choose(self.report.options[self.report.value])
 
     def ready(self) -> bool:
+        if self.is_batch:
+            return bool(self.workspaces.value)
         return bool(self.workspace.value and self.report.value)
+
+    def plan(self, progress: Callable[[str], None]) -> list[batch.BatchJob]:
+        """Blocking: list the chosen workspaces' reports and models, one job per model."""
+        return batch.plan_fabric(
+            self._get_client(),
+            list(self.workspaces.value),
+            self.batch_all_workspaces.value,
+            output_root(),
+            progress,
+        )
 
     def fetch(self, progress: Callable[[str], None]) -> Fetched:
         workspace = self._workspaces.get(self.workspace.value, self.workspace.value)

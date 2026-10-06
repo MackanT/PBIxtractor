@@ -15,11 +15,13 @@ output files can be downloaded. The extraction itself runs in a background threa
 """
 
 import asyncio
+import json
 import logging
 import os
 import queue
 import re
 import secrets
+import threading
 import time
 import webbrowser
 from collections import Counter
@@ -30,11 +32,11 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from nicegui import app, background_tasks, events, run, ui
 
-from . import __version__, fabric, web_config, web_sources
+from . import __version__, batch, fabric, web_config, web_sources
 from .azure_auth import ApiError
 from .data import DATA_DIR
 from .live_model import find_local_instances
-from .pbix_model import LiveConnection, has_embedded_model, live_connection
+from .pbix_model import LiveConnection, live_connection
 from .pipeline import (
     REPORT_SUFFIXES,
     ExtractionOptions,
@@ -48,7 +50,7 @@ from .service_stats import ServiceModel
 from .tabular_editor import add_tabular_editor_location, find_tabular_editor
 from .theme import apply_theme, card_header, page_title, serve_fonts, stat_tile
 from .web_config import output_root, stored_choices, url
-from .web_sources import DevOpsPanel, FabricPanel, Fetched
+from .web_sources import DevOpsPanel, FabricPanel
 
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
 _OUTPUT_DIRS: dict[str, Path] = {}
@@ -543,49 +545,116 @@ class _PublishedModelDownload:
         )
 
 
-def _shared_model(
-    reports: list[Path], chosen: Optional[Path], models_dropped: int
-) -> Optional[Path]:
-    """The one model several dropped reports are documented with, or None (after telling the
-    user why): one model is documented at a time."""
-    if models_dropped > 1:
-        ui.notify(
-            "Several models were dropped. One model is documented at a time: remove the reports "
-            "of the other model(s), or drop them separately.",
-            type="warning",
-            multi_line=True,
+_BATCH_STATUS = {  # (icon, colour, text) per JobOutcome.status; None = not started
+    None: ("schedule", "grey", "Waiting"),
+    "running": ("autorenew", "primary", "Running…"),
+    "success": ("check_circle", "positive", "Done"),
+    "warnings": ("warning", "warning", "Done with warnings"),
+    "error": ("error", "negative", "Failed"),
+    "skipped": ("block", "grey", "Skipped"),
+}
+
+
+def _batch_results(container: ui.element, jobs: list[batch.BatchJob], catalog_dir: Path):
+    """
+    A batch's results in `container`: a summary and one row per model, live while it runs; a
+    documented model's Details show its full result (as a single run's) below the list.
+
+    Returns:
+        (update(index, outcome), finish()): call as the batch advances, and once it is done
+    """
+    outcomes: list[Optional[batch.JobOutcome]] = [None] * len(jobs)
+    state = {"finished": False}
+
+    def details(outcome: batch.JobOutcome) -> None:
+        try:
+            report_json = json.loads(Path(outcome.files["json"]).read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError) as error:
+            ui.notify(f"Cannot show {outcome.job.model}: {error}", type="warning")
+            return
+        result = ExtractionResult(
+            outcome.status,
+            outcome.message,
+            files=outcome.files,
+            logs=outcome.logs,
+            report_json=report_json,
+            seconds=outcome.seconds,
         )
-        return None
-    if chosen is not None:
-        return chosen  # a dropped or chosen .bim: all the reports use it
-    found = {r: find_model_for_report(r) for r in reports}
-    missing = [r.name for r, m in found.items() if m is None]
-    if missing:
-        ui.notify(
-            f"No model found for {', '.join(missing)} - drop its .bim together with the reports.",
-            type="warning",
-            multi_line=True,
-        )
-        return None
-    if all(model == report for report, model in found.items()):
-        ui.notify(
-            "Each of these .pbix files carries its own model, so they are separate models. One "
-            "model is documented at a time: drop them one by one (or with the one .bim they share).",
-            type="warning",
-            multi_line=True,
-        )
-        return None
-    if len(set(found.values())) > 1:
-        ui.notify(
-            "These reports use different models ("
-            + ", ".join(sorted({m.name for m in found.values()}))
-            + "). One model is documented at a time: remove the other reports, or drop them "
-            "separately.",
-            type="warning",
-            multi_line=True,
-        )
-        return None
-    return next(iter(found.values()))
+        _render_result(detail, result, outcome.options)
+
+    def open_lineage(outcome: batch.JobOutcome) -> None:
+        token = secrets.token_urlsafe(8)
+        _OUTPUT_DIRS[token] = outcome.options.output_dir
+        ui.navigate.to(_themed(f"/files/{token}/{Path(outcome.files['lineage']).name}"), new_tab=True)
+
+    @ui.refreshable
+    def view() -> None:
+        settled = [o for o in outcomes if o is not None and o.status != "running"]
+        runnable = sum(1 for job in jobs if job.prepare and not job.skip_reason)
+        with ui.card().classes("w-full").mark("batch_results"):
+            with ui.row().classes("w-full items-center"):
+                if not state["finished"]:
+                    ui.spinner(size="md", color="primary")
+                    ui.label(f"Documenting {runnable} model{'s' if runnable != 1 else ''}").classes("text-h6")
+                    ui.label(f"{len(settled)} of {len(jobs)} done").classes("text-grey-7")
+                else:
+                    final = [o for o in outcomes if o is not None]
+                    documented = any(o.ok for o in final)
+                    failed = any(o.status == "error" for o in final)
+                    icon, colour = (
+                        ("check_circle", "positive") if documented and not failed
+                        else ("warning", "warning") if documented
+                        else ("error", "negative")
+                    )
+                    ui.icon(icon, color=colour, size="md")
+                    ui.label("Done" if documented else "Nothing documented").classes("text-h6")
+                    ui.label(batch.summary(final)).classes("text-grey-7").mark("batch_summary")
+                    ui.space()
+                    if documented and (catalog_dir / "catalog.html").is_file():
+                        ui.button(
+                            "Open catalog",
+                            icon="menu_book",
+                            on_click=lambda: ui.navigate.to(_themed("/catalog/catalog.html"), new_tab=True),
+                        ).props("outline color=primary").mark("batch_catalog")
+            for index, job in enumerate(jobs):
+                outcome = outcomes[index]
+                icon, colour, text = _BATCH_STATUS[outcome.status if outcome else None]
+                if index:
+                    ui.separator()
+                with ui.row().classes("w-full items-center no-wrap gap-3").mark("batch_row"):
+                    ui.icon(icon, color=colour).classes("flex-none")
+                    with ui.column().classes("grow gap-0 min-w-0"):
+                        ui.label(job.model).classes("font-medium break-words")
+                        ui.label(f"{', '.join(job.reports) or 'No report'} · {job.source}").classes(
+                            "text-xs text-grey-7 break-words"
+                        )
+                    message = outcome.message if outcome and outcome.status in ("error", "skipped") else text
+                    ui.label(message).classes(f"text-sm text-{colour} break-words max-w-[45%]")
+                    if outcome is not None and outcome.ok:
+                        ui.button("Details", icon="visibility", on_click=lambda o=outcome: details(o)).props(
+                            "flat dense no-caps"
+                        ).mark("batch_details")
+                        if outcome.files.get("lineage"):
+                            ui.button(icon="open_in_new", on_click=lambda o=outcome: open_lineage(o)).props(
+                                "flat dense round"
+                            ).tooltip("Lineage viewer (new tab)")
+
+    container.clear()
+    with container:
+        view()
+        detail = ui.column().classes("w-full gap-3").mark("batch_detail")
+
+    def update(index: int, outcome: batch.JobOutcome) -> None:
+        outcomes[index] = outcome
+        view.refresh()
+
+    def finish() -> None:
+        state["finished"] = True
+        if (catalog_dir / "catalog.html").is_file():
+            _CATALOG["dir"] = catalog_dir  # served at /catalog/
+        view.refresh()
+
+    return update, finish
 
 
 def _mode() -> str:
@@ -878,6 +947,24 @@ def build_page(
                             report_input.value = ""
                         selection.refresh()
 
+                    def chosen_model() -> Optional[Path]:
+                        """A model for all the dropped reports: typed/picked, or the one dropped
+                        .bim (not the model found for the first report, nor one of several .bim)."""
+                        value = (model_input.value or "").strip('"')
+                        if value and value != auto_model["value"] and len(drop["models"]) <= 1:
+                            return Path(value)
+                        return None
+
+                    def drop_plan(reports: list[Path]) -> list[batch.BatchJob]:
+                        """The dropped reports grouped by model: one documentation per model."""
+                        return batch.plan_files(
+                            reports,
+                            drop["models"],
+                            chosen_model(),
+                            web_sources.make_fabric_client,  # only called when it runs
+                            output_root(),
+                        )
+
                     @ui.refreshable
                     def selection() -> None:
                         """What will be documented: the report(s), and where the model comes from."""
@@ -886,12 +973,11 @@ def build_page(
                             return
                         dropped = bool(drop["reports"]) and value == str(drop["reports"][0])
                         reports = list(drop["reports"]) if dropped else [Path(value)]
-                        # Said right away, not only when the run is refused: reports that each
-                        # carry their own model (and no shared .bim) are separate models
-                        separate = len(reports) > 1 and (
-                            len(drop["models"]) > 1
-                            or (not drop["models"] and all(has_embedded_model(r) for r in reports))
-                        )
+                        # Said right away, not only when the run starts: reports on different
+                        # models (each .pbix its own, or each with its own .bim) are documented
+                        # separately - one documentation per model, all added to the catalog
+                        plan = drop_plan(reports) if len(reports) > 1 else []
+                        separate = len(plan) > 1
                         title = "Report:" if len(reports) == 1 else (
                             "Dropped:" if separate else "Documented together:"
                         )
@@ -907,17 +993,22 @@ def build_page(
                         if not separate:
                             text, tone = _model_status(reports[0], (model_input.value or "").strip('"'))
                             ui.label(f"Model: {text}").classes(f"text-sm text-{tone}").mark("model_status")
-                        if len(drop["models"]) > 1:
-                            ui.label(
-                                "Several models were dropped - one model is documented at a time: "
-                                "remove the other reports (×)"
-                            ).classes("text-sm text-warning").mark("separate_models")
-                        elif separate:
-                            ui.label(
-                                "Each of these .pbix files has its own model, so they are separate "
-                                "models - one is documented at a time: remove the others (×), or "
-                                "drop the .bim they share"
-                            ).classes("text-sm text-warning").mark("separate_models")
+                        if separate:
+                            models = sum(1 for job in plan if not job.skip_reason)
+                            unusable = len(plan) - models
+                            if models > 1:
+                                text = (f"{models} models: each is documented separately, and all "
+                                        "are added to the catalog")
+                            elif models == 1:
+                                text = "1 model: documented and added to the catalog"
+                            else:
+                                text = ("No model found for these reports - drop each one's .bim "
+                                        "with it (named like the report), or the one .bim they share")
+                            if models and unusable:
+                                text += f" - {unusable} without a model or report (skipped)"
+                            ui.label(text).classes(
+                                f"text-sm text-{'grey-7' if models else 'warning'}"
+                            ).mark("separate_models")
 
                     selection()
                     paths.move(local_box)  # after the drop zone: the exception, not the way in
@@ -1066,12 +1157,26 @@ def build_page(
                     ui.timer(0.05, lambda: refresh_desktop(), once=True)  # after the page is sent
 
         # ---------------- run ----------------
+        batch_stop: dict[str, Optional[threading.Event]] = {"event": None}  # the running batch's
+
+        def stop_batch() -> None:
+            if batch_stop["event"] is not None:
+                batch_stop["event"].set()
+                stop_button.disable()
+                ui.notify("Stopping after the model that is being documented now.")
+
         with ui.card().classes("w-full"):
             with ui.row().classes("w-full items-center"):
                 # Copper: the page's one primary action
                 run_button = ui.button("Create documentation", icon="play_arrow").props(
                     "unelevated color=secondary"
                 )
+                stop_button = (
+                    ui.button("Stop after this model", icon="stop", on_click=stop_batch)
+                    .props("flat color=negative no-caps")
+                    .mark("batch_stop")
+                )
+                stop_button.visible = False
                 step_label = ui.label("").classes("text-grey-7")
             progress_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
             progress_bar.visible = False
@@ -1105,13 +1210,18 @@ def build_page(
     auto_output = {"value": None}  # the output folder on_report_change suggested last
     report_input.on_value_change(lambda _: on_report_change())
 
-    async def download_remote_report(panel) -> Optional[Fetched]:
-        """Fetch the chosen Fabric/DevOps report; None on error.
+    async def download_remote_report(
+        fetch: Callable[[Callable[[str], None]], object],
+        start: str = "Downloading the report…",
+        failed: str = "Download failed",
+    ):
+        """Run a blocking download (or listing) - e.g. a panel's fetch - with its progress
+        texts; None on error.
 
         The download has no measurable fraction (Fabric prepares the definition in the
         background), so the bar is indeterminate and the label shows the current step.
         """
-        step_label.text = "Downloading the report…"
+        step_label.text = start
         messages: queue.Queue = queue.Queue()
 
         def show_progress() -> None:
@@ -1123,13 +1233,13 @@ def build_page(
         progress_bar.props("indeterminate")
         progress_bar.visible = True
         try:
-            return await run.io_bound(panel.fetch, messages.put)
+            return await run.io_bound(fetch, messages.put)
         except (ApiError, ValueError, OSError) as error:
-            ui.notify(f"Download failed: {error}", type="negative", multi_line=True, timeout=20000)
+            ui.notify(f"{failed}: {error}", type="negative", multi_line=True, timeout=20000)
             return None
         except Exception as error:  # UI boundary: never let a click end without any message
-            logging.getLogger("pbixtractor").exception(f"Download failed unexpectedly: {error}")
-            ui.notify(f"Download failed: {error}", type="negative", multi_line=True, timeout=20000)
+            logging.getLogger("pbixtractor").exception(f"{failed} unexpectedly: {error}")
+            ui.notify(f"{failed}: {error}", type="negative", multi_line=True, timeout=20000)
             return None
         finally:
             timer.cancel()
@@ -1151,14 +1261,99 @@ def build_page(
         finally:
             run_button.enable()
 
+    async def run_batch(jobs: list[batch.BatchJob]) -> None:
+        """Document each model of a plan in turn (batch.run_batch), all added to the catalog,
+        with one live row per model."""
+        catalog_dir = Path(catalog_input.value or default_catalog_dir())
+        settings = batch.BatchSettings(
+            output_root=output_root(),
+            catalog_dir=catalog_dir,
+            tabular_editor_analysis=te_analysis.value,
+            tabular_editor_tsv=te_tsv.value,
+            service_statistics=service_stats.value,
+            write_log_file=log_file.value,
+            description_tag=description_tag.value or ExtractionOptions.description_tag,
+        )
+        if catalog_input.value and local:  # a server path: only remembered when chosen locally
+            stored_choices()["catalog_dir"] = catalog_input.value
+        update, finish = _batch_results(result_box, jobs, catalog_dir)
+        events: queue.Queue = queue.Queue()
+        stop = batch_stop["event"] = threading.Event()
+
+        def drain() -> None:
+            while not events.empty():
+                kind, first, second = events.get_nowait()
+                if kind == "progress":
+                    step_label.text = first
+                    progress_bar.value = second
+                elif kind == "outcome":
+                    update(first, second)
+                else:
+                    log_view.push(f"{first}: {second}")
+                    log_view.visible = True
+
+        run_button.disable()
+        log_view.clear()
+        log_view.visible = False
+        progress_bar.visible = True
+        progress_bar.value = 0
+        stop_button.visible = True
+        stop_button.enable()
+        timer = ui.timer(0.2, drain)
+        outcomes: list[batch.JobOutcome] = []
+        try:
+            outcomes = await run.io_bound(
+                batch.run_batch,
+                jobs,
+                settings,
+                lambda step, fraction: events.put(("progress", step, fraction)),
+                lambda level, message: events.put(("log", level, message)),
+                lambda index, outcome: events.put(("outcome", index, outcome)),
+                stop.is_set,
+            )
+        except Exception as error:  # UI boundary: never let a click end without any message
+            logging.getLogger("pbixtractor").exception(f"The batch failed: {error}")
+            ui.notify(f"The batch failed: {error}", type="negative", multi_line=True)
+        finally:
+            timer.cancel()
+            drain()
+            batch_stop["event"] = None
+            run_button.enable()
+            stop_button.visible = False
+            progress_bar.visible = False
+        step_label.text = ""
+        log_view.visible = False  # each model's messages are in its Details
+        finish()
+        on_catalog_change()  # a Catalog entry appears after the first run that adds to one
+        if outcomes:
+            documented = any(o.ok for o in outcomes)
+            failed = any(o.status == "error" for o in outcomes)
+            ui.notify(
+                batch.summary(outcomes),
+                type="negative" if not documented else "warning" if failed else "positive",
+            )
+
     async def _start_run() -> None:
         if source.value != "local":
             panel = remote[source.value]
+            whole = getattr(panel, "is_batch", False)
             if not panel.ready():
-                ui.notify("Choose a report first.", type="warning")
+                ui.notify("Choose one or more workspaces first." if whole else "Choose a report first.",
+                          type="warning")
                 return
             result_box.clear()
-            fetched = await download_remote_report(panel)
+            if whole:  # every model used in the chosen workspaces, one documentation each
+                jobs = await download_remote_report(
+                    panel.plan, "Listing the workspaces…", "Listing the workspaces failed"
+                )
+                if jobs is None:
+                    return
+                if not jobs:
+                    ui.notify("No reports or semantic models in these workspaces.", type="warning")
+                    return
+                await run_batch(jobs)
+                return
+            fetched = await download_remote_report(panel.fetch)
             if fetched is None:
                 return
             report, model, extra_reports = fetched.report_folder, fetched.model_path, fetched.extra_reports
@@ -1182,15 +1377,30 @@ def build_page(
                 ui.notify("Choose an existing report first.", type="warning")
                 return
             extras = drop_extras()
-            if extras:  # several dropped reports: one documentation if they share a model
-                model = _shared_model(
-                    [report, *extras],
-                    Path(model_value) if model_value and model_value != auto_model["value"] else None,
-                    len(drop["models"]),
-                )
-                if model is None:
+            if extras:  # several dropped reports: one documentation per model they use
+                jobs = drop_plan([report, *extras])
+                if not any(job.prepare for job in jobs):  # e.g. no .bim for reports without a model
+                    ui.notify(
+                        "Nothing to document - " + "; ".join(f"{j.model}: {j.skip_reason}" for j in jobs),
+                        type="warning",
+                        multi_line=True,
+                    )
                     return
-                extra_reports, name = extras, model_name(model)
+                if len(jobs) > 1:  # several models: each documented, all added to the catalog
+                    await run_batch(jobs)
+                    return
+                (job,) = jobs  # one model: its reports documented together (model mode)
+                prepared = (
+                    await download_remote_report(job.prepare)  # a published model, from Fabric
+                    if job.downloads
+                    else job.prepare(lambda text: None)
+                )
+                if prepared is None:
+                    return
+                report, extra_reports, model = (
+                    prepared.report_paths[0], prepared.report_paths[1:], prepared.model_path
+                )
+                name, service_model = prepared.name or model_name(model), prepared.service_model
                 if output_input.value == auto_output["value"]:
                     output_input.value = str(output_root() / name)  # named after the model
             else:
@@ -1198,7 +1408,7 @@ def build_page(
                 reference = live_connection(report) if model is None else None
                 if reference is not None:
                     # A live-connected .pbix: its model is published - get it from Fabric
-                    published = await download_remote_report(_PublishedModelDownload(reference))
+                    published = await download_remote_report(_PublishedModelDownload(reference).fetch)
                     if published is None:
                         return
                     model = published.model_path

@@ -386,17 +386,81 @@ def test_dropped_reports_on_one_model_are_documented_together(sample):
     _simulate(scenario)
 
 
-def test_dropped_reports_on_different_models_are_not_mixed(sample):
+async def _batch_done(user) -> None:
+    """Wait for a batch to finish (its summary appears)."""
+    await _wait_for(lambda: user._sees(None, None, "batch_summary", None), timeout=60)
+
+
+def test_dropped_reports_on_different_models_are_documented_separately(sample):
     report, model = (sample / "Sample.pbix").read_bytes(), (sample / "Sample.bim").read_bytes()
+    from pbixtractor.catalog import list_entries
 
     async def scenario(user):
         await user.open("/")
         await _drop(_element(user, "upload"), ("First.pbix", report), ("First.bim", model),
                     ("Second.pbix", report), ("Second.bim", model))
-        await user.should_see("one model is documented at a time")
+        await user.should_see("2 models: each is documented separately")  # before the run
         user.find("Create documentation").click()
-        await user.should_see("remove the reports of the other model")  # the run's refusal
-        assert not (sample / "output" / "First").exists()  # nothing was documented
+        await _batch_done(user)
+        await user.should_see("2 of 2 models documented")
+        # Each report with the model named like it, both in the catalog
+        assert (sample / "output" / "First" / "First.xlsx").is_file()
+        assert (sample / "output" / "Second" / "Second.xlsx").is_file()
+        assert sorted(e["name"] for e in list_entries(sample / "output" / "_catalog")) == ["First", "Second"]
+        await user.should_see(marker="batch_catalog")
+        # A model's Details: its full result, as after a single run
+        user.find(marker="batch_details").click()
+        await user.should_see("Unused measures")
+
+    _simulate(scenario)
+
+
+def test_dropped_reports_without_any_model_are_refused(sample):
+    report = (sample / "Sample.pbix").read_bytes()  # no model of its own, no .bim dropped
+
+    async def scenario(user):
+        await user.open("/")
+        await _drop(_element(user, "upload"), ("First.pbix", report), ("Second.pbix", report))
+        await user.should_see("No model found for these reports")  # said before the run
+        user.find("Create documentation").click()
+        await user.should_see("Nothing to document")
+        await user.should_not_see(marker="batch_results")
+        assert not (sample / "output" / "First").exists()
+
+    _simulate(scenario)
+
+
+def test_a_whole_fabric_workspace_is_documented_model_by_model(sample, monkeypatch):
+    from pbixtractor.catalog import list_entries
+
+    from .test_batch import WS_REPORTS, BatchFabric
+
+    client = BatchFabric(sample / "parts")
+    monkeypatch.setattr(web_sources, "make_fabric_client", lambda: client)
+    monkeypatch.setattr("pbixtractor.service_stats.make_client", lambda: client)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await _choose(user, "fabric_scope", "workspace")
+        user.find("Create documentation").click()
+        await user.should_see("Choose one or more workspaces first.")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: _options(user, "fabric_workspaces"))
+        await _choose(user, "fabric_workspaces", [WS_REPORTS["id"]])
+        user.find("Create documentation").click()
+        await _batch_done(user)
+        # Two models documented (one per model, with all its reports); the rest skipped, saying why
+        await user.should_see("2 of 2 models documented")
+        await user.should_see("Paginated report - not supported")
+        await user.should_see("No report on this model in the chosen workspaces")
+        doc = json.loads(
+            (sample / "output" / "Sales Model" / "Sales Model.json").read_text(encoding="utf-8")
+        )
+        assert [r["name"] for r in doc["reports"]] == ["Sales Detail", "Sales Overview"]
+        sales = next(t for t in doc["model"]["tables"] if t["name"] == "Sales")
+        assert sales["rows"] == 1000  # statistics from the service, as for a single report
+        assert {e["name"] for e in list_entries(sample / "output" / "_catalog")} == {"Finance", "Sales Model"}
 
     _simulate(scenario)
 
@@ -483,8 +547,9 @@ def test_dropped_pbix_files_with_their_own_models_are_flagged_at_once(sample):
     async def scenario(user):
         await user.open("/")
         await _drop(_element(user, "upload"), ("First.pbix", report), ("Second.pbix", report))
-        # Before any click: the page says these are separate models
+        # Before any click: the page says these are separate models, documented separately
         await user.should_see(marker="separate_models")
+        await user.should_see("2 models: each is documented separately")
         await user.should_see("Dropped:")
         await user.should_not_see("Documented together:")
 

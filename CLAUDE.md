@@ -27,9 +27,10 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
 - sqlglot (native SQL in partitions), azure-identity (Fabric / DevOps sign-in)
 
 ## Running
-Working clone: `C:\Users\MarcusToftås\Documents\PBIxtractor` (moved off OneDrive on 2026-09-29;
-the old copy under `OneDrive…\Dokument\Other\PBI-Ixtractor\PBIxtractor` is no longer worked in —
-OneDrive broke uv hardlinks and git reflog writes).
+Machine-specific notes (working clone, real test reports, what was verified on which report)
+live in the gitignored `CLAUDE.local.md`: the repo is public, so client report names and local
+paths never go into tracked files. Don't work in a OneDrive folder (it breaks uv hardlinks and
+git reflog writes).
 ```powershell
 uv run --frozen pbixtractor             # web UI (NiceGUI) on :8081, opens the browser
 uv run --frozen pbixtractor web --port 8090 --no-browser
@@ -39,7 +40,7 @@ uv run --frozen --extra dev pytest -q   # tests (`--with pytest` does NOT work h
 # Plain `uv sync` removes pytest/ruff from the venv: always `uv sync --extra dev`
 
 # Optional smoke test against a real report kept outside the repo (never commit client data)
-$env:PBIXTRACTOR_SAMPLE_PBIX = "C:\...\Reports V1\Invoices.pbix"
+$env:PBIXTRACTOR_SAMPLE_PBIX = "C:\...\<real report>.pbix"
 ```
 Output goes to `./output/<report name>/` (CWD-relative, gitignored) unless `-o` / the UI's output
 folder says otherwise. The model is auto-found (`find_model_for_report`): a .pbix with its own
@@ -51,15 +52,9 @@ Fabric (pbix_model.live_connection → fabric.fetch_connected_model; sign-in, Co
 model). `extract` exits 2
 when there is none. The model is read from the `.bim` / TMDL on every run; a
 `documentation.tsv` is only used with `--tabular-editor-tsv` (ExtractionOptions.tabular_editor_tsv).
-Real test reports (local only, never commit; the paths below are on the owner's first PC - on
-another machine, list its reports in `Input/regression.json`, see "Refactoring safety net"):
-- `…/_Arbete/Rowico/…/Reports V1/` (client data): `Invoices.pbix` + `Invoices.bim` (legacy
-  Layout format; only one with a .bim) and 8 other legacy `.pbix` files.
-- `C:\Users\MarcusToftås\Downloads\Adventure Works DW 2020.pbix` + `Model.bim` (owner's dummy
-  report, **PBIR format**; model has no measures; no buttons/bookmarks/groups yet).
-  Full pipeline for it: `pbixtractor extract "...\Adventure Works DW 2020.pbix" --model
-  "...\Downloads\Model.bim"` (~12 s with Tabular Editor).
-Tabular Editor 2 is installed at `C:\Program Files (x86)\Tabular Editor\`
+Real test reports are local only (never commit; this PC's list: `CLAUDE.local.md`; on another
+machine, list its reports in `Input/regression.json`, see "Refactoring safety net").
+Tabular Editor 2 is usually installed at `C:\Program Files (x86)\Tabular Editor\`
 (`tabular_editor.find_tabular_editor()`; extra folders in `Input/TabularEditorLocations.txt`,
 written by `add_tabular_editor_location()` / the web UI's "Tabular Editor 2 folder" field).
 Power BI Desktop is the Microsoft Store version: workspaces under
@@ -85,7 +80,10 @@ src/pbixtractor/
                     [--description-tag] [--no-log-file] [-q]` (exit 0 ok/warnings, 1 error,
                     2 no model/bad args); `fabric list [WS]`, `fabric fetch WS/REPORT [-o]`
                     (default download folder output/_fabric/<ws>; with extract -o: <o>/source);
-                    `catalog list|remove|rebuild FOLDER [KEY]`. `--ref` was `--version` (still
+                    `catalog list|remove|rebuild FOLDER [KEY]`; `catalog add FOLDER [FILE ...] |
+                    --fabric-workspace WS [...] [--all-workspaces] [-o ROOT] [--no-tabular-editor]
+                    [--no-service-statistics] [--no-log-file] [-q]` (batch.py; .bim files among
+                    FILE are models; exit 1 if any model failed). `--ref` was `--version` (still
                     accepted); top-level `pbixtractor --version` prints the program version.
                     Fetch errors (ApiError/ValueError/OSError) → "ERROR: ..." + exit 1; anything
                     else keeps its traceback on purpose (a bug).
@@ -137,8 +135,14 @@ src/pbixtractor/
                     model has roles (also in the lineage viewer header/table details and the
                     catalog card/model: entry["rls"]). Files arriving within DROP_SECONDS (30)
                     of each other are one drop: several reports + one model → model mode (chips
-                    "Documented together", removable); several models → _shared_model() refuses
-                    ("one model is documented at a time"). start() opens a browser tab only if no
+                    "Documented together", removable); several models → a batch (drop_plan() =
+                    batch.plan_files; selection() says "N models: each is documented separately"
+                    before the run). Batches (also Fabric "Whole workspaces") run via run_batch():
+                    _batch_results() = summary + one live row per model (Waiting/Running/Done/
+                    Failed/Skipped + reason), Details = that model's full result re-read from its
+                    JSON (_render_result), lineage in a new tab, "Open catalog"; "Stop after this
+                    model" button; always adds to the catalog folder (Options; default
+                    output/_catalog); outputs under output_root()/<name>. start() opens a browser tab only if no
                     tab connects within BROWSER_GRACE_SECONDS (7 s): after a restart the old
                     tab reconnects and reloads by itself, so no duplicate tabs.
                     Security (it is a local server, but browsers can reach it): add_host_check()
@@ -268,6 +272,20 @@ src/pbixtractor/
                     (warned: "unused" may be incomplete). CLI --all-reports / --all-workspaces /
                     --also; UI switch "All reports on its semantic model". Output named after the
                     model (pipeline.model_name()).
+  batch.py          Many models in one go (catalog step 2). plan_files(reports, models, chosen,
+                    make_client) groups report files by model: its own (.pbix) / <name>.bim /
+                    PBIP; one given .bim (or `chosen`) = all reports on it; live-connected →
+                    grouped by published model id, downloaded when it runs. plan_fabric(client,
+                    workspaces, all_workspaces) lists reports (Power BI API: datasetId,
+                    datasetWorkspaceId) and the chosen workspaces' models → one BatchJob per
+                    model with all its reports in the searched workspaces; skipped with a reason:
+                    paginated reports, models without a report, models in workspaces you cannot
+                    open, unlistable workspaces. run_batch(jobs, BatchSettings(output_root,
+                    catalog_dir, ...), progress, on_log, on_outcome, should_stop): per model
+                    job.prepare() (downloads) + run_extraction into <root>/<name> (one report: its
+                    name; several: the model's; duplicates "(<workspace>)" / "(2)"), always added
+                    to the catalog; a failure never stops the rest; should_stop between models.
+                    summary() = "3 of 4 models documented (1 with warnings), 1 failed, 2 skipped".
   catalog.py        Catalog folder (options.catalog_dir / --catalog / UI "Add to catalog"):
                     entries/<key>.json = one SLIM entry per semantic model (reports+pages,
                     tables/columns/measures with DAX, usage field→pages, DAX depends_on, unused
@@ -276,7 +294,7 @@ src/pbixtractor/
                     catalog.html (search names/DAX, filters, details, "Loaded by" across models).
                     Key from origin (source_identity): fabric-<model id> | devops-<proj>-<repo>-
                     <hash> | file-<name>-<hash>; same model again replaces the entry (latest only).
-                    CLI `catalog list|remove|rebuild FOLDER`. Web UI serves it at /catalog/
+                    CLI `catalog add|list|remove|rebuild FOLDER`. Web UI serves it at /catalog/
                     (default folder output/_catalog). All writes/removals go through _inside()
                     (a crafted key cannot leave the catalog folder); the page only links
                     models/... (safeLink) and embeds JSON with "<" as <. Reports that
@@ -284,7 +302,9 @@ src/pbixtractor/
                     Known gap: source names are not database-qualified (Name navigation gives
                     "vw_x", Schema/Item "dbo.vw_x") - cross-model source matching needs server/db
                     (with 6b).
-  web_sources.py    Web UI panels FabricPanel (workspace → report) and DevOpsPanel (org →
+  web_sources.py    Web UI panels FabricPanel (workspace → report; or scope "Whole workspaces":
+                    multi-select + "Also find their reports in my other workspaces", plan() →
+                    batch.plan_fabric, is_batch) and DevOpsPanel (org →
                     project → repo → branch → report → version/commit); ready(), blocking
                     fetch(progress) → (report folder, model folder). make_fabric_client /
                     make_devops_client are the test seams. Choices remembered in
@@ -300,12 +320,19 @@ src/pbixtractor/
                     Sign-in via azure_auth.get_credential(). getDefinition needs Contributor
                     (read+write) on the item. reports_on_model(not_searched=...) records
                     workspaces it could not search (→ FetchedReport.skipped).
+                    fetch_model_reports(client, model_ws, model, [(ws, report)], dest) for
+                    batch.py: the model once + the given reports (each bound byPath, with its
+                    fabric_source.json; failures → skipped; all failed → FabricError); shares
+                    _fetch_bound_report() with fetch_report's all_reports loop.
   pbix_model.py     The model inside a .pbix (no .bim, Desktop or TE needed): PBIXRay (MIT dep)
                     unpacks DataModel → metadata.sqlitedb (TOM tables) → database_from_metadata()
                     builds the TMSL dict (TOM enum codes → TMSL names; skips internal H$/R$/U$
                     tables (SystemFlags bit 1 - bit 2 marks calculated tables such as DATATABLE
                     or field parameters, which are kept) and rowNumber columns; carries annotations, so TE's BPA ignore rules survive, and
-                    isAvailableInMdx). Verified on Invoices.pbix vs Invoices.bim: only the known
+                    isAvailableInMdx). compatibilityLevel 1567, or 1601 when a measure has a
+                    dynamic format string (TE 2.29 refuses a property newer than the level:
+                    "Unrecognized JSON property: formatStringDefinition" - BPA and exact
+                    dependencies would silently fall back). Verified on a real .pbix vs its exported .bim: only the known
                     version differences; TE BPA 125 = 125 findings. statistics_from_metadata():
                     rows (row-number column), distinct values ONLY for hash dictionaries
                     (DictionaryStorage.Type 1; value encoding stores a range), sizes via PBIXRay.
@@ -319,7 +346,7 @@ src/pbixtractor/
                     (tables, columns,
                     measures, hierarchies+levels, partitions incl. Direct Lake entity, relationships
                     with cardinality/direction/active, shared expressions, roles/RLS).
-                    model_to_dataset() → DataFrame identical to TE's TSV (verified on Invoices:
+                    model_to_dataset() → DataFrame identical to TE's TSV (verified on a real model:
                     all 459 objects match; only DAX whitespace differs). structurally_used_columns():
                     relationship keys, sort-by and hierarchy-level columns. Hierarchy levels are
                     sorted by `ordinal` (the .bim array order is not the level order).
@@ -329,7 +356,7 @@ src/pbixtractor/
                     `///` descriptions, `= expr` inline / multi-line (two tabs deeper than
                     the object) / ``` fenced, `ref table X` at top level of model.tmdl =
                     table order. Verified against Tabular Editor 2.29 -TMDL exports of AW
-                    (0 differences) and Invoices: only calculated columns with an inferred
+                    (0 differences) and a real model: only calculated columns with an inferred
                     type lack dataType in TMDL (DataType "Unknown"). Test fixture:
                     tests/sample_tmdl.py (TE export of the sample BIM).
   tabular_editor.py find_tabular_editor(); run_script() (write C# script with %FOLDER%, run
@@ -490,16 +517,30 @@ src/pbixtractor/
   NiceGUI web UI with the viewer embedded (done 2026-09-29; DearPyGUI removed) →
   1b DevOps/Fabric readers → 6 SQL/Fabric source lineage (sqlglot).
 
-## Status and open items (2026-09-30)
+## Status and open items (2026-10-06)
 Done: both report formats, .bim + TMDL, CLI + web UI, 1b Fabric + Azure DevOps fetch (UI pickers
-and CLI; Fabric download verified on Navigator), model mode (all reports on one model), service
+and CLI; Fabric download verified on a real workspace), model mode (all reports on one model), service
 statistics (plain DAX after the tenant rejected INFO functions with HTTP 400; the plain-DAX
 version is tested with fakes only, not yet re-run on the tenant), catalog
 step 1, 6a (native SQL via sqlglot; Name-navigation / query-reference / entered data verified on
-Navigator/Hallbarhet/Rowico). A full audit (security, extraction correctness, remote/pipeline/UI,
+three real reports). A full audit (security, extraction correctness, remote/pipeline/UI,
 hygiene) was fixed on 2026-09-30; see git history for details.
+Done 2026-10-01..06 (owner-tested on local files, Fabric and DevOps): report as a level above
+pages (several reports per run); the model read from inside a .pbix (no .bim needed); published
+models fetched from Fabric for live-connected .pbix and DevOps byConnection reports; RLS
+indicators (web UI, lineage viewer, catalog); drop-zone-first upload UI; lineage list click =
+mark, double-click = open.
+
+Versioning (owner, 2026-10-06): `ft_v2` becomes **2.0.0** when it is merged into `main`. No git
+tag exists yet (none on origin either), so the data-platform pin below cannot install until one
+is pushed; pyproject.toml and `__init__.__version__` both carry the version (keep them equal).
 
 Open, by owner priority:
+- **Catalog step 2 (owner, 2026-10-06), v1 built 2026-10-06** (batch.py; automated tests only
+  so far - real-workspace checks in MANUAL_TESTS.md): whole Fabric workspaces and multi-model
+  drops/file lists → one documentation per model, all in one catalog. Follow-ups: a whole Azure
+  DevOps repository (same core: plan per model path / published model id); removing catalog
+  entries of models that no longer exist; maybe a plan preview before a long run.
 - Module + stand-alone (owner, 2026-09-30): PBIxtractor must work stand-alone AND as a module
   inside the owner's private data-platform NiceGUI app (read only via `gh api`; never clone it
   or store its content on this PC). Phase 1 done: theme.py + restyled stand-alone UI.
@@ -509,7 +550,7 @@ Open, by owner priority:
   the file routes (403, fails closed), azure_auth uses EnvironmentCredential when a service
   principal is in the environment (never a browser then), version 0.3.0. data-platform side:
   branch `feat/powerbi-docs` created via the GitHub API (owner opens the PR/merges); it pins
-  `pbixtractor @ git+...@v0.3.0`, so the v0.3.0 tag must exist first. Earlier plan note: integration in data-platform
+  `pbixtractor @ git+...@v0.3.0`, so a tag must exist first (see Versioning). Earlier plan note: integration in data-platform
   (git dependency pinned to a tag + one nav section) - done there, not from here. Later: restyle
   the generated lineage/catalog HTML pages; logo/about page (logo_large.png kept for it).
 - 6b database lineage (lower): connect to Azure SQL / Fabric Warehouse / Lakehouse SQL endpoint
@@ -517,7 +558,7 @@ Open, by owner priority:
   `sys.sql_modules` / `sys.sql_expression_dependencies`, parse with `sqlglot.lineage` → view →
   base table/column edges + a "sources" sheet. Read-only account with VIEW DEFINITION suffices.
   Source names are not database-qualified yet (needed for cross-model matching).
-- Catalog step 2: document a whole workspace (not prio 1); cross-model impact after 6b.
+- Cross-model impact (catalog) after 6b.
 - Excel → lineage viewer links (low). Web UI polish (run history, model tab, JSON search).
 - Not planned: XMLA sizes for service models (reports may live in Pro workspaces).
 
@@ -525,14 +566,14 @@ Tests: tests/conftest.py blocks real sign-in (get_credential raises, AZURE_DEVOP
 allows only local sockets, and points NiceGUI storage at a temp folder - pass fake
 clients/credentials. Web UI tests poll (`_wait_for`) instead of fixed sleeps.
 
-This PC (`C:\Users\MarcusToftås\Documents\PBIxtractor`): `Input/regression.json` = Invoices
-(legacy .pbix + .bim) and Hallbarhet (PBIP: PBIR + TMDL,
-`Projects\Frontend\gold_workspaces\hallbarhet_rapportering_gold\Hallbarhet_New.Report`).
+Regression runs (`tools/regress.py`, `Input/regression.json`) use live reports: local only
+(Input/ and output/ are gitignored) - they are not part of PBIxtractor and never go into the repo
+(this PC's list: `CLAUDE.local.md`). Manual checks on real reports: the gitignored
+`MANUAL_TESTS.md`.
 - `uv` is not on PATH in PowerShell: use `~\.local\bin\uv.exe`. `uv sync` error 396 = the uv cache
   holds cloud placeholders → `uv cache clean <packages from uv.lock>`, then sync again.
 - Tabular Editor must be ≥2.29 (2.21 failed the BPA script and TMDL loading).
-- Many client .pbix files here are **Purview-encrypted** (start with `.pfile`, e.g. Castellum
-  Navigator): they cannot be read; the run fails with a clear ReportReadError (no traceback).
+- Many client .pbix files are **Purview-encrypted** (start with `.pfile`): they cannot be read; the run fails with a clear ReportReadError (no traceback).
   Use Fabric or DevOps for those.
 
 ## Checking the HTML viewer
@@ -569,5 +610,6 @@ pipeline and CLI on the anonymised sample data.
 
 ## Branches
 - `main`: legacy single-file `PB-Ixtractor.py` (has working button/bookmark logic).
-- `ft_v2` (current): src-layout refactor, YAML config, typed readers/extractors.
+- `ft_v2` (current): src-layout refactor, YAML config, typed readers/extractors. Merged into
+  `main` as version 2.0.0 when done (owner, 2026-10-06).
 - Remote: https://github.com/MackanT/PBIxtractor
