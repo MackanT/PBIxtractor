@@ -296,6 +296,7 @@ input[type=search] { width: 100%; padding: 7px 9px; border: 1px solid var(--bord
 #results { overflow: auto; flex: 1; padding: 4px 0; }
 .result { padding: 5px 16px; cursor: pointer; display: flex; gap: 8px; align-items: baseline; }
 .result:hover, .result.active { background: var(--bg); }
+.result.marked { background: var(--bg); box-shadow: inset 3px 0 0 var(--attn); }
 .rls { margin-top: 8px; padding: 6px 9px; border-radius: 8px; font-size: 12px;
   border-left: 3px solid var(--attn); background: var(--bg); }
 .result .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
@@ -478,7 +479,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     <h3>The three panels</h3>
     <ul>
       <li><b>Left</b>: search, show/hide item types, and "Only unused columns/measures". Click an
-        item to open its lineage.</li>
+        item to mark it (its node is highlighted in the graph when shown, and its details appear
+        on the right); double-click (or Enter) to open its lineage.</li>
       <li><b>Middle</b>: the graph. Drag to move, scroll to zoom, hover an item to highlight its
         lines; click to mark, double-click to open.</li>
       <li><b>Right</b>: details of the marked (or shown) item - DAX, data type, storage mode,
@@ -574,14 +576,23 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
              a.label.localeCompare(b.label);
     });
     matches.slice(0, 300).forEach(function (n) {
-      var row = html("div", "result" + (n.id === state.selected ? " active" : ""));
+      var row = html("div", "result" + (n.id === state.selected ? " active" : "") +
+                     (n.id === state.marked ? " marked" : ""));
       row.setAttribute("role", "option");
+      row.tabIndex = 0;
+      row.dataset.id = n.id;
       var dot = html("span", "dot"); dot.style.background = color(n.type);
       row.appendChild(dot);
       row.appendChild(html("span", "name", n.label));
       if (n.group) row.appendChild(html("span", "group", n.group));
       row.title = TYPE_LABEL[n.type] + ": " + n.label + (n.unused ? " (unused)" : "");
-      row.addEventListener("click", function () { select(n.id); });
+      // Like the graph: click marks it (details on the right), double-click opens its lineage
+      row.addEventListener("click", function () { mark(n.id); reveal(n.id); });
+      row.addEventListener("dblclick", function () { select(n.id); });
+      row.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") select(n.id);
+        else if (ev.key === " ") { ev.preventDefault(); mark(n.id); reveal(n.id); }
+      });
       list.appendChild(row);
     });
     if (matches.length > 300) list.appendChild(html("div", "result muted", (matches.length - 300) + " more - refine the search"));
@@ -765,8 +776,24 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     document.querySelectorAll(".node").forEach(function (g) {
       g.classList.toggle("marked", !!id && g.dataset.id === id && id !== state.selected);
     });
+    document.querySelectorAll(".result").forEach(function (row) {
+      row.classList.toggle("marked", !!id && row.dataset.id === id);
+    });
     highlight(id);
     renderDetails();
+  }
+
+  // Bring a node of the current graph into view (same zoom); nothing if it is not shown
+  function reveal(id) {
+    var g = document.querySelector('.node[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+    if (!g) return;
+    var m = g.transform.baseVal.consolidate().matrix, w = svg.clientWidth || 800, h = svg.clientHeight || 600;
+    var x = state.tx + m.e * state.scale, y = state.ty + m.f * state.scale;
+    if (x < 0 || y < 50 || x + NODE_W * state.scale > w || y + NODE_H * state.scale > h) {
+      state.tx = w / 2 - (m.e + NODE_W / 2) * state.scale;
+      state.ty = h / 2 - (m.f + NODE_H / 2) * state.scale;
+      apply();
+    }
   }
 
   function highlight(id) {

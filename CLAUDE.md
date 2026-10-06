@@ -182,7 +182,9 @@ src/pbixtractor/
                     reports; table feeds it if it is upstream; tables feeding nothing dashed).
                     Toolbar: back/forward history (Alt+←/→), "Up a level" (column/measure →
                     table, visual → page, page → report, else overview), zoom −/Fit/+, "Panels" (hide side panels), Guide overlay.
-                    #<node id> in the URL opens that item (kept in sync via replaceState).
+                    #<node id> in the URL opens that item (kept in sync via replaceState). Left
+                    list = graph: click marks (highlight + details, reveal() pans to it),
+                    double-click/Enter opens the lineage.
   documentation.py  Analysis stage, no file output: build_documentation() → Documentation
                     (report_info, filter_strings, pages: {page: [PageItem]}, model, objects
                     [OBJECT_COLUMNS], relations, unused_columns/measures, exact deps, BPA,
