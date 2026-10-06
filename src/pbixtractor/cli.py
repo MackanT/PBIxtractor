@@ -372,8 +372,9 @@ def run_extract(args: argparse.Namespace) -> int:
     model = args.model or find_model_for_report(args.report)
     if model is None:
         print(
-            f"No model found for {args.report}: expected {report_name(args.report)}.bim next to "
-            "it (or a PBIP .SemanticModel folder with model.bim or TMDL). Pass it with --model.",
+            f"No model found for {args.report}: a .pbix normally carries its own; else expected "
+            f"{report_name(args.report)}.bim next to it (or a PBIP .SemanticModel folder with "
+            "model.bim or TMDL). Pass it with --model.",
             file=sys.stderr,
         )
         return 2

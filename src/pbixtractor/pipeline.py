@@ -27,6 +27,7 @@ from .json_report import documentation_to_dict, write_json_data
 from .lineage_html import write_lineage_html
 from .live_model import collect_live_statistics
 from .logger import capture_logs, get_logger
+from .pbix_model import has_embedded_model, read_pbix_model
 from .readers import ReportReadError
 from .relationship_graph import save_relationship_graph
 from .report_extractor import (
@@ -38,7 +39,7 @@ from .report_extractor import (
     visual_type_list,
     with_report,
 )
-from .semantic_model import model_source, model_to_dataset, read_model
+from .semantic_model import model_source, model_to_dataset, parse_model, read_model
 from .service_stats import ServiceModel, read_service_statistics, service_model_for_report
 from .tabular_editor import (
     drop_redundant_table_refs,
@@ -135,17 +136,21 @@ def find_model_for_report(report_path: str | Path) -> Optional[Path]:
     """
     Guess the model file that belongs to a report.
 
-    Looks for <name>.bim next to the report, then for a PBIP project's semantic model: the
-    folder the report's definition.pbir points to, or <name>.SemanticModel / <name>.Dataset;
-    each as model.bim or TMDL (definition/*.tmdl).
+    A .pbix with its own model is its own model: the one the report was saved with (a .bim
+    exported separately can be older or newer). Otherwise looks for <name>.bim next to the
+    report, then for a PBIP project's semantic model: the folder the report's definition.pbir
+    points to, or <name>.SemanticModel / <name>.Dataset; each as model.bim or TMDL
+    (definition/*.tmdl). A live-connected .pbix has no model here (pbix_model.live_connection).
 
     Args:
         report_path: .pbix, .pbip or .Report folder
 
     Returns:
-        Path to the .bim or TMDL definition folder, or None
+        Path to the .pbix itself, the .bim or the TMDL definition folder, or None
     """
     path = Path(report_path)
+    if has_embedded_model(path):
+        return path
     name = report_name(path)
     if path.with_name(f"{name}.bim").is_file():
         return path.with_name(f"{name}.bim")
@@ -320,9 +325,20 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         logger.warning(f"Not included in this documentation ('unused' may be incomplete): {missing}")
 
     progress("Reading the model", 0.05)
+    pbix_statistics = None
     try:
-        source = model_source(options.model_path)  # the .bim file or TMDL folder
-        model = read_model(source)
+        source = model_source(options.model_path)  # the .bim file, TMDL folder or .pbix
+        if source.suffix.lower() == ".pbix":
+            pbix = read_pbix_model(source)
+            model, pbix_statistics = parse_model(pbix.database), pbix.statistics
+            # Tabular Editor reads a .bim, not a .pbix: hand it the model as one (also an
+            # output file; "_model" so it never overwrites a .bim next to the report)
+            source = files["model"] = out / f"{options.name}_model.bim"
+            source.write_text(
+                json.dumps(pbix.database, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        else:
+            model = read_model(source)
     except (OSError, ValueError) as e:
         return ExtractionResult("error", f"Could not read the model {options.model_path}: {e}")
 
@@ -337,6 +353,9 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         if live_statistics is not None:
             logger.debug("Using Power BI service statistics instead of a matching Desktop model")
         live_statistics = service_statistics
+    if live_statistics is None and pbix_statistics is not None:
+        # Not open in Desktop: the statistics saved in the .pbix (as of its last refresh)
+        live_statistics = pbix_statistics
 
     # Measure data types are only known by a live model (the .bim usually lacks them)
     if live_statistics:

@@ -34,6 +34,7 @@ from . import __version__, web_config
 from .azure_auth import ApiError
 from .data import DATA_DIR
 from .live_model import find_local_instances
+from .pbix_model import has_embedded_model
 from .pipeline import (
     REPORT_SUFFIXES,
     ExtractionOptions,
@@ -71,6 +72,7 @@ FILE_LABELS = {
     "lineage": ("Lineage viewer", "account_tree"),
     "json": ("JSON", "data_object"),
     "graph": ("Relationship graph", "hub"),
+    "model": ("Model (.bim)", "schema"),  # generated from the model inside a .pbix
     "tsv": ("Tabular Editor TSV", "description"),
     "log": ("Log file", "article"),
 }
@@ -498,6 +500,14 @@ def _shared_model(
             multi_line=True,
         )
         return None
+    if all(model == report for report, model in found.items()):
+        ui.notify(
+            "Each of these .pbix files carries its own model, so they are separate models. One "
+            "model is documented at a time: drop them one by one (or with the one .bim they share).",
+            type="warning",
+            multi_line=True,
+        )
+        return None
     if len(set(found.values())) > 1:
         ui.notify(
             "These reports use different models ("
@@ -726,7 +736,8 @@ def build_page(
                         picker_button(report_input, REPORT_SUFFIXES, report_folders=True)
                     with ui.row().classes("w-full items-center no-wrap").mark("model_row") as model_row:
                         model_input = ui.input(
-                            "Model (.bim or TMDL model.tmdl) - found automatically for most reports"
+                            "Model (.bim or TMDL model.tmdl) - found automatically; a .pbix with "
+                            "its own model needs none"
                         ).classes("grow").mark("model")
                         picker_button(model_input, (".bim", ".tmdl"))
                     report_row.set_visibility(local)
@@ -795,8 +806,15 @@ def build_page(
                     def together() -> None:
                         if not drop_extras():
                             return
+                        # Said right away, not only when the run is refused: reports that each
+                        # carry their own model (and no shared .bim) are separate models
+                        separate = len(drop["models"]) > 1 or (
+                            not drop["models"] and all(has_embedded_model(r) for r in drop["reports"])
+                        )
                         with ui.row().classes("w-full items-center gap-1").mark("together"):
-                            ui.label("Documented together:").classes("text-sm text-grey-7")
+                            ui.label("Dropped:" if separate else "Documented together:").classes(
+                                "text-sm text-grey-7"
+                            )
                             for path in drop["reports"]:
                                 ui.chip(
                                     report_name(path),
@@ -805,8 +823,15 @@ def build_page(
                                 ).props("dense outline color=primary")
                         if len(drop["models"]) > 1:
                             ui.label(
-                                "Several models were dropped - one model is documented at a time"
-                            ).classes("text-sm text-warning")
+                                "Several models were dropped - one model is documented at a time: "
+                                "remove the other reports (×)"
+                            ).classes("text-sm text-warning").mark("separate_models")
+                        elif separate:
+                            ui.label(
+                                "Each of these .pbix files has its own model, so they are separate "
+                                "models - one is documented at a time: remove the others (×), or "
+                                "drop the .bim they share"
+                            ).classes("text-sm text-warning").mark("separate_models")
 
                     together()
                 local_box.bind_visibility_from(source, "value", value="local")

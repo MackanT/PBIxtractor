@@ -409,3 +409,23 @@ def test_a_later_drop_starts_over(sample, monkeypatch):
         await user.should_not_see(marker="together")
 
     _simulate(scenario)
+
+
+def test_dropped_pbix_files_with_their_own_models_are_flagged_at_once(sample):
+    import io
+    import zipfile
+
+    buffer = io.BytesIO((sample / "Sample.pbix").read_bytes())
+    with zipfile.ZipFile(buffer, "a") as archive:
+        archive.writestr("DataModel", b"\x00")  # a model of its own (never read here)
+    report = buffer.getvalue()
+
+    async def scenario(user):
+        await user.open("/")
+        await _drop(_element(user, "upload"), ("First.pbix", report), ("Second.pbix", report))
+        # Before any click: the page says these are separate models
+        await user.should_see(marker="separate_models")
+        await user.should_see("Dropped:")
+        await user.should_not_see("Documented together:")
+
+    _simulate(scenario)

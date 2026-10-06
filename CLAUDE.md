@@ -42,10 +42,11 @@ uv run --frozen --extra dev pytest -q   # tests (`--with pytest` does NOT work h
 $env:PBIXTRACTOR_SAMPLE_PBIX = "C:\...\Reports V1\Invoices.pbix"
 ```
 Output goes to `./output/<report name>/` (CWD-relative, gitignored) unless `-o` / the UI's output
-folder says otherwise. The model is auto-found next to the report (`find_model_for_report`:
-`<name>.bim`, then the PBIP model folder from `<name>.Report/definition.pbir`
+folder says otherwise. The model is auto-found (`find_model_for_report`): a .pbix with its own
+model IS the model (pbix_model.py, no .bim needed; preferred over a sibling .bim, which can be
+older/newer than the report); else `<name>.bim`, then the PBIP model folder from `<name>.Report/definition.pbir`
 (`datasetReference.byPath`), `<name>.SemanticModel`, `<name>.Dataset` - each as model.bim or
-TMDL `definition/`); `extract` exits 2
+TMDL `definition/`; `extract` exits 2
 when there is none. The model is read from the `.bim` / TMDL on every run; a
 `documentation.tsv` is only used with `--tabular-editor-tsv` (ExtractionOptions.tabular_editor_tsv).
 Real test reports (local only, never commit; the paths below are on the owner's first PC - on
@@ -283,6 +284,19 @@ src/pbixtractor/
                     Sign-in via azure_auth.get_credential(). getDefinition needs Contributor
                     (read+write) on the item. reports_on_model(not_searched=...) records
                     workspaces it could not search (→ FetchedReport.skipped).
+  pbix_model.py     The model inside a .pbix (no .bim, Desktop or TE needed): PBIXRay (MIT dep)
+                    unpacks DataModel → metadata.sqlitedb (TOM tables) → database_from_metadata()
+                    builds the TMSL dict (TOM enum codes → TMSL names; skips internal H$/R$/U$
+                    tables (SystemFlags bit 1 - bit 2 marks calculated tables such as DATATABLE
+                    or field parameters, which are kept) and rowNumber columns; carries annotations, so TE's BPA ignore rules survive, and
+                    isAvailableInMdx). Verified on Invoices.pbix vs Invoices.bim: only the known
+                    version differences; TE BPA 125 = 125 findings. statistics_from_metadata():
+                    rows (row-number column), distinct values ONLY for hash dictionaries
+                    (DictionaryStorage.Type 1; value encoding stores a range), sizes via PBIXRay.
+                    The pipeline writes <name>_model.bim (TE input + download; never <name>.bim)
+                    and uses the .pbix statistics when neither Desktop nor the service gives any.
+                    has_embedded_model() (zip listing only), live_connection() (Connections file
+                    → model id, workspace name if the connection string has it).
   semantic_model.py model_source(path) → the .bim file or TMDL definition folder (accepts
                     .SemanticModel folders and model.tmdl too; the pipeline passes it to
                     Tabular Editor, which loads both). read_model(path) → SemanticModel

@@ -32,6 +32,7 @@ dependencies = [
     "fastapi",  # imported directly (comes with nicegui)
     "sqlglot>=26",
     "azure-identity>=1.19",
+    "pbixray>=0.15",  # reads the model inside a .pbix (MIT; native wheels for Windows + Linux)
 ]
 
 [project.optional-dependencies]

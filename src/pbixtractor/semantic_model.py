@@ -266,11 +266,12 @@ class SemanticModel:
 
 def model_source(path: str | Path) -> Path:
     """
-    The concrete model a path points to: a .bim file or a TMDL definition folder.
+    The concrete model a path points to: a .bim file, a TMDL definition folder or a .pbix.
 
     Args:
         path: .bim file; <name>.SemanticModel / <name>.Dataset folder (model.bim or TMDL
-            definition/); a TMDL definition folder; or a .tmdl file in it (e.g. model.tmdl)
+            definition/); a TMDL definition folder; a .tmdl file in it (e.g. model.tmdl); or a
+            .pbix with its own model (read by pbix_model.py)
 
     Returns:
         The .bim file or the folder holding the .tmdl files (Tabular Editor accepts both)
@@ -288,7 +289,7 @@ def model_source(path: str | Path) -> Path:
 
 def read_model(path: str | Path) -> SemanticModel:
     """
-    Read a semantic model from a .bim file or a TMDL folder.
+    Read a semantic model from a .bim file, a TMDL folder or a .pbix with its own model.
 
     Args:
         path: See model_source()
@@ -299,6 +300,10 @@ def read_model(path: str | Path) -> SemanticModel:
     source = model_source(path)
     if source.is_dir():
         return parse_model(read_tmdl_folder(source))
+    if source.suffix.lower() == ".pbix":  # the model inside the report (pbix_model.py)
+        from .pbix_model import read_pbix_model  # noqa: PLC0415 - avoids an import cycle
+
+        return parse_model(read_pbix_model(source).database)
     database = json.loads(source.read_bytes().decode("utf-8-sig"))
     return parse_model(database)
 

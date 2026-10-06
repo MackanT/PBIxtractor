@@ -56,7 +56,8 @@ pbixtractor web --port 8090 --no-browser
 Pick a report (`.pbix`, `.pbip` or a `.Report` folder; drag & drop works too - drop several
 reports with their one `.bim` to document them together), or choose one from a Fabric workspace
 or an Azure DevOps repository. The model is found automatically:
-`<name>.bim` next to the report, or a PBIP project's semantic model as `model.bim` or TMDL
+the model inside the `.pbix` itself (no `.bim` needed), else `<name>.bim` next to the report, or a
+PBIP project's semantic model as `model.bim` or TMDL
 (the `definition` folder newer Power BI Desktop versions write). After a run the
 page shows the lineage viewer inline, the Best Practice Analyzer findings, unused objects,
 bookmarks and download links for all output files. Everything runs locally.
@@ -64,7 +65,7 @@ bookmarks and download links for all output files. Everything runs locally.
 ### Command line
 
 ```powershell
-pbixtractor extract C:\Reports\Sales.pbix                  # model: Sales.bim next to it
+pbixtractor extract C:\Reports\Sales.pbix                  # model: the one inside the .pbix
 pbixtractor extract Sales.pbix --model Model.bim -o out\Sales --no-tabular-editor
 pbixtractor extract Sales.pbip                              # PBIP: model.bim or TMDL
 pbixtractor extract --help
@@ -121,6 +122,7 @@ pbixtractor/
 │       ├── pipeline.py       # run_extraction(): the whole documentation run
 │       ├── readers.py        # .pbix / PBIR / PBIP report readers
 │       ├── semantic_model.py # model reader (.bim)
+│       ├── pbix_model.py     # the model inside a .pbix (no .bim needed)
 │       ├── fabric.py / devops.py # download from Fabric / Azure DevOps
 │       ├── catalog.py        # catalog over many models
 │       ├── tmdl.py           # TMDL model folders (newer PBIP projects)
