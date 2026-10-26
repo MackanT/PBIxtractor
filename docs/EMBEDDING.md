@@ -84,17 +84,19 @@ if Tabular Editor 2 is installed on the server.
 
 - One documentation run at a time per server process (a second user sees "Waiting for a run in
   another tab").
-- Fabric and Azure DevOps sign-in happens on the server. In a container, set a service
-  principal: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` (or
-  `AZURE_CLIENT_CERTIFICATE_PATH`). PBIxtractor then never tries a browser login. The service
-  principal needs access to the workspaces / DevOps projects, and Fabric's tenant setting
-  "Service principals can use Fabric APIs". A DevOps personal access token in
-  `AZURE_DEVOPS_PAT` works for DevOps too. Without either, sign-in falls back to `az login` on
-  the server, then to an interactive browser login - which only works on a desktop.
+- Fabric and Azure DevOps sign-in happens on the server, and embedded only with a service
+  principal: set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` (or
+  `AZURE_CLIENT_CERTIFICATE_PATH`). `register()` turns the browser sign-in off (it would open
+  on the server) and the page has no account control. The service principal needs access to
+  the workspaces / DevOps projects, and Fabric's tenant setting "Service principals can use
+  Fabric APIs". A DevOps personal access token in `AZURE_DEVOPS_PAT` works for DevOps too.
+  Without either, Fabric and DevOps fail with a clear error naming these variables - there is
+  no `az login` fallback (the Azure CLI is not used for sign-in).
 - Run on Windows for Tabular Editor 2; everything else is portable.
 
 ## Checked by tests
 
 `tests/test_embedding.py` embeds PBIxtractor in a minimal host page and checks the prefix, the
 output root, the storage prefix, that no shell/theme is added, that nothing acts on the
-server's machine, and that it works inside a `ui.sub_pages` host.
+server's machine, that there is no account control and no browser sign-in, and that it works
+inside a `ui.sub_pages` host.

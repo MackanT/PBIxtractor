@@ -161,7 +161,11 @@ src/pbixtractor/
                     models/<key>/<file> (checked on the resolved path); logs render as escaped
                     text (_log_text), uploads capped at MAX_UPLOAD_BYTES (2 GB).
                     One download + run at a time across tabs (_JOB_LOCK; a second tab shows
-                    "Waiting for a run in another tab"). Power BI Desktop detection runs in
+                    "Waiting for a run in another tab"). Account control (stand-alone only):
+                    build_page makes one web_sources.AccountState(busy=_JOB_LOCK.locked) for
+                    both panels (embedded: none, no control); register() calls
+                    azure_auth.allow_browser_login(False) (only a service principal signs in
+                    there), start() leaves it allowed. Power BI Desktop detection runs in
                     run.io_bound (psutil takes seconds), debounced 0.5 s while typing a path.
                     Catalog option (switch + folder, default output/_catalog, remembered via
                     stored_choices()); header link "Catalog" → /catalog/.
@@ -396,6 +400,27 @@ src/pbixtractor/
                     fetch(progress) → (report folder, model folder). make_fabric_client /
                     make_devops_client are the test seams. Choices remembered in
                     app.storage.general (.nicegui/, gitignored).
+                    Account (stand-alone; panels take accounts=AccountState, embedded None):
+                    AccountState = one tab's view of the active azure_auth entry, shared by an
+                    AccountControl at the top of each panel (above "Sign in / load"): "Signed in
+                    as <label>" / "Not signed in", searchable select of accounts() (choosing =
+                    use_account), "Add account" (add_account in run.io_bound, "Waiting for
+                    sign-in in your browser…", ApiError → negative notify), remove (the selected
+                    = active entry; remove_account); the unencrypted-tokens note when entries
+                    exist and token_cache_encrypted() is False (asked once, in a thread). A
+                    service principal → "Using the service principal from the environment",
+                    no choices; AZURE_DEVOPS_PAT → the DevOps panel says the token is used and
+                    ignores the account. "Sign in / load" with no active entry runs the add
+                    flow first (ensure_signed_in). A change of the active entry (here, another
+                    tab or `pbixtractor account`: re-read every ACCOUNT_POLL_SECONDS, 3 s) calls
+                    each panel's _account_switched: client dropped, generation +1 (answers on
+                    their way are dropped; DevOps _selection() includes it, PlanPicker has its
+                    own), lists/model-mode switches/model list cleared, then the workspaces /
+                    projects reloaded if they had been loaded (not when no entry is left).
+                    busy() (polled every 0.5 s) disables the control with "Wait for the run to
+                    finish" (switch/add/remove are also refused then); a switch made elsewhere
+                    is applied after the run. Markers <fabric|devops>_account[_status|_add|
+                    _remove|_hint|_note].
   fabric.py         Fabric REST (stdlib urllib): FabricClient (workspaces/reports/
                     semanticModels lists, getDefinition as long-running operation with
                     polling), fetch_report() → <report>.Report + <model>.SemanticModel (TMDL)

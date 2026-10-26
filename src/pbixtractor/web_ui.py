@@ -32,7 +32,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from nicegui import app, background_tasks, events, run, ui
 
-from . import __version__, batch, fabric, web_config, web_sources
+from . import __version__, azure_auth, batch, fabric, web_config, web_sources
 from .azure_auth import ApiError
 from .data import DATA_DIR
 from .live_model import find_local_instances
@@ -159,7 +159,9 @@ def register(
     """
     Embed PBIxtractor in another NiceGUI app: call once at startup (before ui.run), then call
     build_page() inside one of the host's pages. The host keeps its own theme, layout, auth and
-    host checks; PBIxtractor adds no header, rail or colours of its own.
+    host checks; PBIxtractor adds no header, rail or colours of its own. Fabric and Azure DevOps
+    then sign in only with a service principal from the environment (no account control, never
+    a browser on the server).
 
     Args:
         prefix: URL prefix of PBIxtractor's routes (lineage files, catalog)
@@ -179,6 +181,9 @@ def register(
         embedded=True,
         access=access,
     )
+    # A browser sign-in would open on the server: only a service principal from the
+    # environment signs in (else Fabric/DevOps calls fail with an error naming its variables)
+    azure_auth.allow_browser_login(False)
     register_routes()
 
 
@@ -1043,10 +1048,15 @@ def build_page(
                 def suggest_output(name: str) -> None:
                     output_input.value = suggested_output["value"] = str(output_root() / name)
 
+                # One account for both panels (stand-alone; embedded a service principal signs
+                # in): not switchable while a download or run holds the lock, in any tab
+                accounts = (
+                    None if embedded else web_sources.AccountState(busy=lambda: _JOB_LOCK.locked())
+                )
                 remote = {}
                 for key, panel_class in (("fabric", FabricPanel), ("devops", DevOpsPanel)):
                     with ui.column().classes("w-full gap-2") as box:
-                        remote[key] = panel_class(on_choose=suggest_output)
+                        remote[key] = panel_class(on_choose=suggest_output, accounts=accounts)
                     box.bind_visibility_from(source, "value", value=key)
 
                 output_input = ui.input("Output folder").classes("w-full").mark("output")

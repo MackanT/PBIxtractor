@@ -11,18 +11,26 @@ Or, scope "Whole workspaces" / "Whole repository" (panel.is_batch): "List models
 semantic model found (PlanPicker); the ticked ones are documented (panel.selected_jobs(),
 batch.run_batch).
 
+Stand-alone, both panels start with the same account control (AccountState + AccountControl):
+which account signs in, switching between the remembered entries, adding one through the
+browser sign-in, removing one. A switch - here, in another tab or with `pbixtractor account` -
+makes both panels drop their clients and reload what they had loaded with the new account.
+Embedded there is no control (a service principal from the environment signs in).
+
 API calls block (and the first one may open a browser sign-in), so they run in threads.
 """
 
 import logging
+import os
 import queue
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from nicegui import run, ui
 
-from . import batch, devops, fabric
+from . import azure_auth, batch, devops, fabric
 from .azure_auth import ApiError
 from .pipeline import model_name
 from .service_stats import ServiceModel
@@ -124,6 +132,7 @@ class PlanPicker:
         """
         self._plan = plan
         self._check = check
+        self._generation = 0  # +1 on clear(): a listing still on its way is then dropped
         self.jobs: list[batch.BatchJob] = []
         with ui.row().classes("w-full items-center no-wrap gap-2"):
             self.list_button = (
@@ -180,6 +189,7 @@ class PlanPicker:
 
         timer = ui.timer(0.2, show_progress)
         self.list_button.props("loading")
+        generation = self._generation
         jobs = None
         try:
             jobs = await run.io_bound(self._plan, messages.put)
@@ -191,7 +201,7 @@ class PlanPicker:
         finally:
             timer.cancel()
             self.list_button.props(remove="loading")
-        if jobs is None:
+        if jobs is None or generation != self._generation:  # failed, or cleared meanwhile
             self.status.text = ""
             return
         self.show(jobs)
@@ -247,7 +257,8 @@ class PlanPicker:
         return [self.jobs[row["id"]] for row in self.table.selected if row["id"] < len(self.jobs)]
 
     def clear(self) -> None:
-        """The scope changed: what was listed no longer applies."""
+        """The scope (or the account) changed: what was listed no longer applies."""
+        self._generation += 1
         self.jobs = []
         self.table.rows = []
         self.table.selected = []
@@ -256,15 +267,282 @@ class PlanPicker:
         self.status.text = ""
 
 
+# ============================================================================
+# The sign-in account (stand-alone only: embedded, a service principal signs in)
+# ============================================================================
+
+BUSY_POLL_SECONDS = 0.5  # how soon the controls notice a run starting or ending
+ACCOUNT_POLL_SECONDS = 3.0  # how soon a tab follows a switch made elsewhere (tab, command line)
+WAIT_FOR_RUN = "Wait for the run to finish"
+WAITING_FOR_SIGN_IN = "Waiting for sign-in in your browser…"
+UNENCRYPTED = "Tokens stored unencrypted, readable only by your user"
+SERVICE_PRINCIPAL = "Using the service principal from the environment"
+DEVOPS_PAT = "Using the personal access token from AZURE_DEVOPS_PAT"
+
+
+class AccountState:
+    """
+    The active sign-in account as one tab shows it, shared by the account controls of the
+    Fabric and the DevOps panel (one account for both, for the whole app). A switch - made
+    here, in another tab or with `pbixtractor account` - tells every panel that listens, which
+    drops its client and reloads with the new account.
+
+        accounts = AccountState(busy=run_lock.locked)  # no switching while busy() is True
+        FabricPanel(on_choose, accounts)               # shows a control, follows switches
+        await accounts.ensure_signed_in()              # False: the sign-in failed (shown)
+    """
+
+    def __init__(self, busy: Callable[[], bool] = lambda: False):
+        """
+        Args:
+            busy: True while a download or documentation run is in progress (in any tab)
+        """
+        self._busy = busy
+        self._controls: list["AccountControl"] = []
+        self._listeners: list[Callable[[], None]] = []
+        self.service_principal = azure_auth.service_principal_configured()
+        self.entries, self.active = self._read()
+        self.encrypted: Optional[bool] = None  # asked once there are tokens to keep
+        self.signing_in = False
+        self.blocked = bool(busy())
+        self._read_at = time.monotonic()
+        ui.timer(BUSY_POLL_SECONDS, self._poll)
+        if self.entries:
+            ui.timer(0.01, self._check_encryption, once=True)
+
+    @staticmethod
+    def _read() -> tuple[list, Optional[str]]:
+        active = azure_auth.active_account()
+        return azure_auth.accounts(), active.key if active else None
+
+    @property
+    def account(self) -> Optional[azure_auth.Account]:
+        """The active entry (None: not signed in)."""
+        return next((a for a in self.entries if a.key == self.active), None)
+
+    def attach(self, control: "AccountControl") -> None:
+        self._controls.append(control)
+        control.show()
+
+    def on_switch(self, listener: Callable[[], None]) -> None:
+        """Call `listener` after the active account changed (it clears and reloads its panel)."""
+        self._listeners.append(listener)
+
+    def _show(self) -> None:
+        for control in self._controls:
+            control.show()
+
+    def _sync(self) -> bool:
+        """Re-read the account list; show a change and, after a switch, tell the panels.
+        Returns whether anything changed."""
+        self._read_at = time.monotonic()
+        entries, active = self._read()
+        if entries == self.entries and active == self.active:
+            return False
+        switched = active != self.active
+        self.entries, self.active = entries, active
+        self._show()
+        if entries and self.encrypted is None:
+            ui.timer(0.01, self._check_encryption, once=True)
+        if switched:
+            for listener in self._listeners:
+                listener()
+        return True
+
+    def _poll(self) -> None:
+        blocked = bool(self._busy())
+        if blocked != self.blocked:
+            self.blocked = blocked
+            self._show()
+        # A switch made elsewhere waits for a run here to end: its lists are the old account's
+        if not blocked and not self.signing_in and (
+            time.monotonic() - self._read_at >= ACCOUNT_POLL_SECONDS
+        ):
+            self._sync()
+
+    async def _check_encryption(self) -> None:
+        if self.encrypted is not None:
+            return
+        try:
+            # The first call may ask the OS keyring: not on the event loop
+            self.encrypted = await run.io_bound(azure_auth.token_cache_encrypted)
+        except Exception as error:  # the token cache cannot be opened: say nothing about it
+            logger.debug(f"Token cache: {error}")
+            return
+        self._show()
+
+    def _refuse(self) -> bool:
+        """No switching while a run or a sign-in is going (shown; the controls are reset)."""
+        refused = ""
+        if self._busy():
+            refused = f"{WAIT_FOR_RUN}."
+        elif self.signing_in:
+            refused = WAITING_FOR_SIGN_IN
+        if refused:
+            ui.notify(refused, type="warning")
+            self._show()
+        return bool(refused)
+
+    async def ensure_signed_in(self) -> bool:
+        """
+        Before a panel's first call: with no active account (and no service principal) sign
+        in first; the user's home tenant becomes active.
+
+        Returns:
+            False when the sign-in failed or was cancelled (the error is shown)
+        """
+        if self.service_principal:
+            return True
+        self._sync()
+        if self.active is not None:
+            return True
+        return await self.add()
+
+    async def add(self) -> bool:
+        """
+        Sign in through Microsoft's sign-in page (with its account picker), in a thread: the
+        user's tenants become entries, the home tenant the active one.
+
+        Returns:
+            False when the sign-in failed, was cancelled or timed out (the error is shown)
+        """
+        if self._refuse():
+            return False
+        self.signing_in = True
+        self._show()
+        try:
+            await run.io_bound(azure_auth.add_account)
+            return True
+        except (ApiError, ValueError, OSError) as error:
+            ui.notify(str(error), type="negative", multi_line=True, timeout=15000)
+            return False
+        except Exception as error:  # UI boundary: never let a click end without any message
+            logger.exception(f"Sign-in failed unexpectedly: {error}")
+            ui.notify(f"Sign-in failed: {error}", type="negative", multi_line=True, timeout=15000)
+            return False
+        finally:
+            self.signing_in = False
+            if not self._sync():
+                self._show()
+
+    def choose(self, key: Optional[str]) -> None:
+        """Make another entry the active one (a select's choice)."""
+        if not key or key == self.active or self._refuse():
+            return
+        try:
+            azure_auth.use_account(key)
+        except ValueError as error:  # removed meanwhile (another tab, the command line)
+            ui.notify(str(error), type="warning")
+        if not self._sync():
+            self._show()
+
+    async def remove(self, key: Optional[str]) -> None:
+        """Forget an entry; when it was the active one, the first remaining one is active."""
+        if not key or self._refuse():
+            return
+        removed = next((a.label for a in self.entries if a.key == key), key)
+        try:
+            # The user's last entry also deletes their tokens (may ask the sign-in service)
+            await run.io_bound(azure_auth.remove_account, key)
+            ui.notify(f"Removed {removed}")
+        except ValueError as error:  # removed meanwhile
+            ui.notify(str(error), type="warning")
+        except Exception as error:  # UI boundary
+            logger.exception(f"Removing {removed} failed: {error}")
+            ui.notify(f"Removing {removed} failed: {error}", type="negative", multi_line=True)
+        if not self._sync():
+            self._show()
+
+
+class AccountControl:
+    """Which account signs in, and switching it: one at the top of each panel, all showing
+    one AccountState."""
+
+    def __init__(self, state: AccountState, marker: str):
+        """
+        Args:
+            state: The tab's account state (shared by the panels)
+            marker: Prefix of the elements' markers ("fabric" -> "fabric_account", ...)
+        """
+        self._state = state
+        self.select: Optional[ui.select] = None
+        with ui.column().classes("w-full gap-1"):
+            if state.service_principal:
+                with ui.row().classes("items-center no-wrap gap-2"):
+                    ui.icon("vpn_key", color="primary")
+                    ui.label(SERVICE_PRINCIPAL).classes("text-sm").mark(f"{marker}_account_status")
+                return
+            with ui.row().classes("w-full items-center no-wrap gap-2"):
+                ui.icon("account_circle", color="primary")
+                self.status = ui.label("").classes("text-sm").mark(f"{marker}_account_status")
+            with ui.row().classes("w-full items-center no-wrap gap-2"):
+                self.select = (
+                    ui.select(
+                        {}, label="Account", with_input=True, on_change=lambda e: state.choose(e.value)
+                    )
+                    .props("dense")
+                    .classes("grow")
+                    .tooltip("One account for Fabric and Azure DevOps, in every tab")
+                    .mark(f"{marker}_account")
+                )
+                self.add_button = (
+                    ui.button("Add account", icon="person_add", on_click=state.add)
+                    .props("flat no-caps")
+                    .tooltip("Sign in in your browser: the user's tenants are added")
+                    .mark(f"{marker}_account_add")
+                )
+                self.remove_button = (
+                    ui.button(icon="person_remove", on_click=lambda: state.remove(self.select.value))
+                    .props("flat round dense")
+                    .tooltip("Remove this account from the list")
+                    .mark(f"{marker}_account_remove")
+                )
+            self.hint = ui.label("").classes("text-sm text-grey-7").mark(f"{marker}_account_hint")
+            self.note = (
+                ui.label(UNENCRYPTED).classes("text-caption text-grey-7").mark(f"{marker}_account_note")
+            )
+        state.attach(self)
+
+    def show(self) -> None:
+        """Show the state: the active entry, the choices, and why they are disabled."""
+        if self.select is None:  # a service principal: nothing to choose
+            return
+        state = self._state
+        account = state.account
+        self.status.text = f"Signed in as {account.label}" if account else "Not signed in"
+        _set_options(self.select, {a.key: a.label for a in state.entries}, state.active)
+        hint = WAITING_FOR_SIGN_IN if state.signing_in else WAIT_FOR_RUN if state.blocked else ""
+        self.hint.text = hint
+        self.hint.visible = bool(hint)
+        locked = state.signing_in or state.blocked
+        self.select.set_enabled(not locked and bool(state.entries))
+        self.add_button.set_enabled(not locked)
+        self.remove_button.set_enabled(not locked and state.active is not None)
+        self.note.visible = bool(state.entries) and state.encrypted is False
+
+
 class FabricPanel:
     """Workspace -> report; the report's semantic model is downloaded with it. Or whole
     workspaces: the models used by their reports are listed, the ticked ones documented
     (one documentation each, batch.py)."""
 
-    def __init__(self, on_choose: Callable[[str], None]):
+    def __init__(self, on_choose: Callable[[str], None], accounts: Optional[AccountState] = None):
+        """
+        Args:
+            on_choose: Called with the chosen report's name
+            accounts: The tab's account state: the panel shows its control and follows its
+                switches (None, embedded: no control, a service principal signs in)
+        """
         self._on_choose = on_choose
+        self._accounts = accounts
         self._client = None
         self._workspaces: dict[str, str] = {}
+        self._generation = 0  # +1 on an account switch: answers for the old account are dropped
+        self._loaded = False  # the workspaces were loaded (a switch reloads them)
+        self._slot = ui.context.slot
+        if accounts is not None:
+            AccountControl(accounts, "fabric")
+            accounts.on_switch(self._account_switched)
         ui.label(
             "Downloads the report and its semantic model with the Fabric REST API. Needs "
             "Contributor (or higher) access; reports with an encrypting sensitivity label cannot "
@@ -349,9 +627,14 @@ class FabricPanel:
         return self._client
 
     async def load_workspaces(self) -> None:
-        items = await _call(lambda: self._get_client().workspaces(), select=self.workspace)
-        if items is None:
+        # No account yet: the browser sign-in first (its home tenant becomes active)
+        if self._accounts is not None and not await self._accounts.ensure_signed_in():
             return
+        generation = self._generation
+        items = await _call(lambda: self._get_client().workspaces(), select=self.workspace)
+        if items is None or generation != self._generation:  # failed, or the account changed
+            return
+        self._loaded = True
         self._workspaces = {
             w["id"]: w["displayName"] for w in sorted(items, key=lambda w: w["displayName"].lower())
         }
@@ -366,14 +649,33 @@ class FabricPanel:
         _set_options(self.report, {})
         if not self.workspace.value:
             return
-        workspace = self.workspace.value
+        workspace, generation = self.workspace.value, self._generation
         stored_choices()["fabric_workspace"] = workspace
         items = await _call(self._get_client().reports, workspace, select=self.report)
-        if items is not None and self.workspace.value == workspace:  # not changed meanwhile
+        # Not changed meanwhile (the workspace, or the account)
+        if items is not None and self.workspace.value == workspace and generation == self._generation:
             _set_options(
                 self.report,
                 {r["id"]: r["displayName"] for r in sorted(items, key=lambda r: r["displayName"].lower())},
             )
+
+    def _account_switched(self) -> None:
+        """Another account is active: drop the client and everything the old account loaded,
+        then reload the workspaces if they had been loaded."""
+        reload = self._loaded and self._accounts is not None and self._accounts.active is not None
+        self._generation += 1
+        self._client = None
+        self._loaded = False
+        self._workspaces = {}
+        _set_options(self.workspace, {})
+        self.workspaces.set_options({}, value=[])
+        _set_options(self.report, {})
+        self.all_reports.value = False
+        self.all_workspaces.value = False
+        self.picker.clear()
+        if reload:
+            with self._slot:
+                ui.timer(0.01, self.load_workspaces, once=True)
 
     def _report_changed(self) -> None:
         if self.report.value:
@@ -415,10 +717,29 @@ class DevOpsPanel:
     whole repository (optionally one folder): its models are listed, the ticked ones
     documented (one documentation each, batch.py)."""
 
-    def __init__(self, on_choose: Callable[[str], None]):
+    def __init__(self, on_choose: Callable[[str], None], accounts: Optional[AccountState] = None):
+        """
+        Args:
+            on_choose: Called with the chosen report's name
+            accounts: The tab's account state: the panel shows its control and follows its
+                switches (None, embedded: no control, a service principal signs in). With
+                AZURE_DEVOPS_PAT set the token is used instead, and the panel says so.
+        """
         self._on_choose = on_choose
+        self._accounts: Optional[AccountState] = None  # None: no account (embedded, or a PAT)
         self._client = None
         self._default_branches: dict[str, str] = {}
+        self._generation = 0  # +1 on an account switch: answers for the old account are dropped
+        self._loaded = False  # the projects were loaded (a switch reloads them)
+        self._slot = ui.context.slot
+        if accounts is not None and os.environ.get("AZURE_DEVOPS_PAT"):
+            with ui.row().classes("items-center no-wrap gap-2"):
+                ui.icon("key", color="primary")
+                ui.label(DEVOPS_PAT).classes("text-sm").mark("devops_account_status")
+        elif accounts is not None:
+            self._accounts = accounts
+            AccountControl(accounts, "devops")
+            accounts.on_switch(self._account_switched)
         ui.label(
             "Reads a PBIP project (report + the semantic model it references) from a git "
             "repository, at the latest version of a branch or at an older commit. Same sign-in "
@@ -532,9 +853,14 @@ class DevOpsPanel:
         if not (self.org.value or "").strip():
             ui.notify("Enter the organisation first.", type="warning")
             return
-        names = await _call(lambda: self._get_client().projects(), select=self.project)
-        if names is None:
+        # No account yet: the browser sign-in first (its home tenant becomes active)
+        if self._accounts is not None and not await self._accounts.ensure_signed_in():
             return
+        generation = self._generation
+        names = await _call(lambda: self._get_client().projects(), select=self.project)
+        if names is None or generation != self._generation:  # failed, or the account changed
+            return
+        self._loaded = True
         stored_choices()["devops_org"] = self.org.value.strip()
         _set_options(self.project, {n: n for n in names}, stored_choices().get("devops_project"))
 
@@ -601,9 +927,26 @@ class DevOpsPanel:
             self.version.set_options(options, value="")
 
     def _selection(self, depth: int) -> tuple:
-        """The first `depth` choices (project, repo, branch, report): a slow answer is only
-        applied if they did not change while it was on its way."""
-        return (self.project.value, self.repo.value, self.branch.value, self.report.value)[:depth]
+        """The account and the first `depth` choices (project, repo, branch, report): a slow
+        answer is only applied if they did not change while it was on its way."""
+        choices = (self.project.value, self.repo.value, self.branch.value, self.report.value)
+        return (self._generation, *choices[:depth])
+
+    def _account_switched(self) -> None:
+        """Another account is active: drop the client and everything the old account loaded,
+        then reload the projects if they had been loaded."""
+        reload = self._loaded and self._accounts is not None and self._accounts.active is not None
+        self._generation += 1
+        self._client = None
+        self._loaded = False
+        self._default_branches = {}
+        for select in (self.project, self.repo, self.branch, self.report):
+            _set_options(select, {})
+        self.version.set_options({"": "Latest on the branch"}, value="")
+        self.picker.clear()
+        if reload:
+            with self._slot:
+                ui.timer(0.01, self.load_projects, once=True)
 
     def ready(self) -> bool:
         if self.is_batch:
