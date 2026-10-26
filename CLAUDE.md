@@ -24,7 +24,8 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
     `DependsOn`) and live statistics — all local/offline.
   - TSV export (default off; `--tabular-editor-tsv`): old `documentation.tsv` export; runs FormatDax, which
     sends DAX to daxformatter.com.
-- sqlglot (native SQL in partitions), azure-identity (Fabric / DevOps sign-in)
+- sqlglot (native SQL in partitions), msal + msal-extensions (Fabric / DevOps browser sign-in,
+  account list, token cache), azure-identity (only EnvironmentCredential: a service principal)
 
 ## Running
 Machine-specific notes (working clone, real test reports, what was verified on which report)
@@ -72,6 +73,9 @@ done on request.
 ```
 src/pbixtractor/
   cli.py            argparse: no command → web UI; `web [--port] [--no-browser]`;
+                    `account list | add [--tenant X] | use <n|name> | remove <n|name>`
+                    (azure_auth; find_account; list = numbered labels, * active, notes for
+                    unencrypted tokens / a service principal; errors → "ERROR: ..." + exit 1);
                     `devops list ORG [PROJECT [REPO]] [--history PATH]`, `devops fetch URL
                     [--ref branch|tag:x|commit:x] [-o]`;
                     `extract [report | --fabric WS/REPORT | --devops URL [--ref]] [--tenant] [--model] [-o] [--name]
@@ -236,9 +240,28 @@ src/pbixtractor/
                     followed (shared expressions + single-M-partition tables; parameter
                     queries skipped), "Entered data". Partition.source_summary() uses it;
                     parse_model() sets Partition.queries.
-  azure_auth.py     Shared sign-in + REST: get_credential(tenant) (one per process; AzureCli
-                    if `az` exists, else InteractiveBrowserCredential with DPAPI cache + account
-                    record ~/.pbixtractor/auth_record.json; one login serves Fabric and DevOps),
+  azure_auth.py     Shared sign-in + REST. Accounts (no Azure CLI): MSAL PublicClientApplication
+                    (client id 04b07795-..., one app per tenant authority, one shared token
+                    cache) - add_account(tenant, timeout) = browser sign-in with the account
+                    picker (LOGIN_TIMEOUT 180 s, logins serialised by one lock), then the user's
+                    tenants from ARM GET /tenants (nextLink; on failure only the signed-in tenant
+                    + a warning) → one Account(username, home_account_id, tenant_id,
+                    tenant_name, home; key, label "<user> · <tenant>") per tenant; re-adding a
+                    user replaces their entries; `tenant` or the home tenant becomes active.
+                    accounts() (by user, home first, tenant name), active_account(),
+                    use_account(key), find_account(text) (number / key / user / tenant),
+                    remove_account(key) (user's last entry → its tokens removed; active → first
+                    remaining). Files in AUTH_DIR (~/.pbixtractor): accounts.json (entries +
+                    active key, no secrets; re-read on every call, so all tabs and the CLI share
+                    one active entry) and msal_token_cache.bin (msal_extensions: OS-encrypted
+                    when possible, else a 0600 plain file; token_cache_encrypted()).
+                    get_credential(tenant) / default_credential(tenant) (same):
+                    EnvironmentCredential when service_principal_configured(); else bound to the
+                    entry active when called (tenant = the active user in that tenant);
+                    get_token: silent first, browser (login hint) only when MSAL asks for
+                    interaction; no active entry → the first get_token runs add_account.
+                    allow_browser_login(False) (embedded) → ApiError naming the service
+                    principal variables. One login serves Fabric, DevOps and Power BI.
                     RestClient(api, scope, credential | pat) .request(method, url, body, raw):
                     https only (except localhost), retries 429/5xx/network errors (MAX_ATTEMPTS
                     5, Retry-After seconds or date, max 120 s), no Authorization header on a
@@ -638,9 +661,12 @@ Open, by owner priority:
 - Excel → lineage viewer links (low). Web UI polish (run history, model tab, JSON search).
 - Not planned: XMLA sizes for service models (reports may live in Pro workspaces).
 
-Tests: tests/conftest.py blocks real sign-in (get_credential raises, AZURE_DEVOPS_PAT removed),
-allows only local sockets, and points NiceGUI storage at a temp folder - pass fake
-clients/credentials. Web UI tests poll (`_wait_for`) instead of fixed sleeps.
+Tests: tests/conftest.py blocks real sign-in (get_credential / default_credential raise,
+AZURE_DEVOPS_PAT and the AZURE_CLIENT_* service principal variables removed, azure_auth.AUTH_DIR
+in a temp folder, no OS keyring, azure_auth._new_app and MSAL's acquire_token_interactive
+raise), allows only local sockets, and points NiceGUI storage at a temp folder - pass fake
+clients/credentials (tests/test_azure_auth.py: a fake MSAL app). Web UI tests poll
+(`_wait_for`) instead of fixed sleeps.
 
 Regression runs (`tools/regress.py`, `Input/regression.json`) use live reports: local only
 (Input/ and output/ are gitignored) - they are not part of PBIxtractor and never go into the repo

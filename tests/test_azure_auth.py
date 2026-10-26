@@ -1,0 +1,555 @@
+"""Tests for the sign-in accounts (azure_auth.py) and `pbixtractor account`, with a fake MSAL."""
+
+import base64
+import json
+import os
+import stat
+import threading
+import time
+
+import pytest
+
+from pbixtractor import azure_auth
+from pbixtractor.azure_auth import FABRIC_SCOPE, Account, ApiError
+
+# The real ones, imported at collection time: conftest replaces both during tests
+from pbixtractor.azure_auth import default_credential as real_default_credential
+from pbixtractor.azure_auth import get_credential as real_get_credential
+from pbixtractor.cli import main
+
+CONTOSO = "aaaaaaaa-0000-0000-0000-000000000001"
+FABRIKAM = "aaaaaaaa-0000-0000-0000-000000000002"
+NORTHWIND = "aaaaaaaa-0000-0000-0000-000000000003"
+NAMES = {CONTOSO: "Contoso", FABRIKAM: "Fabrikam", NORTHWIND: "Northwind"}
+DOMAINS = {"fabrikam.com": FABRIKAM}
+
+
+class FakeCloud:
+    """Microsoft's sign-in as far as the tests need it: users, their tenants and their tokens."""
+
+    def __init__(self):
+        self.users = {}  # home_account_id -> {"username", "oid", "tenants"}
+        self.picker = None  # home_account_id the account picker returns
+        self.signed_in = set()  # home_account_ids with tokens in the cache
+        self.interactive = []  # the interactive sign-ins (tenant, prompt, login_hint, ...)
+        self.interactive_result = None  # replaces the sign-in result (e.g. an error)
+        self.interactive_delay = 0.0
+        self.silent_errors = {}  # tenant -> MSAL error result for silent calls
+        self.listing_fails = False
+        self.removed = []
+        self.authorities = []
+
+    def add_user(self, name, home, *guest_of):
+        oid = f"oid-{name}"
+        home_account_id = f"{oid}.{home}"
+        self.users[home_account_id] = {
+            "username": f"{name}@{NAMES[home].lower()}.com",
+            "oid": oid,
+            "tenants": [home, *guest_of],
+        }
+        return home_account_id
+
+    def token(self, home_account_id, tenant, scopes):
+        user = self.users[home_account_id]
+        oid, home = home_account_id.split(".")
+        client_info = base64.urlsafe_b64encode(json.dumps({"uid": oid, "utid": home}).encode())
+        return {
+            "access_token": f"{user['username']}|{tenant}|{' '.join(scopes)}",
+            "expires_in": 3600,
+            "client_info": client_info.decode().rstrip("="),
+            "id_token_claims": {"preferred_username": user["username"], "tid": tenant, "oid": oid},
+        }
+
+    def list_tenants(self, access_token):
+        if self.listing_fails:
+            raise ApiError("HTTP 403: AuthorizationFailed [https://management.azure.com/tenants]")
+        username = access_token.split("|")[0]
+        user = next(u for u in self.users.values() if u["username"] == username)
+        return [{"tenantId": t, "displayName": NAMES[t]} for t in user["tenants"]]
+
+
+class FakeApp:
+    """An msal.PublicClientApplication for one authority, backed by the FakeCloud."""
+
+    def __init__(self, cloud, authority, token_cache):
+        assert token_cache is not None
+        self.cloud = cloud
+        self.tenant = authority.rsplit("/", 1)[1]
+        cloud.authorities.append(authority)
+
+    def _tenant_id(self, home_account_id):
+        if self.tenant == "organizations":
+            return home_account_id.split(".")[1]
+        return DOMAINS.get(self.tenant, self.tenant)
+
+    def get_accounts(self, username=None):
+        return [
+            {"home_account_id": key, "username": user["username"], "environment": "login"}
+            for key, user in self.cloud.users.items()
+            if key in self.cloud.signed_in
+            and (username is None or user["username"].lower() == username.lower())
+        ]
+
+    def acquire_token_interactive(self, scopes, prompt=None, login_hint=None, timeout=None, **kw):
+        cloud = self.cloud
+        cloud.interactive.append(
+            {"tenant": self.tenant, "prompt": prompt, "login_hint": login_hint, "timeout": timeout,
+             "scopes": list(scopes)}
+        )
+        time.sleep(cloud.interactive_delay)
+        if cloud.interactive_result is not None:
+            result = cloud.interactive_result
+            if isinstance(result, Exception):
+                raise result
+            return result
+        if login_hint:
+            key = next(k for k, u in cloud.users.items() if u["username"] == login_hint)
+        else:
+            key = cloud.picker
+        tenant = self._tenant_id(key)
+        cloud.signed_in.add(key)
+        cloud.silent_errors.pop(tenant, None)  # e.g. the tenant's MFA is now done
+        return cloud.token(key, tenant, scopes)
+
+    def acquire_token_silent_with_error(self, scopes, account, claims_challenge=None, **kw):
+        key = account["home_account_id"]
+        if key not in self.cloud.signed_in:
+            return None
+        tenant = self._tenant_id(key)
+        if tenant in self.cloud.silent_errors:
+            return self.cloud.silent_errors[tenant]
+        return self.cloud.token(key, tenant, scopes)
+
+    def remove_account(self, account):
+        self.cloud.signed_in.discard(account["home_account_id"])
+        self.cloud.removed.append(account["home_account_id"])
+
+
+@pytest.fixture
+def cloud(monkeypatch):
+    fake = FakeCloud()
+    monkeypatch.setattr(azure_auth, "_new_app", lambda authority, cache: FakeApp(fake, authority, cache))
+    monkeypatch.setattr(azure_auth, "_list_tenants", fake.list_tenants)
+    return fake
+
+
+@pytest.fixture
+def marcus(cloud):
+    """A user in Contoso who is a guest in two client tenants; the picker returns him."""
+    cloud.picker = cloud.add_user("marcus", CONTOSO, FABRIKAM, NORTHWIND)
+    return cloud.picker
+
+
+def _tenant_of(token) -> str:
+    return token.token.split("|")[1]
+
+
+def _user_of(token) -> str:
+    return token.token.split("|")[0]
+
+
+def _by_tenant(tenant_id) -> Account:
+    return next(a for a in azure_auth.accounts() if a.tenant_id == tenant_id)
+
+
+# ---------------------------------------------------------------------------
+# Signing in and the account list
+# ---------------------------------------------------------------------------
+
+
+def test_no_azure_cli_in_the_chain(monkeypatch, cloud, marcus):
+    import shutil
+
+    import azure.identity
+
+    class NoCli:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("the Azure CLI must not be used")
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")  # `az` is installed
+    monkeypatch.setattr(azure.identity, "AzureCliCredential", NoCli)
+    azure_auth.add_account()
+    for make in (real_get_credential, real_default_credential):
+        credential = make()
+        assert not isinstance(credential, azure.identity.ChainedTokenCredential)
+        assert _user_of(credential.get_token(FABRIC_SCOPE)) == "marcus@contoso.com"
+    assert "AzureCli" not in open(azure_auth.__file__, encoding="utf-8").read()
+
+
+def test_a_service_principal_still_comes_first(monkeypatch, cloud):
+    from azure.identity import EnvironmentCredential
+
+    for name, value in (("AZURE_CLIENT_ID", "x"), ("AZURE_CLIENT_SECRET", "y"),
+                        ("AZURE_TENANT_ID", CONTOSO)):
+        monkeypatch.setenv(name, value)
+    assert isinstance(real_get_credential(), EnvironmentCredential)
+    assert isinstance(real_default_credential(FABRIKAM), EnvironmentCredential)
+    assert cloud.interactive == []
+
+
+def test_adding_an_account_lists_every_tenant_and_makes_home_active(cloud, marcus):
+    added = azure_auth.add_account()
+
+    assert cloud.interactive == [
+        {"tenant": "organizations", "prompt": "select_account", "login_hint": None,
+         "timeout": azure_auth.LOGIN_TIMEOUT, "scopes": [azure_auth.ARM_SCOPE]}
+    ]
+    assert [a.label for a in added] == [
+        "marcus@contoso.com · Contoso",  # home first, then by tenant name
+        "marcus@contoso.com · Fabrikam",
+        "marcus@contoso.com · Northwind",
+    ]
+    assert azure_auth.accounts() == added
+    assert [a.home for a in added] == [True, False, False]
+    assert added[0].home_account_id == marcus
+    assert added[0].key == f"{marcus}|{CONTOSO}"
+    assert azure_auth.active_account() == added[0]
+
+    stored = json.loads((azure_auth.AUTH_DIR / "accounts.json").read_text(encoding="utf-8"))
+    assert stored["active"] == added[0].key
+    assert {key for entry in stored["accounts"] for key in entry} == {
+        "username", "home_account_id", "tenant_id", "tenant_name", "home"
+    }  # no tokens in the account list
+    assert "|" not in json.dumps(stored["accounts"])  # (the fake's tokens contain "|")
+
+
+def test_adding_with_a_tenant_signs_in_there_and_makes_it_active(cloud, marcus):
+    azure_auth.add_account(FABRIKAM)
+    assert cloud.interactive[-1]["tenant"] == FABRIKAM
+    assert azure_auth.active_account() == _by_tenant(FABRIKAM)
+    assert len(azure_auth.accounts()) == 3
+
+    azure_auth.add_account("fabrikam.com")  # a domain: the token tells the tenant id
+    assert cloud.interactive[-1]["tenant"] == "fabrikam.com"
+    assert azure_auth.active_account().tenant_id == FABRIKAM
+
+
+def test_adding_the_same_user_again_refreshes_their_entries(cloud, marcus):
+    cloud.picker = cloud.add_user("anna", NORTHWIND)
+    azure_auth.add_account()
+    cloud.picker = marcus
+    azure_auth.add_account()
+    assert len(azure_auth.accounts()) == 4
+
+    cloud.users[marcus]["tenants"].remove(NORTHWIND)  # no longer a guest there
+    added = azure_auth.add_account()
+    assert [a.tenant_id for a in added] == [CONTOSO, FABRIKAM]
+    assert [a.label for a in azure_auth.accounts()] == [
+        "anna@northwind.com · Northwind",
+        "marcus@contoso.com · Contoso",
+        "marcus@contoso.com · Fabrikam",
+    ]
+
+
+def test_when_tenants_cannot_be_listed_only_the_signed_in_tenant_is_added(cloud, marcus, caplog):
+    cloud.listing_fails = True
+    added = azure_auth.add_account()
+    assert added == [Account("marcus@contoso.com", marcus, CONTOSO, "", home=True)]
+    assert added[0].label == f"marcus@contoso.com · {CONTOSO}"
+    assert "Could not list the tenants of marcus@contoso.com" in caplog.text
+
+    azure_auth.add_account(NORTHWIND)  # the way in then: a typed tenant
+    assert [a.tenant_id for a in azure_auth.accounts()] == [NORTHWIND]  # the user's entries replaced
+    assert azure_auth.active_account().tenant_id == NORTHWIND
+
+
+def test_tenants_are_listed_page_by_page(monkeypatch):
+    pages = {
+        azure_auth.TENANTS_URL: {"value": [{"tenantId": CONTOSO}],
+                                 "nextLink": "https://management.azure.com/tenants?page=2"},
+        "https://management.azure.com/tenants?page=2": {
+            "value": [{"tenantId": FABRIKAM}], "nextLink": "https://elsewhere.example.com/x"},
+    }
+    calls = []
+
+    def request(self, method, url, body=None, raw=False):
+        calls.append(url)
+        assert self._auth_header() == "Bearer arm-token"
+        return 200, {}, pages[url]
+
+    monkeypatch.setattr(azure_auth.RestClient, "request", request)
+    tenants = azure_auth._list_tenants("arm-token")
+    assert [t["tenantId"] for t in tenants] == [CONTOSO, FABRIKAM]
+    assert calls == list(pages)  # a nextLink to another host is not followed
+
+
+def test_sign_in_errors(cloud, marcus):
+    from msal import BrowserInteractionTimeoutError
+
+    cloud.interactive_result = BrowserInteractionTimeoutError("User did not complete the flow")
+    with pytest.raises(ApiError, match="Sign-in failed: not completed within 180 s"):
+        azure_auth.add_account()
+    cloud.interactive_result = {"error": "access_denied",
+                                "error_description": "AADSTS65004: User declined\r\nTrace ID: 1"}
+    with pytest.raises(ApiError, match=r"Sign-in failed: AADSTS65004: User declined$"):
+        azure_auth.add_account()
+    assert azure_auth.accounts() == []
+
+
+def test_finding_and_using_an_entry(cloud, marcus):
+    cloud.picker = cloud.add_user("anna", NORTHWIND)
+    azure_auth.add_account()
+    cloud.picker = marcus
+    azure_auth.add_account()
+    entries = azure_auth.accounts()  # anna · Northwind, marcus · Contoso / Fabrikam / Northwind
+
+    assert azure_auth.find_account("2") == entries[1]
+    assert azure_auth.find_account(entries[3].key) == entries[3]
+    assert azure_auth.find_account("fabrikam") == entries[2]  # part of a tenant name
+    assert azure_auth.find_account("ANNA@northwind.com") == entries[0]
+    assert azure_auth.find_account(FABRIKAM) == entries[2]
+    assert azure_auth.find_account("marcus@contoso.com · Northwind") == entries[3]
+    with pytest.raises(ValueError, match=r"'northwind' matches several accounts: 1\. .*; 4\. "):
+        azure_auth.find_account("northwind")
+    with pytest.raises(ValueError, match="No account matches 'nobody'"):
+        azure_auth.find_account("nobody")
+    with pytest.raises(ValueError, match="No account number 5"):
+        azure_auth.find_account("5")
+
+    assert azure_auth.use_account(entries[2].key) == entries[2]
+    assert azure_auth.active_account() == entries[2]
+    with pytest.raises(ValueError, match="No account"):
+        azure_auth.use_account("unknown|key")
+
+
+def test_removing_entries(cloud, marcus):
+    anna = cloud.picker = cloud.add_user("anna", NORTHWIND)
+    azure_auth.add_account()
+    cloud.picker = marcus
+    azure_auth.add_account()  # marcus · Contoso active
+    contoso, fabrikam = _by_tenant(CONTOSO), _by_tenant(FABRIKAM)
+    northwind = next(a for a in azure_auth.accounts() if a.home_account_id == marcus
+                     and a.tenant_id == NORTHWIND)
+
+    azure_auth.remove_account(fabrikam.key)  # not the active one: it stays
+    assert azure_auth.active_account() == contoso
+    azure_auth.remove_account(contoso.key)  # the active one: the first remaining entry
+    assert azure_auth.active_account() == azure_auth.accounts()[0]
+    assert azure_auth.active_account().home_account_id == anna
+    assert cloud.removed == []  # marcus still has an entry: his tokens stay
+
+    azure_auth.remove_account(northwind.key)  # his last entry: his tokens go too
+    assert cloud.removed == [marcus]
+    assert marcus not in cloud.signed_in and anna in cloud.signed_in
+    assert [a.home_account_id for a in azure_auth.accounts()] == [anna]
+
+    azure_auth.remove_account(azure_auth.accounts()[0].key)
+    assert azure_auth.accounts() == [] and azure_auth.active_account() is None
+    with pytest.raises(ValueError, match="No account"):
+        azure_auth.remove_account(contoso.key)
+
+
+def test_the_old_auth_record_is_left_alone(cloud, marcus):
+    record = azure_auth.AUTH_DIR / "auth_record.json"
+    record.write_text('{"username": "old"}', encoding="utf-8")
+    azure_auth.add_account()
+    azure_auth.remove_account(azure_auth.accounts()[0].key)
+    assert record.read_text(encoding="utf-8") == '{"username": "old"}'
+    assert not hasattr(azure_auth, "AUTH_RECORD")
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
+
+
+def test_a_credential_keeps_its_account_after_a_switch(cloud, marcus):
+    from azure.core.credentials import AccessToken
+
+    azure_auth.add_account()
+    before = real_get_credential()
+    azure_auth.use_account(_by_tenant(FABRIKAM).key)
+    after = real_get_credential()
+
+    token = before.get_token(FABRIC_SCOPE)
+    assert isinstance(token, AccessToken)
+    assert token.expires_on > time.time() + 3000
+    assert token.token == f"marcus@contoso.com|{CONTOSO}|{FABRIC_SCOPE}"
+    assert _tenant_of(after.get_token(FABRIC_SCOPE)) == FABRIKAM
+    assert _tenant_of(before.get_token(FABRIC_SCOPE)) == CONTOSO  # still bound to Contoso
+    assert len(cloud.interactive) == 1  # only the first sign-in
+
+
+def test_a_tenant_override_uses_the_active_user_there(cloud, marcus):
+    cloud.picker = cloud.add_user("anna", NORTHWIND, FABRIKAM)
+    azure_auth.add_account()
+    cloud.picker = marcus
+    azure_auth.add_account()  # marcus · Contoso active
+
+    assert real_get_credential(FABRIKAM).get_token(FABRIC_SCOPE).token.startswith(
+        f"marcus@contoso.com|{FABRIKAM}|"
+    )
+    token = real_get_credential("other.example.com").get_token(FABRIC_SCOPE)  # not listed
+    assert token.token.startswith("marcus@contoso.com|other.example.com|")
+    assert cloud.authorities[-1] == "https://login.microsoftonline.com/other.example.com"
+
+    azure_auth.use_account(next(a for a in azure_auth.accounts() if a.username.startswith("anna")).key)
+    assert _user_of(real_get_credential(FABRIKAM).get_token(FABRIC_SCOPE)) == "anna@northwind.com"
+    assert azure_auth.active_account().tenant_id == NORTHWIND  # the override changes nothing
+    assert len(cloud.interactive) == 2
+
+
+def test_the_first_token_without_an_account_signs_in(cloud, marcus):
+    credential = real_get_credential()
+    assert cloud.interactive == []  # nothing happens until a token is needed
+    assert _tenant_of(credential.get_token(FABRIC_SCOPE)) == CONTOSO
+    assert cloud.interactive[0]["prompt"] == "select_account"
+    assert len(azure_auth.accounts()) == 3
+    assert azure_auth.active_account().tenant_id == CONTOSO
+
+
+def test_the_first_token_with_a_tenant_signs_in_there(cloud, marcus):
+    assert _tenant_of(real_get_credential(FABRIKAM).get_token(FABRIC_SCOPE)) == FABRIKAM
+    assert cloud.interactive[0]["tenant"] == FABRIKAM
+    assert azure_auth.active_account().tenant_id == FABRIKAM
+
+
+def test_two_threads_without_an_account_sign_in_once(cloud, marcus):
+    cloud.interactive_delay = 0.2
+    credentials = [real_get_credential(), real_get_credential()]
+    tokens = []
+    threads = [threading.Thread(target=lambda c=c: tokens.append(c.get_token(FABRIC_SCOPE)))
+               for c in credentials]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert len(tokens) == 2 and len(cloud.interactive) == 1
+
+
+def test_interaction_only_when_msal_asks_for_it(cloud, marcus):
+    azure_auth.add_account()
+    azure_auth.use_account(_by_tenant(FABRIKAM).key)
+    mfa = {"error": "invalid_grant", "suberror": "basic_action",
+           "error_description": "AADSTS50076: you must use multi-factor authentication\r\nTrace ID: 2"}
+    cloud.silent_errors[FABRIKAM] = mfa
+    credential = real_get_credential()
+    assert _tenant_of(credential.get_token(FABRIC_SCOPE)) == FABRIKAM
+    assert cloud.interactive[-1] == {"tenant": FABRIKAM, "prompt": None,
+                                     "login_hint": "marcus@contoso.com",
+                                     "timeout": azure_auth.LOGIN_TIMEOUT, "scopes": [FABRIC_SCOPE]}
+    credential.get_token(FABRIC_SCOPE)  # MFA done: silent again
+    assert len(cloud.interactive) == 2
+
+    cloud.silent_errors[FABRIKAM] = {"error": "invalid_client",
+                                     "error_description": "AADSTS7000218: bad request\r\nTrace ID: 3"}
+    with pytest.raises(ApiError, match=r"^Sign-in failed: AADSTS7000218: bad request$"):
+        credential.get_token(FABRIC_SCOPE)
+    assert len(cloud.interactive) == 2  # no browser for an error a sign-in cannot fix
+
+    cloud.silent_errors.clear()
+    cloud.signed_in.clear()  # tokens gone from the cache: sign in again as that user
+    assert _tenant_of(credential.get_token(FABRIC_SCOPE)) == FABRIKAM
+    assert cloud.interactive[-1]["login_hint"] == "marcus@contoso.com"
+
+
+def test_signing_in_as_someone_else_is_refused(cloud, marcus):
+    azure_auth.add_account()
+    anna = cloud.add_user("anna", NORTHWIND)
+    cloud.signed_in.clear()
+    cloud.signed_in.add(anna)
+    cloud.interactive_result = cloud.token(anna, NORTHWIND, [FABRIC_SCOPE])
+    with pytest.raises(ApiError, match="signed in as anna@northwind.com, but the account in use "
+                                       "is marcus@contoso.com"):
+        real_get_credential().get_token(FABRIC_SCOPE)
+
+
+def test_embedded_never_opens_a_browser(monkeypatch, cloud, marcus):
+    azure_auth.add_account()
+    azure_auth.allow_browser_login(False)
+    for call in (real_get_credential, real_default_credential, azure_auth.add_account):
+        with pytest.raises(ApiError) as error:
+            call()
+        for name in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET",
+                     "AZURE_CLIENT_CERTIFICATE_PATH"):
+            assert name in str(error.value)
+    assert len(cloud.interactive) == 1
+
+    for name, value in (("AZURE_CLIENT_ID", "x"), ("AZURE_CLIENT_SECRET", "y"),
+                        ("AZURE_TENANT_ID", CONTOSO)):
+        monkeypatch.setenv(name, value)
+    from azure.identity import EnvironmentCredential
+
+    assert isinstance(real_get_credential(), EnvironmentCredential)
+    azure_auth.allow_browser_login(True)
+
+
+# ---------------------------------------------------------------------------
+# Token storage
+# ---------------------------------------------------------------------------
+
+
+def test_without_os_encryption_the_tokens_are_a_file_only_the_user_can_read(monkeypatch, tmp_path):
+    path = tmp_path / "auth" / "msal_token_cache.bin"
+    monkeypatch.setattr(azure_auth, "AUTH_DIR", path.parent)
+    assert azure_auth.token_cache_encrypted() is False  # conftest: no keyring in tests
+    assert path.is_file()
+    persistence = azure_auth._persistence(path)
+    persistence.save('{"AccessToken": {}}')
+    assert persistence.load() == '{"AccessToken": {}}'
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        path.chmod(0o644)  # an older, readable file is tightened
+        azure_auth._persistence(path)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_os_encryption_is_used_when_it_works(monkeypatch, tmp_path):
+    from msal_extensions import FilePersistence
+
+    class Encrypted(FilePersistence):
+        is_encrypted = True
+
+    monkeypatch.setattr(azure_auth, "AUTH_DIR", tmp_path)
+    monkeypatch.setattr(azure_auth, "_encrypted_persistence", lambda path: Encrypted(str(path)))
+    assert azure_auth.token_cache_encrypted() is True
+
+
+# ---------------------------------------------------------------------------
+# pbixtractor account ...
+# ---------------------------------------------------------------------------
+
+
+def _run(capsys, *args):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["account", *args])
+    out = capsys.readouterr()
+    return exit_info.value.code, out.out, out.err
+
+
+def test_cli_account_commands(cloud, marcus, capsys):
+    assert _run(capsys, "list") == (0, "No accounts - run `pbixtractor account add`\n", "")
+
+    code, out, _ = _run(capsys, "add")
+    assert code == 0
+    assert "* 1. marcus@contoso.com · Contoso\n  2. marcus@contoso.com · Fabrikam\n" in out
+    assert "Tokens stored unencrypted, readable only by your user" in out
+
+    code, out, _ = _run(capsys, "use", "fabrikam")
+    assert code == 0 and "Now using marcus@contoso.com · Fabrikam" in out
+    assert "  1. marcus@contoso.com · Contoso\n* 2. marcus@contoso.com · Fabrikam\n" in out
+
+    code, out, err = _run(capsys, "use", "marcus")
+    assert code == 1 and err.startswith("ERROR: 'marcus' matches several accounts")
+    code, out, err = _run(capsys, "remove", "9")
+    assert code == 1 and err.startswith("ERROR: No account number 9")
+
+    code, out, _ = _run(capsys, "remove", "2")
+    assert code == 0 and "Removed marcus@contoso.com · Fabrikam" in out
+    assert "* 1. marcus@contoso.com · Contoso\n  2. marcus@contoso.com · Northwind\n" in out
+
+    code, out, _ = _run(capsys, "add", "--tenant", FABRIKAM)
+    assert code == 0 and "* 2. marcus@contoso.com · Fabrikam" in out
+    assert cloud.interactive[-1]["tenant"] == FABRIKAM
+
+
+def test_cli_account_add_failure_and_service_principal_note(monkeypatch, cloud, marcus, capsys):
+    cloud.interactive_result = {"error": "access_denied", "error_description": "User cancelled"}
+    code, _, err = _run(capsys, "add")
+    assert code == 1 and err == "ERROR: Sign-in failed: User cancelled\n"
+
+    for name, value in (("AZURE_CLIENT_ID", "x"), ("AZURE_CLIENT_SECRET", "y"),
+                        ("AZURE_TENANT_ID", CONTOSO)):
+        monkeypatch.setenv(name, value)
+    code, out, _ = _run(capsys, "list")
+    assert code == 0 and "service principal from the environment" in out

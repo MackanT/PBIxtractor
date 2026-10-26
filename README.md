@@ -81,7 +81,12 @@ pbixtractor extract Sales.pbix --model Model.bim -o out\Sales --no-tabular-edito
 pbixtractor extract Sales.pbip                              # PBIP: model.bim or TMDL
 pbixtractor extract --help
 
-# From the Power BI service / Azure DevOps (sign-in opens a browser, or uses `az login`)
+# From the Power BI service / Azure DevOps (sign-in opens Microsoft's sign-in page; switch
+# with `pbixtractor account`)
+pbixtractor account add                                     # sign in: one entry per tenant
+pbixtractor account list                                    # the entries, * = the active one
+pbixtractor account use 2                                   # switch (number, user or tenant)
+pbixtractor account remove 3                                # forget an entry
 pbixtractor fabric list                                     # your workspaces
 pbixtractor extract --fabric "Sales WS/Sales"              # download + document
 pbixtractor extract --fabric "Sales WS/Sales" --all-reports  # every report on its model
