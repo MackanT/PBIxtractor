@@ -1,17 +1,20 @@
 """Tests for the sign-in accounts (azure_auth.py) and `pbixtractor account`, with a fake MSAL."""
 
 import base64
+import io
 import json
 import os
 import stat
 import threading
 import time
+import urllib.error
 from pathlib import Path
 
 import pytest
 
 from pbixtractor import azure_auth
 from pbixtractor.azure_auth import ARM_SCOPE, FABRIC_SCOPE, Account, ApiError
+from pbixtractor.azure_auth import _list_tenants as real_list_tenants
 
 # The real ones, imported at collection time: conftest replaces both during tests
 from pbixtractor.azure_auth import default_credential as real_default_credential
@@ -426,24 +429,76 @@ def test_a_tenant_that_blocks_azure_management_can_still_sign_in(cloud, marcus):
     assert _tenant_of(real_get_credential().get_token(FABRIC_SCOPE)) == FABRIKAM
 
 
+class FakeOpener:
+    """azure_auth._OPENER for the tenant listing: url -> JSON body, or an exception to raise."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.calls = []  # (url, Authorization header, timeout)
+
+    def open(self, request, timeout=None):
+        self.calls.append((request.full_url, request.get_header("Authorization"), timeout))
+        answer = self.answers[request.full_url]
+        if isinstance(answer, Exception):
+            raise answer
+        return FakeResponse(json.dumps(answer).encode())
+
+
+class FakeResponse(io.BytesIO):  # a urllib response as far as _list_tenants needs one
+    status = 200
+
+
+def _sleeps(monkeypatch) -> list:
+    """The seconds anything in azure_auth sleeps (without sleeping)."""
+    slept: list = []
+    monkeypatch.setattr(azure_auth.time, "sleep", lambda seconds: slept.append(seconds))
+    return slept
+
+
 def test_tenants_are_listed_page_by_page(monkeypatch):
-    pages = {
+    opener = FakeOpener({
         azure_auth.TENANTS_URL: {"value": [{"tenantId": CONTOSO}],
                                  "nextLink": "https://management.azure.com/tenants?page=2"},
         "https://management.azure.com/tenants?page=2": {
             "value": [{"tenantId": FABRIKAM}], "nextLink": "https://elsewhere.example.com/x"},
-    }
-    calls = []
-
-    def request(self, method, url, body=None, raw=False):
-        calls.append(url)
-        assert self._auth_header() == "Bearer arm-token"
-        return 200, {}, pages[url]
-
-    monkeypatch.setattr(azure_auth.RestClient, "request", request)
+        "https://management.azure.com/tenants?page=3": {"value": [{"tenantId": NORTHWIND}]},
+    })
+    monkeypatch.setattr(azure_auth, "_OPENER", opener)
     tenants = azure_auth._list_tenants("arm-token")
     assert [t["tenantId"] for t in tenants] == [CONTOSO, FABRIKAM]
-    assert calls == list(pages)  # a nextLink to another host is not followed
+    # A nextLink to another host is not followed; each page one attempt with a short timeout
+    assert [url for url, _, _ in opener.calls] == [azure_auth.TENANTS_URL,
+                                                   "https://management.azure.com/tenants?page=2"]
+    assert all(auth == "Bearer arm-token" for _, auth, _ in opener.calls)
+    assert all(0 < timeout <= azure_auth.TENANTS_PAGE_TIMEOUT for _, _, timeout in opener.calls)
+
+    # Nor one over http
+    opener.answers[azure_auth.TENANTS_URL]["nextLink"] = "http://management.azure.com/tenants?page=3"
+    opener.calls.clear()
+    assert [t["tenantId"] for t in azure_auth._list_tenants("arm-token")] == [CONTOSO]
+    assert len(opener.calls) == 1
+
+
+def test_a_throttled_tenant_listing_fails_at_once(monkeypatch, cloud, marcus):
+    monkeypatch.setattr(azure_auth, "_list_tenants", real_list_tenants)
+    throttled = urllib.error.HTTPError(
+        azure_auth.TENANTS_URL, 429, "Too Many Requests", {"Retry-After": "120"},
+        io.BytesIO(b'{"error": {"code": "TooManyRequests", "message": "Slow down"}}'),
+    )
+    opener = FakeOpener({azure_auth.TENANTS_URL: throttled})
+    monkeypatch.setattr(azure_auth, "_OPENER", opener)
+    slept = _sleeps(monkeypatch)
+    warnings = []
+    added = azure_auth.add_account(on_warning=warnings.append)
+    assert len(opener.calls) == 1 and not [s for s in slept if s]  # no retry, no Retry-After
+    assert "(HTTP 429: TooManyRequests: Slow down" in warnings[0]  # the listing-failed path
+    assert added == [Account("marcus@contoso.com", marcus, CONTOSO, "", home=True)]
+    assert azure_auth.active_account() == added[0]
+
+    # The whole listing has a deadline too
+    monkeypatch.setattr(azure_auth, "TENANTS_DEADLINE", 0)
+    with pytest.raises(ApiError, match="Listing the tenants took longer than 0 s"):
+        real_list_tenants("arm-token")
 
 
 def test_sign_in_errors(cloud, marcus):
@@ -761,6 +816,99 @@ def test_a_damaged_account_list_is_an_error_that_says_what_to_do(cloud, marcus):
     assert len(azure_auth.accounts()) == 3
 
 
+@pytest.mark.parametrize(
+    "accounts_value", [5, True, "x", [{"username": "a"}, 3, None]],
+    ids=["number", "true", "text", "no-valid-entry"],
+)
+def test_accounts_that_are_not_a_list_of_entries_are_damaged(cloud, marcus, accounts_value):
+    path = azure_auth.AUTH_DIR / azure_auth.ACCOUNTS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps({"active": None, "accounts": accounts_value}).encode()
+    path.write_bytes(content)
+    damaged = r"^The account list .*accounts\.json is damaged \(.+\) - delete it and sign in again$"
+    for call in (azure_auth.account_snapshot, lambda: azure_auth.account_snapshot(wait=False),
+                 azure_auth.add_account):
+        with pytest.raises(ApiError, match=damaged):
+            call()
+    assert path.read_bytes() == content and cloud.interactive == []  # never overwritten
+
+
+def test_an_empty_or_partly_valid_account_list(cloud, marcus):
+    path = azure_auth.AUTH_DIR / azure_auth.ACCOUNTS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for data in ({"accounts": []}, {"accounts": None}, {}):  # no accounts
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert azure_auth.account_snapshot() == ([], None)
+    valid = {"username": "marcus@contoso.com", "home_account_id": marcus, "tenant_id": CONTOSO,
+             "tenant_name": "Contoso", "home": True}
+    key = f"{marcus}|{CONTOSO}"
+    path.write_text(json.dumps({"active": key, "accounts": [3, {"username": "x"}, valid]}),
+                    encoding="utf-8")
+    entry = Account("marcus@contoso.com", marcus, CONTOSO, "Contoso", home=True)
+    assert azure_auth.account_snapshot() == ([entry], entry)  # the invalid ones skipped
+
+
+def test_cli_account_list_on_a_damaged_account_list(cloud, marcus, capsys):
+    path = azure_auth.AUTH_DIR / azure_auth.ACCOUNTS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"accounts": 5}', encoding="utf-8")
+    code, out, err = _run(capsys, "list")
+    assert code == 1 and out == ""
+    assert err.startswith("ERROR: The account list ") and "delete it and sign in again" in err
+    assert "Traceback" not in err
+
+
+def test_a_poll_reads_an_account_list_that_cannot_be_read_once_without_sleeping(
+    monkeypatch, cloud, marcus
+):
+    azure_auth.add_account()
+    held = HeldAccountList(monkeypatch)
+    slept = _sleeps(monkeypatch)
+    held.hold()
+    with pytest.raises(ApiError, match=HELD):
+        azure_auth.account_snapshot(wait=False)
+    assert held.reads == 1 and slept == []
+    held.hold()
+    with pytest.raises(ApiError, match=HELD):
+        azure_auth.account_snapshot()  # the default still retries
+    assert held.reads == azure_auth._READ_ATTEMPTS and len(slept) == azure_auth._READ_ATTEMPTS - 1
+    held.release()
+    assert len(azure_auth.account_snapshot(wait=False)[0]) == 3
+
+
+def test_a_sign_in_that_cannot_be_kept_leaves_no_new_tokens(monkeypatch, cloud, marcus, caplog):
+    azure_auth.add_account()
+    anna = cloud.add_user("anna", NORTHWIND)
+    cloud.picker = anna
+    real_write = azure_auth._write_store
+
+    def disk_full(entries, active):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(azure_auth, "_write_store", disk_full)
+    with pytest.raises(OSError, match="No space left on device"):  # the original error
+        azure_auth.add_account()
+    assert _token_records(anna) == [0, 0, 0, 0]  # she has no entry: her tokens are deleted
+    assert all(_token_records(marcus)) and azure_auth.sign_in_in_progress() is False
+
+    cloud.picker = marcus  # someone with entries keeps their tokens
+    with pytest.raises(OSError, match="No space left on device"):
+        azure_auth.add_account()
+    assert all(_token_records(marcus)) and len(azure_auth.accounts()) == 3
+
+    # The tokens cannot be deleted either: a warning, still the original error
+    cloud.picker = anna
+
+    def locked(home_account_id):
+        raise OSError("the token cache is locked")
+
+    monkeypatch.setattr(azure_auth, "_delete_unlisted_tokens", locked)
+    with pytest.raises(OSError, match="No space left on device"):
+        azure_auth.add_account()
+    assert "Could not delete the tokens of anna@northwind.com" in caplog.text
+    monkeypatch.setattr(azure_auth, "_write_store", real_write)
+
+
 def test_a_poll_sees_a_changed_account_list_without_reading_it(monkeypatch, cloud, marcus):
     changed, missing = azure_auth.accounts_changed_since(None)
     assert changed is True  # never read
@@ -928,9 +1076,9 @@ def test_one_read_of_the_account_list_per_answer(monkeypatch, cloud, marcus):
     real_read = azure_auth._read_store
     reads = []
 
-    def counted():
+    def counted(wait=True):
         reads.append(1)
-        return real_read()
+        return real_read(wait)
 
     monkeypatch.setattr(azure_auth, "_read_store", counted)
     entries, active = azure_auth.account_snapshot()
@@ -945,7 +1093,7 @@ def test_one_read_of_the_account_list_per_answer(monkeypatch, cloud, marcus):
     # Another process empties the file between two reads: an answer never mixes them
     northwind = _entry(marcus, NORTHWIND)
     versions = iter([real_read(), ([], None)])
-    monkeypatch.setattr(azure_auth, "_read_store", lambda: next(versions))
+    monkeypatch.setattr(azure_auth, "_read_store", lambda wait=True: next(versions))
     assert azure_auth._bound_account(NORTHWIND) == northwind
 
 

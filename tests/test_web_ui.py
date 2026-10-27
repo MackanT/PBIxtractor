@@ -53,6 +53,7 @@ class FakeAccounts:
         self.unreadable = None  # ApiError text: the account list exists but cannot be read
         self.use_error = None  # exception use_account() raises (e.g. the list cannot be written)
         self.snapshots = 0  # account_snapshot() calls: the account list read (parsed)
+        self.waits: list[bool] = []  # account_snapshot()'s wait= of each call
         self.stamps = 0  # accounts_changed_since() calls: the cheap look at the file
         self._login = threading.Lock()
         for name in ("account_snapshot", "accounts", "active_account", "accounts_changed_since",
@@ -67,8 +68,9 @@ class FakeAccounts:
     def _active(self):
         return next((a for a in self.entries if a.key == self.active), None)
 
-    def account_snapshot(self):
+    def account_snapshot(self, wait=True):
         self.snapshots += 1
+        self.waits.append(wait)
         self._readable()
         return list(self.entries), self._active()
 
@@ -165,6 +167,8 @@ def sample(tmp_path, monkeypatch):
     # The catalog in use is module state: another test's catalog must not show up (its rail
     # entries would, e.g. "Lineage across models" - and "Lineage" is what tests wait for)
     monkeypatch.setitem(web_ui._CATALOG, "dir", None)
+    # "Cannot read the account list" is logged once per process: not left over from a test
+    monkeypatch.setattr(web_sources, "_logged_read_error", "")
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -1252,6 +1256,7 @@ def test_an_unreadable_account_list_changes_nothing_and_actions_show_the_error(
     made = _account_clients(monkeypatch)
     monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
     monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_MAX_SECONDS", 0.2)  # it backs off up to this
     logged: list[str] = []
     monkeypatch.setattr(web_sources.logger, "error", lambda message, *a, **k: logged.append(message))
     damaged = "The account list accounts.json is damaged (not a JSON object) - delete it and sign in again"
@@ -1266,7 +1271,7 @@ def test_an_unreadable_account_list_changes_nothing_and_actions_show_the_error(
         accounts.unreadable = damaged
         accounts.active = ALICE_GUEST.key  # changed meanwhile, but it cannot be read
         reads = accounts.snapshots
-        await _wait_for(lambda: accounts.snapshots >= reads + 3)  # tried again at every poll
+        await _wait_for(lambda: accounts.snapshots >= reads + 3)  # tried again by the poll
         assert logged == [f"{damaged} (the web UI keeps the accounts it showed)"]  # logged once
         # No switch, nothing cleared
         assert _value(user, "fabric_account") == ALICE.key
@@ -1312,6 +1317,132 @@ def test_a_page_opened_while_the_account_list_cannot_be_read_still_works(sample,
             lambda: _element(user, "fabric_account_status").text
             == "Signed in as alice@contoso.com · Contoso"
         )
+
+    _simulate(scenario)
+
+
+def test_an_unreadable_account_list_backs_off_and_the_poll_never_sleeps(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_MAX_SECONDS", 60.0)
+    monkeypatch.setattr(web_sources.logger, "error", lambda *a, **k: None)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await user.should_see("Signed in as alice@contoso.com · Contoso")
+        accounts.unreadable = "Cannot read the account list accounts.json: locked"
+        accounts.active = ALICE_GUEST.key
+        reads, polls, waits = accounts.snapshots, accounts.polls, len(accounts.waits)
+        await _wait_for(lambda: accounts.polls >= polls + 40, timeout=20)  # 2 s of polls
+        tried = accounts.snapshots - reads
+        # Without the backoff the poll would read every 0.1 s (about 20 times); doubling from
+        # 0.1 s it reads after 0.2, 0.4, 0.8 s...
+        assert 1 <= tried <= 5, tried
+        assert accounts.waits[waits:] == [False] * tried  # one attempt each: never sleeping
+        # A good read resets the backoff: a switch is followed again at once
+        accounts.unreadable = None
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE_GUEST.key, timeout=20)
+        reads = accounts.snapshots
+        accounts.active = ALICE.key
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE.key, timeout=1.5)
+        assert accounts.snapshots == reads + 1 and accounts.waits[-1] is False
+
+    _simulate(scenario)
+
+
+def test_a_change_the_stamp_cannot_see_is_read_within_the_full_read_time(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(web_sources, "ACCOUNT_FULL_READ_SECONDS", 0.6)
+    looks = []
+
+    def same_stamp(stamp):  # replaced, same inode, size and modification time
+        looks.append(stamp)
+        return stamp is None, "the same stamp"
+
+    monkeypatch.setattr(azure_auth, "accounts_changed_since", same_stamp)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await user.should_see("Signed in as alice@contoso.com · Contoso")
+        accounts.active = ALICE_GUEST.key  # `pbixtractor account use 2`: the stamp says nothing
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE_GUEST.key)
+        # The polls in between only looked (the cheap check); a full read now and then
+        assert looks.count("the same stamp") > looks.count(None)
+        assert accounts.waits and all(wait is False for wait in accounts.waits)
+
+    _simulate(scenario)
+
+
+def test_an_unreadable_account_list_is_logged_once_for_all_tabs(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_MAX_SECONDS", 0.2)
+    logged: list[str] = []
+    monkeypatch.setattr(web_sources.logger, "error", lambda message, *a, **k: logged.append(message))
+    locked = "Cannot read the account list accounts.json: locked"
+
+    async def scenario(user):
+        await user.open("/")
+        other = User(user.http_client)  # a second tab
+        await other.open("/")
+        for tab in (user, other):
+            await _choose(tab, "source", "fabric")
+            await tab.should_see("Signed in as alice@contoso.com · Contoso")
+        accounts.unreadable = locked
+        accounts.entries = [ALICE, ALICE_GUEST]  # changed: the tabs read it (and cannot)
+        reads = accounts.snapshots
+        await _wait_for(lambda: accounts.snapshots >= reads + 6)  # both tabs tried, again
+        assert logged == [f"{locked} (the web UI keeps the accounts it showed)"]
+        # A good read anywhere: the same error coming back later is logged again
+        accounts.unreadable = None
+        await _wait_for(lambda: web_sources._logged_read_error == "")
+        accounts.unreadable = locked
+        accounts.entries = [ALICE]
+        await _wait_for(lambda: len(logged) == 2)
+        reads = accounts.snapshots
+        await _wait_for(lambda: accounts.snapshots >= reads + 4)
+        assert len(logged) == 2
+
+    _simulate(scenario)
+
+
+def test_sign_in_and_load_reads_the_account_list_only_when_it_changed(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
+    made = _account_clients(monkeypatch)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await user.should_see("Signed in as alice@contoso.com · Contoso")
+        reads, looks = accounts.snapshots, accounts.stamps
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Contoso"])
+        assert accounts.stamps > looks  # it looked at the file,
+        assert accounts.snapshots == reads  # but an unchanged one is not read again
+        assert len(made["fabric"]) == 1
+
+    _simulate(scenario)
+
+
+def test_create_documentation_asks_the_account_state_for_a_pending_sign_in(sample, monkeypatch):
+    FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
+    # This tab's own sign-in, as AccountState.pending() sees it - before anything is shown
+    monkeypatch.setattr(web_sources.AccountState, "pending", lambda self: True)
+    monkeypatch.setattr(web_sources.AccountState, "_set", lambda self, blocked, signing_in: None)
+    monkeypatch.setattr(web_sources, "sign_in_pending", lambda: False)
+
+    async def scenario(user):
+        await user.open("/")
+        assert not _run_button(user).enabled
+        await user.should_see(marker="run_sign_in", content=web_sources.WAITING_FOR_SIGN_IN)
+        user.find("Create documentation").trigger("click")
+        await user.should_see(web_sources.FINISH_SIGN_IN)
 
     _simulate(scenario)
 

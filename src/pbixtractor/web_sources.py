@@ -26,6 +26,7 @@ API calls block (and the first one may open a browser sign-in), so they run in t
 import logging
 import os
 import queue
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -277,6 +278,10 @@ class PlanPicker:
 BUSY_POLL_SECONDS = 0.5  # how soon the controls notice a run or a sign-in starting or ending
 ACCOUNT_POLL_SECONDS = 3.0  # how soon a tab follows a switch made elsewhere (tab, command line):
 # it then looks at accounts.json (azure_auth.accounts_changed_since) and reads it only if changed
+ACCOUNT_POLL_MAX_SECONDS = 60.0  # an account list that cannot be read: the poll backs off
+# (doubling from ACCOUNT_POLL_SECONDS up to this) until a read works again
+ACCOUNT_FULL_READ_SECONDS = 30.0  # the poll reads accounts.json anyway when its last full read
+# is this old: a changed file whose stamp did not change (inode reused, same size and mtime)
 WAIT_FOR_RUN = "Wait for the run to finish"
 WAITING_FOR_SIGN_IN = "Waiting for sign-in in your browser…"
 FINISH_SIGN_IN = "Finish the sign-in in your browser first"
@@ -302,6 +307,29 @@ _OPTION_SLOT = """
 """
 
 
+# The last "cannot read the account list" error logged (any tab): logged once per process per
+# distinct message, again after a good read anywhere
+_logged_read_error = ""
+_logged_read_error_lock = threading.Lock()
+
+
+def _log_read_error(error: str) -> None:
+    """Log an account list that cannot be read, unless this message is the one last logged."""
+    global _logged_read_error
+    with _logged_read_error_lock:
+        if error == _logged_read_error:
+            return
+        _logged_read_error = error
+    logger.error(f"{error} (the web UI keeps the accounts it showed)")
+
+
+def _read_error_cleared() -> None:
+    """A good read: the next unreadable account list is logged again, whatever its message."""
+    global _logged_read_error
+    with _logged_read_error_lock:
+        _logged_read_error = ""
+
+
 def sign_in_pending() -> bool:
     """
     A sign-in is going on in this process (azure_auth.sign_in_in_progress): a tab adding an
@@ -325,9 +353,14 @@ class AccountState:
         accounts.on_sign_in(lambda pending: ...)       # a sign-in starts or ends (any tab)
         await accounts.ensure_signed_in()              # False: the sign-in failed (shown)
 
-    An account list that cannot be read (ApiError) changes nothing: the tab keeps what it
-    showed, logs the error (once per message) and reads the list again at the next poll;
-    switching, adding and removing show the error and change nothing.
+    The poll runs on the event loop: it looks at accounts.json cheaply
+    (azure_auth.accounts_changed_since) every ACCOUNT_POLL_SECONDS, reads it only when it
+    changed - or anyway once its last full read is ACCOUNT_FULL_READ_SECONDS old - and reads
+    with one attempt, never sleeping (account_snapshot(wait=False)). An account list that
+    cannot be read (ApiError) changes nothing: the tab keeps what it showed, the error is
+    logged once per process per message, and the poll backs off (doubling up to
+    ACCOUNT_POLL_MAX_SECONDS, back to normal after a good read); switching, adding and
+    removing read with retries, show the error and change nothing.
     """
 
     def __init__(self, busy: Callable[[], bool] = lambda: False):
@@ -341,8 +374,10 @@ class AccountState:
         self._sign_in_listeners: list[Callable[[bool], None]] = []
         self._own_sign_ins = 0  # this tab's: shown from the click on, before its thread starts
         self._stamp: Optional[tuple] = None  # accounts.json as last read (None: read it next)
-        self._read_error = ""  # the last error reading it (logged once), "" after a good read
+        self._read_error = ""  # the last error reading it, "" after a good read
         self._read_at = time.monotonic()
+        self._full_read_at = time.monotonic()  # the last read whatever the stamp said
+        self._poll_seconds = ACCOUNT_POLL_SECONDS  # longer while the list cannot be read
         self.entries: list[azure_auth.Account] = []
         self.active: Optional[str] = None  # the active entry's key
         self.encrypted: Optional[bool] = None  # asked once there are tokens to keep
@@ -351,9 +386,9 @@ class AccountState:
         self.service_principal = azure_auth.service_principal_configured()
         if self.service_principal:  # it signs in, whatever accounts.json says
             return
-        self.signing_in = self._pending()
+        self.signing_in = self.pending()
         self.blocked = bool(busy())
-        self._sync()
+        self._sync(wait=False)  # on the event loop: an unreadable list is retried by the poll
         ui.timer(BUSY_POLL_SECONDS, self._poll)
 
     @property
@@ -378,8 +413,9 @@ class AccountState:
         for control in self._controls:
             control.show()
 
-    def _pending(self) -> bool:
-        """A sign-in is going on: this tab's (from the click on) or any other of the process."""
+    def pending(self) -> bool:
+        """A sign-in is going on: this tab's (from the click on) or any other of the process
+        (sign_in_pending()). No switch and no run may start meanwhile."""
         return self._own_sign_ins > 0 or sign_in_pending()
 
     def _set(self, blocked: bool, signing_in: bool) -> None:
@@ -393,33 +429,40 @@ class AccountState:
             for listener in self._sign_in_listeners:
                 listener(signing_in)
 
-    def _sync(self, force: bool = True) -> bool:
+    def _sync(self, force: bool = True, wait: bool = True) -> bool:
         """
         Re-read the account list; show a change and, after a switch, tell the panels. When it
-        cannot be read everything stays as it was (logged once per message; read again at the
-        next poll).
+        cannot be read everything stays as it was (logged once per process per message; read
+        again at a later poll, which backs off meanwhile).
 
         Args:
-            force: Read it even if accounts.json looks unchanged (False: the poll's cheap check)
+            force: Read it even if accounts.json looks unchanged (False: the cheap check)
+            wait: Retry a file that cannot be read for about half a second (False: one
+                attempt, no sleeping - the poll, on the event loop)
 
         Returns:
             Whether anything changed
         """
         if self.service_principal:  # it signs in, whatever accounts.json says
             return False
-        self._read_at = time.monotonic()
+        now = self._read_at = time.monotonic()
+        if force:
+            self._full_read_at = now
         changed, stamp = azure_auth.accounts_changed_since(None if force else self._stamp)
         if not changed:
             return False
         try:
-            entries, active = azure_auth.account_snapshot()  # one read: never two file versions
+            # One read: never a mix of two file versions
+            entries, active = azure_auth.account_snapshot(wait=wait)
         except ApiError as error:
             self._stamp = None  # read it again next time
-            if str(error) != self._read_error:
-                self._read_error = str(error)
-                logger.error(f"{error} (the web UI keeps the accounts it showed)")
+            self._read_error = str(error)
+            self._poll_seconds = min(self._poll_seconds * 2, ACCOUNT_POLL_MAX_SECONDS)
+            _log_read_error(str(error))
             return False
         self._stamp, self._read_error = stamp, ""
+        self._poll_seconds = ACCOUNT_POLL_SECONDS
+        _read_error_cleared()
         key = active.key if active else None
         if entries == self.entries and key == self.active:
             return False
@@ -434,15 +477,17 @@ class AccountState:
         return True
 
     def _poll(self) -> None:
-        blocked, signing_in = bool(self._busy()), self._pending()
+        blocked, signing_in = bool(self._busy()), self.pending()
         ended = self.signing_in and not signing_in  # a sign-in (maybe another tab's) is over
         self._set(blocked, signing_in)
         # A switch made elsewhere waits for a run or a sign-in to end: the lists are the old
         # account's until then
-        if not blocked and not signing_in and (
-            ended or time.monotonic() - self._read_at >= ACCOUNT_POLL_SECONDS
-        ):
-            self._sync(force=False)  # reads accounts.json only when it changed
+        now = time.monotonic()
+        if not blocked and not signing_in and (ended or now - self._read_at >= self._poll_seconds):
+            # Reads accounts.json only when it changed - or when the last full read is old (a
+            # change the stamp cannot see) - with one attempt: the poll never sleeps
+            full = now - self._full_read_at >= ACCOUNT_FULL_READ_SECONDS
+            self._sync(force=full, wait=False)
 
     async def _check_encryption(self) -> None:
         if self.encrypted is not None:
@@ -460,7 +505,7 @@ class AccountState:
         refused = ""
         if self._busy():
             refused = f"{WAIT_FOR_RUN}."
-        elif self._pending():
+        elif self.pending():
             refused = WAITING_FOR_SIGN_IN
         if refused:
             ui.notify(refused, type="warning")
@@ -484,7 +529,7 @@ class AccountState:
             return False
         finally:
             self._own_sign_ins -= 1
-            self._set(bool(self._busy()), self._pending())
+            self._set(bool(self._busy()), self.pending())
             if not self._sync():
                 self._show()
 
@@ -502,8 +547,8 @@ class AccountState:
         """
         if self.service_principal:
             return True
-        if not self._busy() and not self._pending():
-            self._sync()
+        if not self._busy() and not self.pending():
+            self._sync(force=False)  # re-read only when accounts.json changed
         if self.active is not None:
             return True
         if self._busy():  # signing in makes an account active: not during a run

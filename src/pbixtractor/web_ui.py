@@ -1225,7 +1225,7 @@ def build_page(
 
     def sign_in_going_on() -> bool:
         """A sign-in anywhere in the process, or this tab's own from its click on."""
-        return web_sources.sign_in_pending() or (accounts is not None and accounts.signing_in)
+        return accounts.pending() if accounts is not None else web_sources.sign_in_pending()
 
     def show_run_button() -> None:
         """Disabled while this tab runs, and while a sign-in is going on (whatever the

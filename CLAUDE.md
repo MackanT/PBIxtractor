@@ -169,8 +169,9 @@ src/pbixtractor/
                     "Waiting for a run in another tab"). "Create documentation" is enabled only
                     by show_run_button(): disabled for this tab's whole start_run (running) and,
                     whatever the source, while a sign-in is going on in the process
-                    (web_sources.sign_in_pending() or the tab's AccountState.signing_in; it
-                    follows AccountState.on_sign_in), with "Waiting for sign-in in your
+                    (sign_in_going_on() = the tab's AccountState.pending(), or
+                    web_sources.sign_in_pending() without one; it follows
+                    AccountState.on_sign_in), with "Waiting for sign-in in your
                     browser…" next to it (marker run_sign_in). start_run still refuses with
                     "Finish the sign-in in your browser first" then (the safety net; checked
                     before and after taking _JOB_LOCK). Account control (stand-alone only):
@@ -262,7 +263,10 @@ src/pbixtractor/
                     FABRIC_SCOPE with the account picker (LOGIN_TIMEOUT 180 s), then an ARM
                     token SILENTLY (acquire_token_silent_with_error; a tenant blocking Azure
                     management never opens the browser for it) and the user's tenants from ARM
-                    GET /tenants (nextLink) → one Account(username, home_account_id, tenant_id,
+                    GET /tenants (_list_tenants: _OPENER directly, not RestClient - one attempt
+                    per page, TENANTS_PAGE_TIMEOUT 15 s, TENANTS_DEADLINE 30 s for all pages,
+                    no 429/5xx retries or Retry-After waits; nextLink followed only over https
+                    to management.azure.com) → one Account(username, home_account_id, tenant_id,
                     tenant_name, home; key, label "<user> · <tenant>") per tenant; a listing
                     replaces the user's entries; a failed listing (or ARM token) keeps them and
                     adds/updates only the signed-in tenant, logs a warning and calls
@@ -275,16 +279,26 @@ src/pbixtractor/
                     and parallel ones counted, ended on every exit path) over the whole
                     add_account / ensure_account (browser, tenant listing, writing the entries)
                     and every interactive sign-in a credential's get_token starts (run threads
-                    too). ensure_account() = the active entry, else one add_account, re-checked
+                    too). Anything failing after the browser sign-in of an add (the store
+                    re-read, _write_store) first deletes the new user's tokens unless that user
+                    has an entry (_drop_new_tokens → _delete_unlisted_tokens, as a refused
+                    other user's; a failure to delete = a warning), then the error propagates.
+                    ensure_account() = the active entry, else one add_account, re-checked
                     under _login_lock (a caller waiting there gets the first caller's account).
-                    account_snapshot() = (entries, active) from ONE read of accounts.json;
+                    account_snapshot(wait=True) = (entries, active) from ONE read of
+                    accounts.json (wait=False: one attempt, no sleeping - the web UI's poll);
                     accounts() (by user, home first, tenant name), active_account(), writers and
                     _bound_account() all use it. Missing file = no entries; a file that exists
-                    but cannot be read (OSError: retried _READ_ATTEMPTS times over ~0.5 s) or is
-                    damaged (bad JSON/UTF-8, not an object: "delete it and sign in again") →
+                    but cannot be read (OSError: retried _READ_ATTEMPTS times over ~0.5 s; the
+                    replace in _write_store retries PermissionError - both via _retried()) or
+                    is damaged (bad JSON/UTF-8, not an object, "accounts" present but not a
+                    list, or a non-empty list without one valid entry - D45: "delete it and
+                    sign in again"; null / [] = no accounts, invalid entries among valid ones
+                    are skipped) →
                     ApiError, never "no accounts": writers read under _store_lock and write
                     nothing, add_account fails before the browser opens, a credential's
-                    get_token raises instead of signing in. accounts_changed_since(stamp) →
+                    get_token raises instead of signing in (`account list` → "ERROR: ..."
+                    exit 1). accounts_changed_since(stamp) →
                     (changed, stamp) from os.stat only (mtime_ns, size, inode; a missing file
                     has its own stamp; stat error → (True, None)) for cheap polls.
                     use_account(key), find_account(text, exact)
@@ -453,7 +467,11 @@ src/pbixtractor/
                     AccountState = one tab's view of the active azure_auth entry (one
                     account_snapshot() per re-read; an ApiError there - accounts.json
                     unreadable or damaged - keeps the tab's last state: no switch, no clearing,
-                    logged once per message, read again at the next poll), shared by an
+                    logged once per process per distinct message (module-level
+                    _logged_read_error under a lock, reset by a good read in any tab), and
+                    the poll backs off: doubling from ACCOUNT_POLL_SECONDS up to
+                    ACCOUNT_POLL_MAX_SECONDS 60 s, back to normal after a good read), shared
+                    by an
                     AccountControl at the top of each panel (above "Sign in / load"): "Signed
                     in as <label>" / "Not signed
                     in", searchable select of the entries (choosing = use_account; ValueError →
@@ -476,19 +494,27 @@ src/pbixtractor/
                     AZURE_DEVOPS_PAT → the DevOps panel says the token is used and ignores the
                     account. "Sign in / load" with no active entry calls
                     azure_auth.ensure_account() first (ensure_signed_in; tabs asking at once
-                    share one sign-in); during a run (busy()) or a sign-in it does not re-read
-                    the list (a switch made elsewhere is never applied mid-run) and loads with
-                    the shown account (none + a run → "Wait for the run to finish").
+                    share one sign-in; otherwise _sync(force=False): re-read only when the
+                    file changed); during a run (busy()) or a sign-in it does not re-read the
+                    list (a switch made elsewhere is never applied mid-run). "Sign in / load"
+                    then uses the panel's client (bound to its account when it was made); a
+                    panel without one binds to the entry active in accounts.json, which the tab
+                    shows after the run (D37/D46; none + a run → "Wait for the run to
+                    finish").
                     sign_in_pending() = azure_auth.sign_in_in_progress() (the whole add/ensure
                     and every browser sign-in a token needs, also a run's); the tab adds its
-                    own sign-in from the click on (_own_sign_ins, only for what it shows):
+                    own sign-in from the click on (_own_sign_ins; AccountState.pending() =
+                    both, also used by web_ui's run button):
                     every tab polls it (BUSY_POLL_SECONDS) and then shows "Waiting for sign-in
                     in your browser…" with the select / tenant / Add disabled
                     (switch/add/remove refused) and tells on_sign_in listeners (the run
                     button); when it ends the tab re-reads the accounts at once. A change of the
                     active entry (here, another tab or `pbixtractor account`: every
                     ACCOUNT_POLL_SECONDS, 3 s, accounts_changed_since() looks at the file and
-                    account_snapshot() reads it only if it changed) calls each panel's
+                    account_snapshot(wait=False) reads it only if it changed - or anyway when
+                    the last full read is ACCOUNT_FULL_READ_SECONDS, 30 s, old, catching a
+                    replaced file whose stamp did not change; the poll runs on the event loop
+                    and never sleeps; user actions keep the retrying read) calls each panel's
                     _account_switched → the shared _drop_old_account(panel, clear, reload):
                     client dropped, generation +1 (answers on their way are dropped; DevOps
                     _selection() includes it, PlanPicker has its own), the panel's

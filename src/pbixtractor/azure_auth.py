@@ -91,6 +91,10 @@ _service_principal_lock = threading.Lock()
 _browser_login_allowed = True
 _READ_ATTEMPTS = 6  # accounts.json held by another process (replacing it, a virus scanner):
 _READ_RETRY_SECONDS = 0.1  # retried for about half a second, then an error
+_REPLACE_ATTEMPTS = 5  # Windows: os.replace fails while another process reads accounts.json
+_REPLACE_RETRY_SECONDS = 0.05
+TENANTS_PAGE_TIMEOUT = 15  # seconds for one page of the tenant listing (one attempt, no retry)
+TENANTS_DEADLINE = 30  # seconds for the whole listing: a throttled tenant never holds a sign-in
 
 _INTERACTION_ERRORS = {"interaction_required", "login_required", "consent_required", "invalid_grant"}
 _SERVICE_PRINCIPAL_HELP = (
@@ -165,36 +169,67 @@ def _sorted(entries) -> list[Account]:
     )
 
 
-def _read_store() -> tuple[list[Account], Optional[str]]:
+def _retried(action: Callable, attempts: int, pause: float, retried: tuple):
+    """
+    action(), tried again after `pause` seconds when it raises one of `retried` - at most
+    `attempts` times in all; the last attempt's error propagates.
+    """
+    for attempt in range(attempts):
+        try:
+            return action()
+        except retried:
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(pause)
+    raise AssertionError("attempts must be at least 1")  # pragma: no cover
+
+
+def _damaged(path: Path, reason: str) -> ApiError:
+    return ApiError(f"The account list {path} is damaged ({reason}) - delete it and sign in again")
+
+
+def _read_store(wait: bool = True) -> tuple[list[Account], Optional[str]]:
     """
     (entries in list order, active key) from accounts.json; nothing when it is missing.
 
+    Args:
+        wait: Retry a file that cannot be read for about half a second (False: one attempt,
+            no sleeping - a poll on the web UI's event loop)
+
     Raises:
-        ApiError: The file exists but cannot be read (still after retrying for about half a
-            second) or is damaged - never "no accounts", which would let a writer wipe the
-            entries or a credential open a sign-in
+        ApiError: The file exists but cannot be read (still after the retries) or is damaged:
+            not JSON, "accounts" not a list, or a non-empty list without one valid entry -
+            never "no accounts", which would let a writer wipe the entries or a credential
+            open a sign-in
     """
     path = AUTH_DIR / ACCOUNTS_FILE
-    for attempt in range(_READ_ATTEMPTS):
+
+    def read() -> Optional[bytes]:
         try:
-            content = path.read_bytes()
-            break
+            return path.read_bytes()
         except FileNotFoundError:
-            return [], None
-        except OSError as error:  # e.g. Windows: another process is replacing it right now
-            if attempt == _READ_ATTEMPTS - 1:
-                raise ApiError(f"Cannot read the account list {path}: {error}") from None
-            time.sleep(_READ_RETRY_SECONDS)
+            return None
+
+    try:  # e.g. Windows: another process is replacing it right now
+        attempts = _READ_ATTEMPTS if wait else 1
+        content = _retried(read, attempts, _READ_RETRY_SECONDS, (OSError,))
+    except OSError as error:
+        raise ApiError(f"Cannot read the account list {path}: {error}") from None
+    if content is None:
+        return [], None
     try:
         data = json.loads(content.decode("utf-8"))
         if not isinstance(data, dict):
             raise ValueError("not a JSON object")
     except ValueError as error:  # also UnicodeDecodeError
-        raise ApiError(
-            f"The account list {path} is damaged ({error}) - delete it and sign in again"
-        ) from None
+        raise _damaged(path, str(error)) from None
+    items = data.get("accounts")
+    if items is None:
+        items = []
+    if not isinstance(items, list):
+        raise _damaged(path, "the accounts are not a list")
     entries = []
-    for item in data.get("accounts") or []:
+    for item in items:
         try:
             entries.append(
                 Account(
@@ -207,6 +242,8 @@ def _read_store() -> tuple[list[Account], Optional[str]]:
             )
         except (KeyError, TypeError, AttributeError):
             continue
+    if items and not entries:  # an empty list is no accounts (removing the last entry)
+        raise _damaged(path, "no valid account in the list")
     active = data.get("active")
     return _sorted(entries), active if isinstance(active, str) else None
 
@@ -219,23 +256,25 @@ def _write_store(entries: list[Account], active: Optional[str]) -> None:
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as file:
             json.dump(data, file, indent=2, ensure_ascii=False)
-        for attempt in range(5):
-            try:
-                os.replace(temp, AUTH_DIR / ACCOUNTS_FILE)
-                break
-            except PermissionError:  # Windows: another process is reading it right now
-                if attempt == 4:
-                    raise
-                time.sleep(0.05)
+        _retried(  # Windows: another process is reading it right now
+            lambda: os.replace(temp, AUTH_DIR / ACCOUNTS_FILE),
+            _REPLACE_ATTEMPTS,
+            _REPLACE_RETRY_SECONDS,
+            (PermissionError,),
+        )
     except BaseException:
         Path(temp).unlink(missing_ok=True)
         raise
 
 
-def account_snapshot() -> tuple[list[Account], Optional[Account]]:
+def account_snapshot(wait: bool = True) -> tuple[list[Account], Optional[Account]]:
     """
     The entries and the active one, from one read of accounts.json (never a mix of two
     versions of the file, which another tab or the command line may replace at any time).
+
+    Args:
+        wait: Retry a file that cannot be read for about half a second (False: one attempt,
+            no sleeping, the ApiError at once - for a poll on the web UI's event loop)
 
     Returns:
         (entries by user, the home tenant first, then by tenant name; the active entry or None)
@@ -243,7 +282,7 @@ def account_snapshot() -> tuple[list[Account], Optional[Account]]:
     Raises:
         ApiError: accounts.json exists but cannot be read or is damaged (missing: no entries)
     """
-    entries, active = _read_store()
+    entries, active = _read_store(wait)
     return entries, next((a for a in entries if a.key == active), None)
 
 
@@ -469,6 +508,18 @@ def _delete_unlisted_tokens(home_account_id: str) -> bool:
         return True
 
 
+def _drop_new_tokens(home_account_id: str, who: str) -> None:
+    """After a sign-in that is not kept: delete the user's tokens unless that user has an
+    entry (_delete_unlisted_tokens; the caller holds _login_lock). A failure to delete them
+    (account list or token cache unreadable) is logged as a warning: the tokens stay."""
+    try:
+        _delete_unlisted_tokens(home_account_id)
+    except Exception as error:
+        logger.warning(
+            f"Could not delete the tokens of {who} from {AUTH_DIR / TOKEN_CACHE_FILE}: {error}"
+        )
+
+
 def _new_app(authority: str, token_cache):
     """An MSAL public client for one tenant authority (tests replace this)."""
     import msal
@@ -559,16 +610,53 @@ class _FixedToken:
         return self._token
 
 
+def _tenants_page(url: str, access_token: str, timeout: float) -> dict:
+    """One page of the tenant listing: one attempt (no 429/5xx retries, no Retry-After wait)."""
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    )
+    endpoint = url.split("?")[0]
+    try:
+        with _OPENER.open(request, timeout=timeout) as response:
+            content = response.read()
+    except urllib.error.HTTPError as error:
+        raise ApiError(error_text(error.code, url, error.read())) from None
+    except (urllib.error.URLError, OSError) as error:  # incl. timeouts, resets
+        raise ApiError(f"Cannot reach {endpoint}: {getattr(error, 'reason', error)}") from None
+    try:
+        body = json.loads(content) if content else {}
+    except ValueError:
+        raise ApiError(f"Unexpected non-JSON answer from {endpoint}") from None
+    if not isinstance(body, dict):
+        raise ApiError(f"Unexpected answer from {endpoint}")
+    return body
+
+
 def _list_tenants(access_token: str) -> list[dict]:
-    """The tenants the signed-in user belongs to (Azure management API, as `az login` does)."""
-    client = RestClient("https://management.azure.com", ARM_SCOPE, credential=_FixedToken(access_token))
+    """
+    The tenants the signed-in user belongs to (Azure management API, as `az login` does).
+    Each page gets one attempt of at most TENANTS_PAGE_TIMEOUT seconds and the whole listing
+    TENANTS_DEADLINE seconds: a throttled or slow listing fails fast (the sign-in then keeps
+    the user's entries) instead of holding "Waiting for sign-in" for minutes. Only https
+    pages on management.azure.com are followed.
+
+    Raises:
+        ApiError: A page failed, or the listing took longer than TENANTS_DEADLINE
+    """
+    deadline = time.monotonic() + TENANTS_DEADLINE
     tenants: list[dict] = []
     url: Optional[str] = TENANTS_URL
     for _ in range(50):  # pages
-        _, _, body = client.request("GET", url)
-        tenants.extend((body or {}).get("value") or [])
-        url = (body or {}).get("nextLink")
-        if not url or urllib.parse.urlsplit(url).hostname != "management.azure.com":
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise ApiError(f"Listing the tenants took longer than {TENANTS_DEADLINE:g} s")
+        body = _tenants_page(url, access_token, min(TENANTS_PAGE_TIMEOUT, left))
+        tenants.extend(body.get("value") or [])
+        url = body.get("nextLink")
+        if not isinstance(url, str) or not url:
+            break
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme != "https" or parts.hostname != "management.azure.com":
             break
     return tenants
 
@@ -632,49 +720,13 @@ def _add_account(
             claims.get("preferred_username") or claims.get("upn") or claims.get("name") or "?"
         )
         home_account_id = _home_account_id(result, app)
-        home_tenant_id = home_account_id.partition(".")[2]
-        home_tenant = home_tenant_id.casefold()
-        signed_in = str(claims.get("tid") or tenant or home_tenant_id)
-
-        def entry(tenant_id: str, tenant_name: str = "") -> Account:
-            home = tenant_id.casefold() == home_tenant
-            return Account(username, home_account_id, tenant_id, tenant_name, home=home)
-
-        listing_error = None
         try:
-            listed = _list_tenants(_management_token(app, home_account_id))
-        except Exception as error:  # ApiError mostly: no access to the management API
-            listed, listing_error = None, error
-
-        with _store_lock:  # read again: another process may have changed the list meanwhile
-            existing, _ = account_snapshot()
-            others = [a for a in existing if a.home_account_id != home_account_id]
-            if listed is None:  # keep what is known: a failed listing never deletes entries
-                mine = {
-                    a.tenant_id.casefold(): replace(a, username=username)
-                    for a in existing
-                    if a.home_account_id == home_account_id
-                }
-            else:  # the listing replaces the user's entries (tenants no longer listed go)
-                mine = {}
-                for item in listed:
-                    tenant_id = str(item.get("tenantId") or "").strip()
-                    if tenant_id:
-                        name = str(item.get("displayName") or "")
-                        mine[tenant_id.casefold()] = entry(tenant_id, name)
-            key = signed_in.casefold()
-            if listed is None or key not in mine:
-                known = mine.get(key)
-                mine[key] = entry(signed_in, known.tenant_name if known else "")
-            home_added = False
-            if not activate_signed_in and home_tenant and home_tenant not in mine:
-                mine[home_tenant] = entry(home_tenant_id)  # unlisted: the home tenant still
-                home_added = True  # becomes the active entry (its name is unknown then)
-            added = _sorted(mine.values())
-            active = mine[key]
-            if not activate_signed_in:
-                active = next((a for a in added if a.home), active)
-            _write_store(others + added, active.key)
+            added, home_added, listing_error = _keep_signed_in(
+                app, tenant, activate_signed_in, claims, username, home_account_id
+            )
+        except Exception:  # not kept (e.g. the list cannot be read or written): no orphan tokens
+            _drop_new_tokens(home_account_id, username)
+            raise
     if listing_error is not None:
         which = "the tenant signed in to and the home tenant were" if home_added else (
             "the tenant signed in to was"
@@ -689,6 +741,63 @@ def _add_account(
         finally:
             logger.warning(warning)
     return added
+
+
+def _keep_signed_in(
+    app,
+    tenant: Optional[str],
+    activate_signed_in: bool,
+    claims: dict,
+    username: str,
+    home_account_id: str,
+) -> tuple[list[Account], bool, Optional[Exception]]:
+    """_add_account after the browser sign-in: list the user's tenants and write their
+    entries. Returns (the user's entries, whether the unlisted home tenant was added, the
+    listing error or None). The caller holds _login_lock."""
+    home_tenant_id = home_account_id.partition(".")[2]
+    home_tenant = home_tenant_id.casefold()
+    signed_in = str(claims.get("tid") or tenant or home_tenant_id)
+
+    def entry(tenant_id: str, tenant_name: str = "") -> Account:
+        home = tenant_id.casefold() == home_tenant
+        return Account(username, home_account_id, tenant_id, tenant_name, home=home)
+
+    listing_error = None
+    try:
+        listed = _list_tenants(_management_token(app, home_account_id))
+    except Exception as error:  # ApiError mostly: no access to the management API
+        listed, listing_error = None, error
+
+    with _store_lock:  # read again: another process may have changed the list meanwhile
+        existing, _ = account_snapshot()
+        others = [a for a in existing if a.home_account_id != home_account_id]
+        if listed is None:  # keep what is known: a failed listing never deletes entries
+            mine = {
+                a.tenant_id.casefold(): replace(a, username=username)
+                for a in existing
+                if a.home_account_id == home_account_id
+            }
+        else:  # the listing replaces the user's entries (tenants no longer listed go)
+            mine = {}
+            for item in listed:
+                tenant_id = str(item.get("tenantId") or "").strip()
+                if tenant_id:
+                    name = str(item.get("displayName") or "")
+                    mine[tenant_id.casefold()] = entry(tenant_id, name)
+        key = signed_in.casefold()
+        if listed is None or key not in mine:
+            known = mine.get(key)
+            mine[key] = entry(signed_in, known.tenant_name if known else "")
+        home_added = False
+        if not activate_signed_in and home_tenant and home_tenant not in mine:
+            mine[home_tenant] = entry(home_tenant_id)  # unlisted: the home tenant still
+            home_added = True  # becomes the active entry (its name is unknown then)
+        added = _sorted(mine.values())
+        active = mine[key]
+        if not activate_signed_in:
+            active = next((a for a in added if a.home), active)
+        _write_store(others + added, active.key)
+    return added, home_added, listing_error
 
 
 def _ensure_account(tenant: Optional[str], timeout: float) -> Account:
@@ -832,13 +941,7 @@ class _AccountCredential:
         """Signed in as someone else (another account picked): MSAL has cached that user's
         tokens - delete them unless that user has an entry - and raise ApiError."""
         other = (result.get("id_token_claims") or {}).get("preferred_username") or signed_in
-        try:
-            _delete_unlisted_tokens(signed_in)  # the caller holds _login_lock
-        except Exception as error:  # account list or token cache unreadable: the tokens stay
-            logger.warning(
-                f"Could not delete the tokens of {other} from {AUTH_DIR / TOKEN_CACHE_FILE}: "
-                f"{error}"
-            )
+        _drop_new_tokens(signed_in, other)  # the caller holds _login_lock
         raise ApiError(
             f"Sign-in failed: signed in as {other}, but the account in use is "
             f"{account.username} - sign in as that user, or add {other} with "
