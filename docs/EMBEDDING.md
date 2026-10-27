@@ -89,9 +89,11 @@ if Tabular Editor 2 is installed on the server.
   `AZURE_CLIENT_CERTIFICATE_PATH`). `register()` turns the browser sign-in off (it would open
   on the server) and the page has no account control. The service principal needs access to
   the workspaces / DevOps projects, and Fabric's tenant setting "Service principals can use
-  Fabric APIs". A DevOps personal access token in `AZURE_DEVOPS_PAT` works for DevOps too.
-  Without either, Fabric and DevOps fail with a clear error naming these variables - there is
-  no `az login` fallback (the Azure CLI is not used for sign-in).
+  Fabric APIs". Without a service principal, Fabric fails with a clear error naming these
+  variables, and so do Azure DevOps reports bound to a published model (they get that model
+  from Fabric) - there is no `az login` fallback (the Azure CLI is not used for sign-in). A
+  DevOps personal access token in `AZURE_DEVOPS_PAT` covers the rest of Azure DevOps (reports
+  whose model is in the repository) without a service principal.
 - Run on Windows for Tabular Editor 2; everything else is portable.
 
 ## Checked by tests

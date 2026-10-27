@@ -76,10 +76,15 @@ class Account:
 
 
 _store_lock = threading.RLock()  # accounts.json read-modify-write
-_login_lock = threading.RLock()  # one browser sign-in at a time (web UI tabs share the process)
+# One sign-in at a time (web UI tabs share the process): held around every browser sign-in and
+# for all of add_account (sign-in, tenant listing, writing the entries)
+_login_lock = threading.RLock()
+_signing_in = threading.Event()  # set while a browser sign-in is open (sign_in_in_progress)
 _apps_lock = threading.Lock()
 _caches: dict[Path, tuple] = {}  # token cache file -> (PersistedTokenCache, encrypted)
 _apps: dict[tuple, object] = {}  # (token cache file, authority) -> PublicClientApplication
+_service_principal: Optional[tuple] = None  # (AZURE_* values, EnvironmentCredential)
+_service_principal_lock = threading.Lock()
 _browser_login_allowed = True
 _reported: set[tuple] = set()  # account list read errors already logged
 
@@ -114,6 +119,11 @@ def allow_browser_login(allowed: bool) -> None:
 def _require_browser() -> None:
     if not _browser_login_allowed:
         raise ApiError(f"No browser sign-in here - {_SERVICE_PRINCIPAL_HELP}.")
+
+
+def sign_in_in_progress() -> bool:
+    """True while a browser sign-in of this process is open (in any tab or thread)."""
+    return _signing_in.is_set()
 
 
 # ---------------------------------------------------------------------------
@@ -187,15 +197,26 @@ def _write_store(entries: list[Account], active: Optional[str]) -> None:
         raise
 
 
+def account_snapshot() -> tuple[list[Account], Optional[Account]]:
+    """
+    The entries and the active one, from one read of accounts.json (never a mix of two
+    versions of the file, which another tab or the command line may replace at any time).
+
+    Returns:
+        (entries by user, the home tenant first, then by tenant name; the active entry or None)
+    """
+    entries, active = _read_store()
+    return entries, next((a for a in entries if a.key == active), None)
+
+
 def accounts() -> list[Account]:
     """The remembered entries: by user, the home tenant first, then by tenant name."""
-    return _read_store()[0]
+    return account_snapshot()[0]
 
 
 def active_account() -> Optional[Account]:
     """The entry every sign-in uses (None: the next sign-in opens the browser)."""
-    entries, active = _read_store()
-    return next((a for a in entries if a.key == active), None)
+    return account_snapshot()[1]
 
 
 def use_account(key: str) -> Account:
@@ -209,7 +230,7 @@ def use_account(key: str) -> Account:
         ValueError: No entry with that key
     """
     with _store_lock:
-        entries, _ = _read_store()
+        entries, _ = account_snapshot()
         account = next((a for a in entries if a.key == key), None)
         if account is None:
             raise ValueError(f"No account {key}")
@@ -217,13 +238,14 @@ def use_account(key: str) -> Account:
         return account
 
 
-def find_account(text: str) -> Account:
+def find_account(text: str, exact: bool = False) -> Account:
     """
     The entry a user means on the command line.
 
     Args:
         text: 1-based number in the list, a key, or (case-insensitive) a user name, tenant
-            name or tenant id - exactly, else as part of it
+            name, tenant id or label - exactly, else (unless `exact`) as part of it
+        exact: Only a number, a key or an exact match (for removing: never a guess)
 
     Raises:
         ValueError: No entry or several match (the message names them)
@@ -247,44 +269,61 @@ def find_account(text: str) -> Account:
         return [value.casefold() for value in values if value]
 
     matches = [a for a in entries if wanted in fields(a)]
-    if not matches:
+    if not matches and not exact:
         matches = [a for a in entries if any(wanted in value for value in fields(a))]
     if len(matches) == 1:
         return matches[0]
     if not matches:
+        if exact:
+            raise ValueError(
+                f"No account matches '{text}' exactly - give its number, user, tenant name or "
+                "tenant id (see `pbixtractor account list`)"
+            )
         raise ValueError(f"No account matches '{text}' (see `pbixtractor account list`)")
     names = "; ".join(f"{entries.index(a) + 1}. {a.label}" for a in matches)
     raise ValueError(f"'{text}' matches several accounts: {names} - give the number")
 
 
+def _next_active(removed: Account, remaining: list[Account]) -> Optional[Account]:
+    """After the active entry is removed: the same user's home tenant, that user's other
+    entries, then the first remaining entry (never another person while the user has one)."""
+    same_user = [a for a in remaining if a.home_account_id == removed.home_account_id]
+    home = next((a for a in same_user if a.home), None)
+    return home or next(iter(same_user), None) or next(iter(remaining), None)
+
+
 def remove_account(key: str) -> None:
     """
-    Forget an entry. The user's last entry also deletes that user's tokens; when the active
-    entry goes, the first remaining one becomes active (none left: no active entry).
+    Forget an entry. When the active entry goes, the same user's home tenant becomes active,
+    else that user's other entry, else the first remaining one (none left: no active entry).
+    The user's last entry also deletes that user's tokens from the token cache (offline: no
+    sign-in service is asked).
 
     Args:
         key: Account.key of a remembered entry
 
     Raises:
         ValueError: No entry with that key
+        ApiError: The entry was removed, but the user's tokens could not be deleted (the
+            message says so)
     """
     with _store_lock:
-        entries, active = _read_store()
+        entries, active = account_snapshot()
         account = next((a for a in entries if a.key == key), None)
         if account is None:
             raise ValueError(f"No account {key}")
         remaining = [a for a in entries if a.key != key]
-        if active == key:
-            active = remaining[0].key if remaining else None
-        _write_store(remaining, active)
+        if active is not None and active.key == key:
+            active = _next_active(account, remaining)
+        _write_store(remaining, active.key if active else None)
     if not any(a.home_account_id == account.home_account_id for a in remaining):
         try:
-            app = _app(None)
-            for cached in app.get_accounts():
-                if cached.get("home_account_id") == account.home_account_id:
-                    app.remove_account(cached)
-        except Exception as error:  # e.g. offline: the sign-in service cannot be reached
-            logger.warning(f"Could not delete the tokens of {account.username}: {error}")
+            _delete_tokens(account.home_account_id)
+        except Exception as error:  # cache file locked / unreadable, keyring refused
+            raise ApiError(
+                f"Removed {account.label}, but could not delete the tokens of "
+                f"{account.username} from {AUTH_DIR / TOKEN_CACHE_FILE}: {error}"
+            ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +371,22 @@ def token_cache_encrypted() -> bool:
     return _token_cache()[1]
 
 
+def _delete_tokens(home_account_id: str) -> None:
+    """Delete a user's records (account, refresh, access and ID tokens) straight from the
+    persisted token cache: no MSAL app, so no sign-in metadata from the network."""
+    cache = _token_cache()[0]
+    kinds = cache.CredentialType
+    removers = (
+        (kinds.ACCESS_TOKEN, cache.remove_at),
+        (kinds.REFRESH_TOKEN, cache.remove_rt),
+        (kinds.ID_TOKEN, cache.remove_idt),
+        (kinds.ACCOUNT, cache.remove_account),
+    )
+    for kind, remove in removers:
+        for record in list(cache.search(kind, query={"home_account_id": home_account_id})):
+            remove(record)
+
+
 def _new_app(authority: str, token_cache):
     """An MSAL public client for one tenant authority (tests replace this)."""
     import msal
@@ -368,11 +423,13 @@ def _msal_error(result: Optional[dict]) -> str:
 
 
 def _sign_in(app, scopes, prompt=None, login_hint=None, claims=None, timeout=LOGIN_TIMEOUT) -> dict:
-    """One browser sign-in (never two at once); MSAL's result with an access token."""
+    """One browser sign-in (never two at once; sign_in_in_progress() meanwhile); MSAL's
+    result with an access token."""
     from msal import BrowserInteractionTimeoutError
 
     _require_browser()
     with _login_lock:
+        _signing_in.set()
         try:
             result = app.acquire_token_interactive(
                 list(scopes),
@@ -387,6 +444,8 @@ def _sign_in(app, scopes, prompt=None, login_hint=None, claims=None, timeout=LOG
             raise
         except Exception as error:
             raise ApiError(f"Sign-in failed: {error}") from None
+        finally:
+            _signing_in.clear()
     if not result or "access_token" not in result:
         raise ApiError(f"Sign-in failed: {_msal_error(result)}")
     return result
@@ -435,16 +494,34 @@ def _list_tenants(access_token: str) -> list[dict]:
     return tenants
 
 
-def add_account(tenant: Optional[str] = None, timeout: float = LOGIN_TIMEOUT) -> list[Account]:
+def _management_token(app, home_account_id: str) -> str:
+    """An Azure management token for the user just signed in, from the token cache (silently:
+    a tenant that blocks the management API never opens the browser for it)."""
+    cached = _cached_account(app, home_account_id)
+    if cached is None:
+        raise ApiError("the sign-in left no account in the token cache")
+    result = app.acquire_token_silent_with_error([ARM_SCOPE], cached)
+    if not result or "access_token" not in result:
+        raise ApiError(f"no Azure management token: {_msal_error(result)}")
+    return result["access_token"]
+
+
+def add_account(
+    tenant: Optional[str] = None,
+    timeout: float = LOGIN_TIMEOUT,
+    on_warning: Optional[Callable[[str], None]] = None,
+) -> list[Account]:
     """
     Sign in through Microsoft's sign-in page (with its account picker) and add every tenant of
     that user as an entry. Signing in as a user already in the list refreshes their entries
-    (tenants no longer listed disappear).
+    (tenants no longer listed disappear). When the tenants cannot be listed, the user's entries
+    are kept and only the tenant signed in to is added (or updated).
 
     Args:
         tenant: Entra tenant (id or domain) to sign in to and make active (default: the user's
             home tenant)
         timeout: Seconds to wait for the sign-in in the browser
+        on_warning: Called with the text when the tenants could not be listed (also logged)
 
     Returns:
         That user's entries, in list order
@@ -452,50 +529,106 @@ def add_account(tenant: Optional[str] = None, timeout: float = LOGIN_TIMEOUT) ->
     Raises:
         ApiError: The sign-in was cancelled, timed out or refused (or no browser is allowed)
     """
-    _require_browser()
     tenant = (tenant or "").strip() or None
-    app = _app(tenant)
-    result = _sign_in(app, [ARM_SCOPE], prompt="select_account", timeout=timeout)
-    claims = result.get("id_token_claims") or {}
-    username = str(claims.get("preferred_username") or claims.get("upn") or claims.get("name") or "?")
-    home_account_id = _home_account_id(result, app)
-    home_tenant = home_account_id.partition(".")[2].casefold()
-    signed_in = str(claims.get("tid") or tenant or home_tenant)
+    return _add_account(tenant, timeout, on_warning, activate_signed_in=tenant is not None)
 
-    try:
-        listed = _list_tenants(result["access_token"])
-    except Exception as error:  # ApiError mostly: no access to the management API
-        logger.warning(
-            f"Could not list the tenants of {username} ({error}): added only the tenant signed "
-            "in to - add others by their tenant id or domain"
+
+def _add_account(
+    tenant: Optional[str],
+    timeout: float,
+    on_warning: Optional[Callable[[str], None]],
+    activate_signed_in: bool,
+) -> list[Account]:
+    """add_account(); `activate_signed_in` False makes the user's home tenant active (when it
+    is an entry) even after signing in at `tenant`."""
+    _require_browser()
+    with _login_lock:  # the whole add: a caller waiting for the lock then sees the new entries
+        app = _app(tenant)
+        result = _sign_in(app, [FABRIC_SCOPE], prompt="select_account", timeout=timeout)
+        claims = result.get("id_token_claims") or {}
+        username = str(
+            claims.get("preferred_username") or claims.get("upn") or claims.get("name") or "?"
         )
-        listed = []
-    entries: dict[str, Account] = {}
-    for item in listed:
-        tenant_id = str(item.get("tenantId") or "").strip()
-        if tenant_id:
-            entries[tenant_id.casefold()] = Account(
-                username,
-                home_account_id,
-                tenant_id,
-                str(item.get("displayName") or ""),
-                home=tenant_id.casefold() == home_tenant,
+        home_account_id = _home_account_id(result, app)
+        home_tenant = home_account_id.partition(".")[2].casefold()
+        signed_in = str(claims.get("tid") or tenant or home_tenant)
+
+        def entry(tenant_id: str, tenant_name: str = "") -> Account:
+            home = tenant_id.casefold() == home_tenant
+            return Account(username, home_account_id, tenant_id, tenant_name, home=home)
+
+        warning = None
+        try:
+            listed = _list_tenants(_management_token(app, home_account_id))
+        except Exception as error:  # ApiError mostly: no access to the management API
+            listed = None
+            warning = (
+                f"Could not list the tenants of {username} ({error}): only the tenant signed in "
+                "to was added or updated - add other tenants by their tenant id or domain"
             )
-    if signed_in.casefold() not in entries:
-        entries[signed_in.casefold()] = Account(
-            username, home_account_id, signed_in, home=signed_in.casefold() == home_tenant
-        )
-    added = _sorted(entries.values())
-    if tenant:
-        active = entries[signed_in.casefold()]
-    else:
-        active = next((a for a in added if a.home), entries[signed_in.casefold()])
 
-    with _store_lock:
-        existing, _ = _read_store()
-        kept = [a for a in existing if a.home_account_id != home_account_id]
-        _write_store(kept + added, active.key)
+        with _store_lock:
+            existing, _ = account_snapshot()
+            others = [a for a in existing if a.home_account_id != home_account_id]
+            if listed is None:  # keep what is known: a failed listing never deletes entries
+                mine = {
+                    a.tenant_id.casefold(): replace(a, username=username)
+                    for a in existing
+                    if a.home_account_id == home_account_id
+                }
+            else:  # the listing replaces the user's entries (tenants no longer listed go)
+                mine = {}
+                for item in listed:
+                    tenant_id = str(item.get("tenantId") or "").strip()
+                    if tenant_id:
+                        name = str(item.get("displayName") or "")
+                        mine[tenant_id.casefold()] = entry(tenant_id, name)
+            key = signed_in.casefold()
+            if listed is None or key not in mine:
+                known = mine.get(key)
+                mine[key] = entry(signed_in, known.tenant_name if known else "")
+            added = _sorted(mine.values())
+            active = mine[key]
+            if not activate_signed_in:
+                active = next((a for a in added if a.home), active)
+            _write_store(others + added, active.key)
+    if warning:
+        try:
+            if on_warning is not None:
+                on_warning(warning)
+        finally:
+            logger.warning(warning)
     return added
+
+
+def _ensure_account(tenant: Optional[str], timeout: float) -> Account:
+    """The active entry; with none, one sign-in (at `tenant`, the home tenant made active)."""
+    account = active_account()
+    if account is not None:
+        return account
+    _require_browser()
+    with _login_lock:  # another caller may be signing in right now: then use its account
+        account = active_account()
+        if account is None:
+            _add_account(tenant, timeout, None, activate_signed_in=False)
+            account = active_account()
+    if account is None:
+        raise ApiError("Sign-in failed: no account is active")
+    return account
+
+
+def ensure_account(timeout: float = LOGIN_TIMEOUT) -> Account:
+    """
+    The active entry; with none, one browser sign-in (add_account) whose home tenant becomes
+    active. Several callers at once open one sign-in: the others wait and get its account.
+
+    Args:
+        timeout: Seconds to wait for the sign-in in the browser
+
+    Raises:
+        ApiError: The sign-in was cancelled, timed out or refused (or no browser is allowed)
+    """
+    return _ensure_account(None, timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -505,11 +638,11 @@ def add_account(tenant: Optional[str] = None, timeout: float = LOGIN_TIMEOUT) ->
 
 def _bound_account(tenant_id: Optional[str]) -> Optional[Account]:
     """The active entry, or the active user in `tenant_id` (also when that is not listed)."""
-    active = active_account()
+    entries, active = account_snapshot()
     if active is None or not tenant_id or not tenant_id.strip():
         return active
     wanted = tenant_id.strip()
-    for account in accounts():
+    for account in entries:
         if account.home_account_id == active.home_account_id and (
             account.tenant_id.casefold() == wanted.casefold()
         ):
@@ -517,11 +650,10 @@ def _bound_account(tenant_id: Optional[str]) -> Optional[Account]:
     return replace(active, tenant_id=wanted, tenant_name="", home=False)
 
 
-def _cached_account(app, account: Account) -> Optional[dict]:
+def _cached_account(app, home_account_id: str) -> Optional[dict]:
     """The user's account record in MSAL's token cache (None: no tokens, sign in again)."""
     return next(
-        (c for c in app.get_accounts() if c.get("home_account_id") == account.home_account_id),
-        None,
+        (c for c in app.get_accounts() if c.get("home_account_id") == home_account_id), None
     )
 
 
@@ -529,7 +661,8 @@ class _AccountCredential:
     """
     Tokens for one account entry: the one active when the credential is created, kept for its
     lifetime (a switch affects only credentials created after it). With no active entry the
-    first get_token() signs in and uses the new active entry. Safe to use from several threads.
+    first get_token() signs in (ensure_account; with a tenant: there, the home tenant made
+    active) and uses the active user in that tenant. Safe to use from several threads.
     """
 
     def __init__(self, tenant_id: Optional[str] = None):
@@ -540,9 +673,7 @@ class _AccountCredential:
     def _bound(self) -> Account:
         with self._lock:
             if self._account is None:
-                with _login_lock:  # another thread may be signing in right now
-                    if active_account() is None:
-                        add_account(self._tenant_id)
+                _ensure_account(self._tenant_id, LOGIN_TIMEOUT)
                 self._account = _bound_account(self._tenant_id)
                 if self._account is None:
                     raise ApiError("Sign-in failed: no account is active")
@@ -550,7 +681,7 @@ class _AccountCredential:
 
     def _silent(self, app, account: Account, scopes, claims) -> Optional[dict]:
         try:
-            cached = _cached_account(app, account)
+            cached = _cached_account(app, account.home_account_id)
             if cached is None:
                 return None
             return app.acquire_token_silent_with_error(
@@ -621,7 +752,12 @@ def default_credential(tenant_id: Optional[str] = None):
     - a service principal from the environment (AZURE_CLIENT_ID + AZURE_TENANT_ID +
       AZURE_CLIENT_SECRET or AZURE_CLIENT_CERTIFICATE_PATH): for servers and containers, where
       no one can complete a browser login - then never a browser;
-    - else the active account entry (Microsoft's sign-in page when there is none yet).
+    - else the account entry active now, kept for the credential's lifetime (a client keeps
+      its account; clients made after a switch use the new one). With no entry the first
+      token opens Microsoft's sign-in page (at `tenant_id` when given) and the user's home
+      tenant becomes the active entry; the credential uses that user in `tenant_id`.
+
+    A new credential on every call (get_credential() shares a service principal's).
 
     Args:
         tenant_id: Entra tenant (id or domain) for the active user (default: the active
@@ -635,16 +771,17 @@ def default_credential(tenant_id: Optional[str] = None):
 
 def get_credential(tenant_id: Optional[str] = None):
     """
-    The credential for the account active now (see default_credential). A client keeps its
-    account for its lifetime; clients created after a switch use the new one.
-
-    Args:
-        tenant_id: Entra tenant (id or domain) for the active user (default: the active entry's)
-
-    Raises:
-        ApiError: No service principal and the browser sign-in is not allowed (embedded)
+    default_credential(tenant_id), except that a service principal's credential is made once
+    per process (for the same AZURE_* values) and shared, so its tokens are reused.
     """
-    return _credential(tenant_id)
+    global _service_principal
+    if not service_principal_configured():
+        return _credential(tenant_id)
+    values = tuple(sorted(item for item in os.environ.items() if item[0].startswith("AZURE_")))
+    with _service_principal_lock:
+        if _service_principal is None or _service_principal[0] != values:
+            _service_principal = (values, _credential(tenant_id))
+        return _service_principal[1]
 
 
 # ============================================================================
@@ -677,15 +814,26 @@ class RestClient:
         self._pat = pat
         self._sleep = sleep
         self._token = None
+        self._credential_lock = threading.Lock()
+
+    def _resolve_credential(self):
+        """
+        The client's credential, made on first use when none was given: get_credential() is
+        looked up when called (so a replaced azure_auth.get_credential is used). Sub-clients
+        get this one, so all calls of a client use one account.
+        """
+        with self._credential_lock:
+            if self._credential is None:
+                self._credential = get_credential()
+            return self._credential
 
     def _auth_header(self) -> str:
         if self._pat:
             return "Basic " + base64.b64encode(f":{self._pat}".encode()).decode()
-        if self._credential is None:
-            self._credential = get_credential()
+        credential = self._resolve_credential()
         if self._token is None or self._token.expires_on - time.time() < 120:
             try:
-                self._token = self._credential.get_token(self._scope)
+                self._token = credential.get_token(self._scope)
             except ApiError:
                 raise
             except Exception as error:  # azure-identity: login cancelled/timed out, az expired

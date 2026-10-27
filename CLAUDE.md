@@ -74,8 +74,13 @@ done on request.
 src/pbixtractor/
   cli.py            argparse: no command → web UI; `web [--port] [--no-browser]`;
                     `account list | add [--tenant X] | use <n|name> | remove <n|name>`
-                    (azure_auth; find_account; list = numbered labels, * active, notes for
-                    unencrypted tokens / a service principal; errors → "ERROR: ..." + exit 1);
+                    (azure_auth; use = find_account (part of a name), remove = find_account(
+                    exact=True): number / key / whole user, tenant name, tenant id or label;
+                    add prints a failed tenant listing (on_warning) once as "WARNING: ..." on
+                    stderr, exit 0 - a logger filter keeps Python's last-resort handler from
+                    printing it again; list = one account_snapshot(), numbered labels, *
+                    active, notes for unencrypted tokens / a service principal; errors (also
+                    "Removed X, but could not delete the tokens ...") → "ERROR: ..." + exit 1);
                     `devops list ORG [PROJECT [REPO]] [--history PATH]`, `devops fetch URL
                     [--ref branch|tag:x|commit:x] [-o]`;
                     `extract [report | --fabric WS/REPORT | --devops URL [--ref]] [--tenant] [--model] [-o] [--name]
@@ -246,27 +251,46 @@ src/pbixtractor/
                     parse_model() sets Partition.queries.
   azure_auth.py     Shared sign-in + REST. Accounts (no Azure CLI): MSAL PublicClientApplication
                     (client id 04b07795-..., one app per tenant authority, one shared token
-                    cache) - add_account(tenant, timeout) = browser sign-in with the account
-                    picker (LOGIN_TIMEOUT 180 s, logins serialised by one lock), then the user's
-                    tenants from ARM GET /tenants (nextLink; on failure only the signed-in tenant
-                    + a warning) → one Account(username, home_account_id, tenant_id,
-                    tenant_name, home; key, label "<user> · <tenant>") per tenant; re-adding a
-                    user replaces their entries; `tenant` or the home tenant becomes active.
-                    accounts() (by user, home first, tenant name), active_account(),
-                    use_account(key), find_account(text) (number / key / user / tenant),
-                    remove_account(key) (user's last entry → its tokens removed; active → first
-                    remaining). Files in AUTH_DIR (~/.pbixtractor): accounts.json (entries +
-                    active key, no secrets; re-read on every call, so all tabs and the CLI share
-                    one active entry) and msal_token_cache.bin (msal_extensions: OS-encrypted
-                    when possible, else a 0600 plain file; token_cache_encrypted()).
-                    get_credential(tenant) / default_credential(tenant) (same):
-                    EnvironmentCredential when service_principal_configured(); else bound to the
-                    entry active when called (tenant = the active user in that tenant);
-                    get_token: silent first, browser (login hint) only when MSAL asks for
-                    interaction; no active entry → the first get_token runs add_account.
-                    allow_browser_login(False) (embedded) → ApiError naming the service
-                    principal variables. One login serves Fabric, DevOps and Power BI.
+                    cache) - add_account(tenant, timeout, on_warning) = browser sign-in for
+                    FABRIC_SCOPE with the account picker (LOGIN_TIMEOUT 180 s), then an ARM
+                    token SILENTLY (acquire_token_silent_with_error; a tenant blocking Azure
+                    management never opens the browser for it) and the user's tenants from ARM
+                    GET /tenants (nextLink) → one Account(username, home_account_id, tenant_id,
+                    tenant_name, home; key, label "<user> · <tenant>") per tenant; a listing
+                    replaces the user's entries; a failed listing (or ARM token) keeps them and
+                    adds/updates only the signed-in tenant, logs a warning and calls
+                    on_warning(text); `tenant` or the home tenant becomes active. _login_lock
+                    (RLock) is held for the whole add and around every acquire_token_interactive
+                    (one sign-in at a time); sign_in_in_progress() = an Event set only around
+                    acquire_token_interactive (cleared on failure/timeout too). ensure_account()
+                    = the active entry, else one add_account, re-checked under _login_lock (a
+                    caller waiting there gets the first caller's account).
+                    account_snapshot() = (entries, active) from ONE read of accounts.json;
+                    accounts() (by user, home first, tenant name), active_account(), writers and
+                    _bound_account() all use it. use_account(key), find_account(text, exact)
+                    (number / key / user / tenant name / tenant id / label; part of one unless
+                    exact), remove_account(key): active removed → same user's home tenant, that
+                    user's other entry, else the first remaining (_next_active); the user's last
+                    entry deletes their ACCOUNT / REFRESH / ACCESS / ID token records straight
+                    from the persisted TokenCache (search + remove_*, no MSAL app, so offline);
+                    if that fails: ApiError "Removed X, but could not delete the tokens ..."
+                    after the entry is gone. Files in AUTH_DIR (~/.pbixtractor): accounts.json
+                    (entries + active key, no secrets; re-read on every call, so all tabs and
+                    the CLI share one active entry) and msal_token_cache.bin (msal_extensions:
+                    OS-encrypted when possible, else a 0600 plain file; token_cache_encrypted()).
+                    default_credential(tenant): EnvironmentCredential when
+                    service_principal_configured() (new one per call); else bound to the entry
+                    active when called (tenant = the active user in that tenant); get_token:
+                    silent first, browser (login hint) only when MSAL asks for interaction; no
+                    active entry → the first get_token signs in (at `tenant` if given) via
+                    _ensure_account, the HOME tenant becomes active, the credential uses that
+                    user in `tenant`. get_credential(tenant) = default_credential, but one
+                    service principal credential per process (re-made when any AZURE_* value
+                    changes). allow_browser_login(False) (embedded) → ApiError naming the
+                    service principal variables. One login serves Fabric, DevOps and Power BI.
                     RestClient(api, scope, credential | pat) .request(method, url, body, raw):
+                    _resolve_credential() = the given credential, else get_credential() looked
+                    up at call time (once per client; sub-clients reuse it);
                     https only (except localhost), retries 429/5xx/network errors (MAX_ATTEMPTS
                     5, Retry-After seconds or date, max 120 s), no Authorization header on a
                     redirect to another host, a 203/HTML answer = "sign-in page" error.
@@ -429,8 +453,10 @@ src/pbixtractor/
                     every workspace you can open) + download into <root>/<workspace>/
                     + fabric_source.json; definition.pbir rewritten to byPath. Model found via
                     semanticmodelid in the pbir connection string (other workspace by name).
-                    Sign-in via azure_auth.get_credential(). getDefinition needs Contributor
-                    (read+write) on the item. reports_on_model(not_searched=...) records
+                    Sign-in via azure_auth.get_credential(); FabricClient.powerbi (Power BI REST
+                    sub-client) gets the client's own credential (_resolve_credential()), so
+                    both APIs use one account even when Power BI is called first.
+                    getDefinition needs Contributor (read+write) on the item. reports_on_model(not_searched=...) records
                     workspaces it could not search (→ FetchedReport.skipped).
                     fetch_model_reports(client, model_ws, model, [(ws, report)], dest) for
                     batch.py: the model once + the given reports (each bound byPath, with its

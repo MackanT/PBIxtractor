@@ -64,10 +64,11 @@ class FabricClient(RestClient):
 
     @property
     def powerbi(self) -> RestClient:
-        """The Power BI REST API (same sign-in): report -> model bindings and DAX queries."""
+        """The Power BI REST API with this client's credential (one account for both APIs, also
+        when the first call goes to Power BI): report -> model bindings and DAX queries."""
         if self._powerbi is None:
             self._powerbi = RestClient(
-                POWERBI_API, POWERBI_SCOPE, credential=self._credential, sleep=self._sleep
+                POWERBI_API, POWERBI_SCOPE, credential=self._resolve_credential(), sleep=self._sleep
             )
         return self._powerbi
 

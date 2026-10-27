@@ -147,7 +147,7 @@ pbixtractor/
 ├── src/
 │   └── pbixtractor/          # Main package
 │       ├── __init__.py       # Package initialization
-│       ├── cli.py            # Command line (extract, web, fabric, devops, catalog)
+│       ├── cli.py            # Command line (extract, web, fabric, devops, catalog, account)
 │       ├── web_ui.py         # Web UI (NiceGUI)
 │       ├── pipeline.py       # run_extraction(): the whole documentation run
 │       ├── readers.py        # .pbix / PBIR / PBIP report readers
@@ -230,4 +230,4 @@ For issues and questions, please use the [GitHub Issues](https://github.com/Mack
 
 Created by Marcus Toftås
 
-Built with: pandas, xlsxwriter, matplotlib, networkx, NiceGUI, sqlglot, azure-identity
+Built with: pandas, xlsxwriter, matplotlib, networkx, NiceGUI, sqlglot, msal, azure-identity

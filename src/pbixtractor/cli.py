@@ -277,14 +277,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Entra tenant (id or domain) to sign in to and make active (default: the user's "
         "home tenant)",
     )
-    for name, text in (
-        ("use", "make an entry the active one"),
-        ("remove", "remove an entry (a user's last entry also deletes its tokens)"),
+    for name, text, which in (
+        ("use", "make an entry the active one",
+         "number from 'account list', or (part of) a user / tenant name"),
+        ("remove", "remove an entry (a user's last entry also deletes its tokens)",
+         "number from 'account list', or the exact user / tenant name / tenant id"),
     ):
         account_sub = account_commands.add_parser(name, help=text)
-        account_sub.add_argument(
-            "account", metavar="N|NAME", help="number from 'account list', or a user / tenant name"
-        )
+        account_sub.add_argument("account", metavar="N|NAME", help=which)
 
     web = commands.add_parser("web", help="start the web UI (default)")
     web.add_argument("--port", type=int, default=8081, help="port (default: 8081)")
@@ -553,15 +553,13 @@ def _print_accounts() -> None:
     from .azure_auth import (
         AUTH_DIR,
         TOKEN_CACHE_FILE,
-        accounts,
-        active_account,
+        account_snapshot,
         service_principal_configured,
         token_cache_encrypted,
     )
 
-    entries = accounts()
+    entries, active = account_snapshot()
     if entries:
-        active = active_account()
         print("Accounts (* = active):")
         for number, account in enumerate(entries, 1):
             mark = "*" if active is not None and account.key == active.key else " "
@@ -575,6 +573,30 @@ def _print_accounts() -> None:
               "these accounts.")
 
 
+def _add_account(tenant: Optional[str]) -> None:
+    """`account add`: sign in; a tenant-listing problem is printed once as WARNING: ...
+    (not a second time by Python's last-resort log handler)."""
+    import logging
+
+    from . import azure_auth
+
+    printed: set[str] = set()
+
+    def warn(text: str) -> None:
+        printed.add(text)
+        print(f"WARNING: {text}", file=sys.stderr)
+
+    def not_printed(record: logging.LogRecord) -> bool:
+        return record.getMessage() not in printed
+
+    log = logging.getLogger("pbixtractor")
+    log.addFilter(not_printed)
+    try:
+        azure_auth.add_account(tenant, on_warning=warn)
+    finally:
+        log.removeFilter(not_printed)
+
+
 def run_account(args: argparse.Namespace) -> int:
     """Handle `pbixtractor account list|add|use|remove`. Returns the process exit code."""
     from . import azure_auth
@@ -583,12 +605,12 @@ def run_account(args: argparse.Namespace) -> int:
         if args.account_command == "add":
             print(f"Opening Microsoft's sign-in page in your browser (waiting up to "
                   f"{azure_auth.LOGIN_TIMEOUT} s)...")
-            azure_auth.add_account(args.tenant)
+            _add_account(args.tenant)
         elif args.account_command == "use":
             account = azure_auth.use_account(azure_auth.find_account(args.account).key)
             print(f"Now using {account.label}")
         elif args.account_command == "remove":
-            account = azure_auth.find_account(args.account)
+            account = azure_auth.find_account(args.account, exact=True)
             azure_auth.remove_account(account.key)
             print(f"Removed {account.label}")
         _print_accounts()
