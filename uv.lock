@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -1927,6 +1927,8 @@ dependencies = [
     { name = "azure-identity" },
     { name = "fastapi" },
     { name = "matplotlib" },
+    { name = "msal" },
+    { name = "msal-extensions" },
     { name = "networkx" },
     { name = "nicegui" },
     { name = "pandas" },
@@ -1952,6 +1954,8 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
     { name = "fastapi" },
     { name = "matplotlib", specifier = ">=3.8.0" },
+    { name = "msal", specifier = ">=1.30" },
+    { name = "msal-extensions", specifier = ">=1.2" },
     { name = "networkx", specifier = ">=3.0.0" },
     { name = "nicegui", specifier = ">=3.0" },
     { name = "pandas", specifier = ">=2.0.0" },
