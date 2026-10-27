@@ -166,8 +166,13 @@ src/pbixtractor/
                     models/<key>/<file> (checked on the resolved path); logs render as escaped
                     text (_log_text), uploads capped at MAX_UPLOAD_BYTES (2 GB).
                     One download + run at a time across tabs (_JOB_LOCK; a second tab shows
-                    "Waiting for a run in another tab"); start_run refuses with "Finish the
-                    sign-in in your browser first" while web_sources.sign_in_pending() (checked
+                    "Waiting for a run in another tab"). "Create documentation" is enabled only
+                    by show_run_button(): disabled for this tab's whole start_run (running) and,
+                    whatever the source, while a sign-in is going on in the process
+                    (web_sources.sign_in_pending() or the tab's AccountState.signing_in; it
+                    follows AccountState.on_sign_in), with "Waiting for sign-in in your
+                    browser…" next to it (marker run_sign_in). start_run still refuses with
+                    "Finish the sign-in in your browser first" then (the safety net; checked
                     before and after taking _JOB_LOCK). Account control (stand-alone only):
                     build_page makes one web_sources.AccountState(busy=_JOB_LOCK.locked) for
                     both panels (embedded: none, no control); register() calls
@@ -446,40 +451,53 @@ src/pbixtractor/
                     app.storage.general (.nicegui/, gitignored).
                     Account (stand-alone; panels take accounts=AccountState, embedded None):
                     AccountState = one tab's view of the active azure_auth entry (one
-                    account_snapshot() per re-read), shared by an AccountControl at the top of
-                    each panel (above "Sign in / load"): "Signed in as <label>" / "Not signed
-                    in", searchable select of the entries (choosing = use_account; each option
+                    account_snapshot() per re-read; an ApiError there - accounts.json
+                    unreadable or damaged - keeps the tab's last state: no switch, no clearing,
+                    logged once per message, read again at the next poll), shared by an
+                    AccountControl at the top of each panel (above "Sign in / load"): "Signed
+                    in as <label>" / "Not signed
+                    in", searchable select of the entries (choosing = use_account; ValueError →
+                    warning, ApiError/OSError → negative "Could not switch the account: ...";
+                    either way the select and status go back to the active entry; each option
                     has its own remove icon: Quasar option slot, the click emits the select's
                     "remove_entry" event with {index, label} via $root.$refs['r<id>'], checked
                     against the options; remove_account without choosing it first - the active
-                    one → switch behaviour, another → the lists stay; ApiError (tokens not
-                    deleted, entry gone) → warning notify, not "Removed"), an optional "Tenant
-                    (id or domain)" input + "Add account" (add_account(tenant,
-                    on_warning=...) in run.io_bound; the listing warning, collected in the
-                    thread, → warning notify; the input is cleared after a sign-in; ApiError →
-                    negative notify); the unencrypted-tokens note when entries exist and
-                    token_cache_encrypted() is False (asked once, in a thread). A service
-                    principal → "Using the service principal from the environment", no
-                    choices, and accounts.json is neither read nor followed (no switch
-                    listeners, no clearing); AZURE_DEVOPS_PAT → the DevOps panel says the token
-                    is used and ignores the account. "Sign in / load" with no active entry
-                    calls azure_auth.ensure_account() first (ensure_signed_in; tabs asking at
-                    once share one sign-in). sign_in_pending() = a tab of this process is in an
-                    add/ensure (module counter _tabs_signing_in, also covers listing the
-                    tenants) or azure_auth.sign_in_in_progress() (any browser sign-in, also a
-                    run's): every tab polls it (BUSY_POLL_SECONDS) and then shows "Waiting for
-                    sign-in in your browser…" with the select / tenant / Add disabled
-                    (switch/add/remove refused); when it ends the tab re-reads the accounts at
-                    once. A change of the active entry (here, another
-                    tab or `pbixtractor account`: re-read every ACCOUNT_POLL_SECONDS, 3 s) calls
-                    each panel's _account_switched: client dropped, generation +1 (answers on
-                    their way are dropped; DevOps _selection() includes it, PlanPicker has its
-                    own), lists/model-mode switches/model list cleared, then the workspaces /
-                    projects reloaded if they had been loaded (not when no entry is left).
-                    busy() (polled every 0.5 s) disables the control with "Wait for the run to
-                    finish" (switch/add/remove are also refused then); a switch made elsewhere
-                    is applied after the run. Markers <fabric|devops>_account[_status|_tenant|
-                    _add|_hint|_note] (tests trigger "remove_entry" on <panel>_account).
+                    one → switch behaviour, another → the lists stay; ApiError → judged after
+                    re-reading the list: the entry gone (tokens not deleted) → warning, not
+                    "Removed"; still listed or the list unreadable (nothing removed) →
+                    negative), an optional "Tenant (id or domain)" input + "Add account"
+                    (add_account(tenant, on_warning=...) in run.io_bound; the listing warning,
+                    collected in the thread, → warning notify; the input is cleared after a
+                    sign-in; ApiError, also an unreadable list → negative notify); the
+                    unencrypted-tokens note when entries exist and token_cache_encrypted() is
+                    False (asked once, in a thread). A service principal → "Using the service
+                    principal from the environment", no choices, and accounts.json is neither
+                    read nor followed (no timers at all, no switch listeners, no clearing);
+                    AZURE_DEVOPS_PAT → the DevOps panel says the token is used and ignores the
+                    account. "Sign in / load" with no active entry calls
+                    azure_auth.ensure_account() first (ensure_signed_in; tabs asking at once
+                    share one sign-in); during a run (busy()) or a sign-in it does not re-read
+                    the list (a switch made elsewhere is never applied mid-run) and loads with
+                    the shown account (none + a run → "Wait for the run to finish").
+                    sign_in_pending() = azure_auth.sign_in_in_progress() (the whole add/ensure
+                    and every browser sign-in a token needs, also a run's); the tab adds its
+                    own sign-in from the click on (_own_sign_ins, only for what it shows):
+                    every tab polls it (BUSY_POLL_SECONDS) and then shows "Waiting for sign-in
+                    in your browser…" with the select / tenant / Add disabled
+                    (switch/add/remove refused) and tells on_sign_in listeners (the run
+                    button); when it ends the tab re-reads the accounts at once. A change of the
+                    active entry (here, another tab or `pbixtractor account`: every
+                    ACCOUNT_POLL_SECONDS, 3 s, accounts_changed_since() looks at the file and
+                    account_snapshot() reads it only if it changed) calls each panel's
+                    _account_switched → the shared _drop_old_account(panel, clear, reload):
+                    client dropped, generation +1 (answers on their way are dropped; DevOps
+                    _selection() includes it, PlanPicker has its own), the panel's
+                    _clear_lists (lists/model-mode switches) and model list cleared, then the
+                    workspaces / projects reloaded if they had been loaded (not when no entry
+                    is left). busy() (polled every 0.5 s) disables the control with "Wait for
+                    the run to finish" (switch/add/remove are also refused then); a switch made
+                    elsewhere is applied after the run. Markers <fabric|devops>_account[_status|
+                    _tenant|_add|_hint|_note] (tests trigger "remove_entry" on <panel>_account).
   fabric.py         Fabric REST (stdlib urllib): FabricClient (workspaces/reports/
                     semanticModels lists, getDefinition as long-running operation with
                     polling), fetch_report() → <report>.Report + <model>.SemanticModel (TMDL)

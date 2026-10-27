@@ -1203,6 +1203,12 @@ def build_page(
                 run_button = ui.button("Create documentation", icon="play_arrow").props(
                     "unelevated color=secondary"
                 )
+                # A sign-in going on (any tab, or a run's token): no run starts meanwhile
+                sign_in_note = (
+                    ui.label(web_sources.WAITING_FOR_SIGN_IN)
+                    .classes("text-grey-7")
+                    .mark("run_sign_in")
+                )
                 stop_button = (
                     ui.button("Stop after this model", icon="stop", on_click=stop_batch)
                     .props("flat color=negative no-caps")
@@ -1214,6 +1220,23 @@ def build_page(
             progress_bar.visible = False
             log_view = ui.log(max_lines=400).classes("w-full h-40")
             log_view.visible = False
+
+    running = {"value": False}  # this tab's download + documentation run (start_run)
+
+    def sign_in_going_on() -> bool:
+        """A sign-in anywhere in the process, or this tab's own from its click on."""
+        return web_sources.sign_in_pending() or (accounts is not None and accounts.signing_in)
+
+    def show_run_button() -> None:
+        """Disabled while this tab runs, and while a sign-in is going on (whatever the
+        source): the note next to it says so until the sign-in ends."""
+        pending = sign_in_going_on()
+        sign_in_note.visible = pending
+        run_button.set_enabled(not running["value"] and not pending)
+
+    show_run_button()
+    if accounts is not None:  # embedded: no browser sign-in, so none to wait for
+        accounts.on_sign_in(lambda pending: show_run_button())
 
     # Results use the full window width: the lineage viewer needs the room
     result_box = ui.column().classes("w-full gap-3" if embedded else "w-full px-4 pb-4 gap-3")
@@ -1257,7 +1280,6 @@ def build_page(
                 step_label.text = messages.get_nowait()
 
         timer = ui.timer(0.2, show_progress)
-        run_button.disable()
         progress_bar.props("indeterminate")
         progress_bar.visible = True
         try:
@@ -1271,7 +1293,6 @@ def build_page(
             return None
         finally:
             timer.cancel()
-            run_button.enable()
             progress_bar.props(remove="indeterminate")
             progress_bar.visible = False
             step_label.text = ""
@@ -1279,22 +1300,26 @@ def build_page(
     async def start_run() -> None:
         """One download + documentation run at a time across all tabs: a second tab's download
         replaces the same _fabric/_devops folder, and extractions share the logger. None while
-        a browser sign-in is going on in any tab: it may change the account mid-run."""
-        if web_sources.sign_in_pending():
+        a browser sign-in is going on in any tab: it may change the account mid-run (the
+        button is disabled then; this refusal is the safety net). The button stays disabled
+        until the run is over."""
+        if sign_in_going_on():
             ui.notify(web_sources.FINISH_SIGN_IN, type="warning")
             return
+        running["value"] = True
+        show_run_button()
         if _JOB_LOCK.locked():
-            run_button.disable()
             step_label.text = "Waiting for a run in another tab to finish…"
         try:
             async with _JOB_LOCK:
                 step_label.text = ""
-                if web_sources.sign_in_pending():  # began while this tab waited for the lock
+                if sign_in_going_on():  # began while this tab waited for the lock
                     ui.notify(web_sources.FINISH_SIGN_IN, type="warning")
                     return
                 await _start_run()
         finally:
-            run_button.enable()
+            running["value"] = False
+            show_run_button()
 
     async def run_batch(jobs: list[batch.BatchJob]) -> None:
         """Document each model of a plan in turn (batch.run_batch), all added to the catalog,
@@ -1327,7 +1352,6 @@ def build_page(
                     log_view.push(f"{first}: {second}")
                     log_view.visible = True
 
-        run_button.disable()
         log_view.clear()
         log_view.visible = False
         progress_bar.visible = True
@@ -1353,7 +1377,6 @@ def build_page(
             timer.cancel()
             drain()
             batch_stop["event"] = None
-            run_button.enable()
             stop_button.visible = False
             progress_bar.visible = False
         step_label.text = ""
@@ -1485,7 +1508,6 @@ def build_page(
                     log_view.push(f"{first}: {second}")
                     log_view.visible = True
 
-        run_button.disable()
         result_box.clear()
         log_view.clear()
         log_view.visible = False
@@ -1502,7 +1524,6 @@ def build_page(
         finally:
             timer.cancel()
             drain()
-            run_button.enable()
             progress_bar.visible = False
 
         step_label.text = ""

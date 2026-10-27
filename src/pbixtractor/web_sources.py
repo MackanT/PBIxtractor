@@ -16,8 +16,9 @@ which account signs in, switching between the remembered entries, adding one thr
 browser sign-in (optionally at a typed tenant), removing any one (each entry has its own
 remove icon). A switch - here, in another tab or with `pbixtractor account` - makes both
 panels drop their clients and reload what they had loaded with the new account. While a
-sign-in is going on in any tab (sign_in_pending()), every tab shows it and no switch or run
-starts. Embedded there is no control (a service principal from the environment signs in).
+sign-in is going on in the process (sign_in_pending()), every tab shows it and no switch or run
+starts. An account list that cannot be read changes nothing: the tab keeps what it showed.
+Embedded there is no control (a service principal from the environment signs in).
 
 API calls block (and the first one may open a browser sign-in), so they run in threads.
 """
@@ -28,7 +29,7 @@ import queue
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from nicegui import run, ui
 
@@ -274,7 +275,8 @@ class PlanPicker:
 # ============================================================================
 
 BUSY_POLL_SECONDS = 0.5  # how soon the controls notice a run or a sign-in starting or ending
-ACCOUNT_POLL_SECONDS = 3.0  # how soon a tab follows a switch made elsewhere (tab, command line)
+ACCOUNT_POLL_SECONDS = 3.0  # how soon a tab follows a switch made elsewhere (tab, command line):
+# it then looks at accounts.json (azure_auth.accounts_changed_since) and reads it only if changed
 WAIT_FOR_RUN = "Wait for the run to finish"
 WAITING_FOR_SIGN_IN = "Waiting for sign-in in your browser…"
 FINISH_SIGN_IN = "Finish the sign-in in your browser first"
@@ -283,8 +285,6 @@ SERVICE_PRINCIPAL = "Using the service principal from the environment"
 DEVOPS_PAT = "Using the personal access token from AZURE_DEVOPS_PAT"
 REMOVE_ENTRY = "Remove this account from the list"
 LIST_CHANGED = "The account list changed meanwhile - try again."
-
-_tabs_signing_in = 0  # tabs of this process adding an account (the sign-in + listing its tenants)
 
 # Each entry of the account select has its own remove icon (Quasar's option slot). The click
 # must not choose the entry (.stop), and reaches Python as the select's "remove_entry" event
@@ -304,11 +304,12 @@ _OPTION_SLOT = """
 
 def sign_in_pending() -> bool:
     """
-    A sign-in is going on in this process: a browser sign-in is open (in any tab, or for a run
-    whose token needs one), or a tab is still adding the account it signed in (listing its
-    tenants). Every tab shows it; no switch and no documentation run may start meanwhile.
+    A sign-in is going on in this process (azure_auth.sign_in_in_progress): a tab adding an
+    account (the browser, listing its tenants, writing the entries), the first sign-in of
+    "Sign in / load", or a token that needs the browser - a run's too. Every tab shows it; no
+    switch and no documentation run may start meanwhile.
     """
-    return _tabs_signing_in > 0 or azure_auth.sign_in_in_progress()
+    return azure_auth.sign_in_in_progress()
 
 
 class AccountState:
@@ -317,11 +318,16 @@ class AccountState:
     Fabric and the DevOps panel (one account for both, for the whole app). A switch - made
     here, in another tab or with `pbixtractor account` - tells every panel that listens, which
     drops its client and reloads with the new account. With a service principal in the
-    environment the accounts are not used: nothing is followed then.
+    environment the accounts are not used: nothing is read or followed then (no timers).
 
         accounts = AccountState(busy=run_lock.locked)  # no switching while busy() is True
         FabricPanel(on_choose, accounts)               # shows a control, follows switches
+        accounts.on_sign_in(lambda pending: ...)       # a sign-in starts or ends (any tab)
         await accounts.ensure_signed_in()              # False: the sign-in failed (shown)
+
+    An account list that cannot be read (ApiError) changes nothing: the tab keeps what it
+    showed, logs the error (once per message) and reads the list again at the next poll;
+    switching, adding and removing show the error and change nothing.
     """
 
     def __init__(self, busy: Callable[[], bool] = lambda: False):
@@ -332,20 +338,23 @@ class AccountState:
         self._busy = busy
         self._controls: list["AccountControl"] = []
         self._listeners: list[Callable[[], None]] = []
-        self.service_principal = azure_auth.service_principal_configured()
-        self.entries, self.active = ([], None) if self.service_principal else self._read()
-        self.encrypted: Optional[bool] = None  # asked once there are tokens to keep
-        self.signing_in = sign_in_pending()  # as last shown (a sign-in anywhere in the process)
-        self.blocked = bool(busy())
+        self._sign_in_listeners: list[Callable[[bool], None]] = []
+        self._own_sign_ins = 0  # this tab's: shown from the click on, before its thread starts
+        self._stamp: Optional[tuple] = None  # accounts.json as last read (None: read it next)
+        self._read_error = ""  # the last error reading it (logged once), "" after a good read
         self._read_at = time.monotonic()
+        self.entries: list[azure_auth.Account] = []
+        self.active: Optional[str] = None  # the active entry's key
+        self.encrypted: Optional[bool] = None  # asked once there are tokens to keep
+        self.signing_in = False  # as last shown (a sign-in anywhere in the process)
+        self.blocked = False  # as last shown (a run in any tab)
+        self.service_principal = azure_auth.service_principal_configured()
+        if self.service_principal:  # it signs in, whatever accounts.json says
+            return
+        self.signing_in = self._pending()
+        self.blocked = bool(busy())
+        self._sync()
         ui.timer(BUSY_POLL_SECONDS, self._poll)
-        if self.entries:
-            ui.timer(0.01, self._check_encryption, once=True)
-
-    @staticmethod
-    def _read() -> tuple[list, Optional[str]]:
-        entries, active = azure_auth.account_snapshot()  # one read: never two file versions
-        return entries, active.key if active else None
 
     @property
     def account(self) -> Optional[azure_auth.Account]:
@@ -360,21 +369,62 @@ class AccountState:
         """Call `listener` after the active account changed (it clears and reloads its panel)."""
         self._listeners.append(listener)
 
+    def on_sign_in(self, listener: Callable[[bool], None]) -> None:
+        """Call `listener(pending)` when a sign-in starts or ends - in this tab, another one or
+        a run (e.g. "Create documentation" waits for it). Never with a service principal."""
+        self._sign_in_listeners.append(listener)
+
     def _show(self) -> None:
         for control in self._controls:
             control.show()
 
-    def _sync(self) -> bool:
-        """Re-read the account list; show a change and, after a switch, tell the panels.
-        Returns whether anything changed."""
+    def _pending(self) -> bool:
+        """A sign-in is going on: this tab's (from the click on) or any other of the process."""
+        return self._own_sign_ins > 0 or sign_in_pending()
+
+    def _set(self, blocked: bool, signing_in: bool) -> None:
+        """Show a run or a sign-in starting or ending (the controls, the sign-in listeners)."""
+        if (blocked, signing_in) == (self.blocked, self.signing_in):
+            return
+        sign_in_changed = signing_in != self.signing_in
+        self.blocked, self.signing_in = blocked, signing_in
+        self._show()
+        if sign_in_changed:
+            for listener in self._sign_in_listeners:
+                listener(signing_in)
+
+    def _sync(self, force: bool = True) -> bool:
+        """
+        Re-read the account list; show a change and, after a switch, tell the panels. When it
+        cannot be read everything stays as it was (logged once per message; read again at the
+        next poll).
+
+        Args:
+            force: Read it even if accounts.json looks unchanged (False: the poll's cheap check)
+
+        Returns:
+            Whether anything changed
+        """
         if self.service_principal:  # it signs in, whatever accounts.json says
             return False
         self._read_at = time.monotonic()
-        entries, active = self._read()
-        if entries == self.entries and active == self.active:
+        changed, stamp = azure_auth.accounts_changed_since(None if force else self._stamp)
+        if not changed:
             return False
-        switched = active != self.active
-        self.entries, self.active = entries, active
+        try:
+            entries, active = azure_auth.account_snapshot()  # one read: never two file versions
+        except ApiError as error:
+            self._stamp = None  # read it again next time
+            if str(error) != self._read_error:
+                self._read_error = str(error)
+                logger.error(f"{error} (the web UI keeps the accounts it showed)")
+            return False
+        self._stamp, self._read_error = stamp, ""
+        key = active.key if active else None
+        if entries == self.entries and key == self.active:
+            return False
+        switched = key != self.active
+        self.entries, self.active = entries, key
         self._show()
         if entries and self.encrypted is None:
             ui.timer(0.01, self._check_encryption, once=True)
@@ -384,16 +434,15 @@ class AccountState:
         return True
 
     def _poll(self) -> None:
-        blocked, signing_in = bool(self._busy()), sign_in_pending()
+        blocked, signing_in = bool(self._busy()), self._pending()
         ended = self.signing_in and not signing_in  # a sign-in (maybe another tab's) is over
-        if (blocked, signing_in) != (self.blocked, self.signing_in):
-            self.blocked, self.signing_in = blocked, signing_in
-            self._show()
-        # A switch made elsewhere waits for a run here to end: its lists are the old account's
+        self._set(blocked, signing_in)
+        # A switch made elsewhere waits for a run or a sign-in to end: the lists are the old
+        # account's until then
         if not blocked and not signing_in and (
             ended or time.monotonic() - self._read_at >= ACCOUNT_POLL_SECONDS
         ):
-            self._sync()
+            self._sync(force=False)  # reads accounts.json only when it changed
 
     async def _check_encryption(self) -> None:
         if self.encrypted is not None:
@@ -411,7 +460,7 @@ class AccountState:
         refused = ""
         if self._busy():
             refused = f"{WAIT_FOR_RUN}."
-        elif sign_in_pending():
+        elif self._pending():
             refused = WAITING_FOR_SIGN_IN
         if refused:
             ui.notify(refused, type="warning")
@@ -419,12 +468,11 @@ class AccountState:
         return bool(refused)
 
     async def _sign_in(self, function: Callable, *args, **kwargs) -> bool:
-        """Run a blocking azure_auth sign-in in a thread; every tab shows it meanwhile.
+        """Run a blocking azure_auth sign-in in a thread; every tab shows it meanwhile
+        (azure_auth.sign_in_in_progress; this tab from the click on).
         Returns False when it failed, was cancelled or timed out (the error is shown)."""
-        global _tabs_signing_in
-        _tabs_signing_in += 1
-        self.signing_in = True
-        self._show()
+        self._own_sign_ins += 1
+        self._set(bool(self._busy()), True)
         try:
             return await run.io_bound(function, *args, **kwargs) is not None
         except (ApiError, ValueError, OSError) as error:
@@ -435,8 +483,8 @@ class AccountState:
             ui.notify(f"Sign-in failed: {error}", type="negative", multi_line=True, timeout=15000)
             return False
         finally:
-            _tabs_signing_in -= 1
-            self.signing_in = sign_in_pending()
+            self._own_sign_ins -= 1
+            self._set(bool(self._busy()), self._pending())
             if not self._sync():
                 self._show()
 
@@ -444,14 +492,18 @@ class AccountState:
         """
         Before a panel's first call: with no active account (and no service principal) one
         browser sign-in whose home tenant becomes active. Tabs asking at once share it
-        (azure_auth.ensure_account: one sign-in, the others wait and use its account).
+        (azure_auth.ensure_account: one sign-in, the others wait and use its account). During
+        a run or a sign-in the account list is not re-read: a switch made elsewhere is applied
+        once it is over (as the poll does), never in the middle of a run.
 
         Returns:
-            False when the sign-in failed or was cancelled (the error is shown)
+            False when the sign-in failed or was cancelled, or a run is going on and there is
+            no account (shown)
         """
         if self.service_principal:
             return True
-        self._sync()
+        if not self._busy() and not self._pending():
+            self._sync()
         if self.active is not None:
             return True
         if self._busy():  # signing in makes an account active: not during a run
@@ -469,7 +521,8 @@ class AccountState:
             tenant: Tenant id or domain to sign in to and make active (default: the home tenant)
 
         Returns:
-            False when the sign-in failed, was cancelled or timed out (the error is shown)
+            False when the sign-in failed, was cancelled or timed out, or the account list
+            cannot be read (the error is shown)
         """
         if self._refuse():
             return False
@@ -482,13 +535,19 @@ class AccountState:
         return added
 
     def choose(self, key: Optional[str]) -> None:
-        """Make another entry the active one (a select's choice)."""
+        """Make another entry the active one (a select's choice). When that fails, the select
+        and the status go back to the entry that is active."""
         if not key or key == self.active or self._refuse():
             return
         try:
             azure_auth.use_account(key)
         except ValueError as error:  # removed meanwhile (another tab, the command line)
             ui.notify(str(error), type="warning")
+        except (ApiError, OSError) as error:  # the account list cannot be read or written
+            ui.notify(
+                f"Could not switch the account: {error}", type="negative", multi_line=True,
+                timeout=15000,
+            )
         if not self._sync():
             self._show()
 
@@ -498,19 +557,27 @@ class AccountState:
         if not key or self._refuse():
             return
         removed = next((a.label for a in self.entries if a.key == key), key)
+        failed = ""  # an ApiError: judged once the list has been read again
         try:
             # The user's last entry also deletes their tokens from the token cache
             await run.io_bound(azure_auth.remove_account, key)
             ui.notify(f"Removed {removed}")
         except ValueError as error:  # removed meanwhile
             ui.notify(str(error), type="warning")
-        except ApiError as error:  # the entry is gone, but its tokens could not be deleted
-            ui.notify(str(error), type="warning", multi_line=True, timeout=30000)
+        except ApiError as error:
+            failed = str(error)
         except Exception as error:  # UI boundary
             logger.exception(f"Removing {removed} failed: {error}")
             ui.notify(f"Removing {removed} failed: {error}", type="negative", multi_line=True)
         if not self._sync():
             self._show()
+        if failed:
+            # Gone from the list: only its tokens could not be deleted. Still listed, or the
+            # list cannot be read: nothing was removed
+            gone = not self._read_error and all(a.key != key for a in self.entries)
+            ui.notify(
+                failed, type="warning" if gone else "negative", multi_line=True, timeout=30000
+            )
 
 
 class AccountControl:
@@ -606,6 +673,27 @@ class AccountControl:
         self.tenant.set_enabled(not locked)
         self.add_button.set_enabled(not locked)
         self.note.visible = bool(state.entries) and state.encrypted is False
+
+
+def _drop_old_account(
+    panel, clear: Callable[[], None], reload: Callable[[], Awaitable[None]]
+) -> None:
+    """
+    A panel (FabricPanel / DevOpsPanel) after an account switch: answers still on their way for
+    the old account are dropped (its generation), its client goes with that account, `clear`
+    empties what it loaded and the model list is cleared; then `reload` loads the panel's first
+    list again with the new account - only if it had been loaded and an entry is active (no
+    sign-in on its own).
+    """
+    reload_now = panel._loaded and panel._accounts.active is not None
+    panel._generation += 1
+    panel._client = None
+    panel._loaded = False
+    clear()
+    panel.picker.clear()
+    if reload_now:
+        with panel._slot:
+            ui.timer(0.01, reload, once=True)
 
 
 class FabricPanel:
@@ -749,20 +837,16 @@ class FabricPanel:
     def _account_switched(self) -> None:
         """Another account is active: drop the client and everything the old account loaded,
         then reload the workspaces if they had been loaded."""
-        reload = self._loaded and self._accounts is not None and self._accounts.active is not None
-        self._generation += 1
-        self._client = None
-        self._loaded = False
+        _drop_old_account(self, self._clear_lists, self.load_workspaces)
+
+    def _clear_lists(self) -> None:
+        """Empty what the old account loaded (workspaces, reports, the model-mode switches)."""
         self._workspaces = {}
         _set_options(self.workspace, {})
         self.workspaces.set_options({}, value=[])
         _set_options(self.report, {})
         self.all_reports.value = False
         self.all_workspaces.value = False
-        self.picker.clear()
-        if reload:
-            with self._slot:
-                ui.timer(0.01, self.load_workspaces, once=True)
 
     def _report_changed(self) -> None:
         if self.report.value:
@@ -1022,18 +1106,15 @@ class DevOpsPanel:
     def _account_switched(self) -> None:
         """Another account is active: drop the client and everything the old account loaded,
         then reload the projects if they had been loaded."""
-        reload = self._loaded and self._accounts is not None and self._accounts.active is not None
-        self._generation += 1
-        self._client = None
-        self._loaded = False
+        _drop_old_account(self, self._clear_lists, self.load_projects)
+
+    def _clear_lists(self) -> None:
+        """Empty what the old account loaded (projects, repositories, branches, reports,
+        versions)."""
         self._default_branches = {}
         for select in (self.project, self.repo, self.branch, self.report):
             _set_options(select, {})
         self.version.set_options({"": "Latest on the branch"}, value="")
-        self.picker.clear()
-        if reload:
-            with self._slot:
-                ui.timer(0.01, self.load_projects, once=True)
 
     def ready(self) -> bool:
         if self.is_batch:
