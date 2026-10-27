@@ -15,6 +15,7 @@ principal in the environment replaces all of this (servers, containers: never a 
 """
 
 import base64
+import contextlib
 import email.utils
 import json
 import logging
@@ -76,17 +77,20 @@ class Account:
 
 
 _store_lock = threading.RLock()  # accounts.json read-modify-write
-# One sign-in at a time (web UI tabs share the process): held around every browser sign-in and
-# for all of add_account (sign-in, tenant listing, writing the entries)
+# One sign-in at a time (web UI tabs share the process): held around every browser sign-in, for
+# all of add_account (sign-in, tenant listing, writing the entries) and while a user's tokens
+# are deleted (so a sign-in writing fresh tokens for that user is never cut short)
 _login_lock = threading.RLock()
-_signing_in = threading.Event()  # set while a browser sign-in is open (sign_in_in_progress)
+_sign_ins = 0  # sign-ins going on in this process (sign_in_in_progress); nested ones count too
+_sign_ins_lock = threading.Lock()
 _apps_lock = threading.Lock()
 _caches: dict[Path, tuple] = {}  # token cache file -> (PersistedTokenCache, encrypted)
 _apps: dict[tuple, object] = {}  # (token cache file, authority) -> PublicClientApplication
-_service_principal: Optional[tuple] = None  # (AZURE_* values, EnvironmentCredential)
+_service_principal: Optional[tuple] = None  # (AZURE_* values, its credential)
 _service_principal_lock = threading.Lock()
 _browser_login_allowed = True
-_reported: set[tuple] = set()  # account list read errors already logged
+_READ_ATTEMPTS = 6  # accounts.json held by another process (replacing it, a virus scanner):
+_READ_RETRY_SECONDS = 0.1  # retried for about half a second, then an error
 
 _INTERACTION_ERRORS = {"interaction_required", "login_required", "consent_required", "invalid_grant"}
 _SERVICE_PRINCIPAL_HELP = (
@@ -122,8 +126,25 @@ def _require_browser() -> None:
 
 
 def sign_in_in_progress() -> bool:
-    """True while a browser sign-in of this process is open (in any tab or thread)."""
-    return _signing_in.is_set()
+    """
+    True while a sign-in of this process is going on, in any tab or thread (a run's too): the
+    whole of add_account / ensure_account (the browser, listing the tenants, writing the
+    entries) and every browser sign-in a credential's token needs. False once the last ends.
+    """
+    return _sign_ins > 0
+
+
+@contextlib.contextmanager
+def _sign_in_running():
+    """Count a sign-in for sign_in_in_progress() while the block runs (on every exit path)."""
+    global _sign_ins
+    with _sign_ins_lock:
+        _sign_ins += 1
+    try:
+        yield
+    finally:
+        with _sign_ins_lock:
+            _sign_ins -= 1
 
 
 # ---------------------------------------------------------------------------
@@ -145,19 +166,33 @@ def _sorted(entries) -> list[Account]:
 
 
 def _read_store() -> tuple[list[Account], Optional[str]]:
-    """(entries in list order, active key) from accounts.json; nothing when it is missing."""
+    """
+    (entries in list order, active key) from accounts.json; nothing when it is missing.
+
+    Raises:
+        ApiError: The file exists but cannot be read (still after retrying for about half a
+            second) or is damaged - never "no accounts", which would let a writer wipe the
+            entries or a credential open a sign-in
+    """
     path = AUTH_DIR / ACCOUNTS_FILE
+    for attempt in range(_READ_ATTEMPTS):
+        try:
+            content = path.read_bytes()
+            break
+        except FileNotFoundError:
+            return [], None
+        except OSError as error:  # e.g. Windows: another process is replacing it right now
+            if attempt == _READ_ATTEMPTS - 1:
+                raise ApiError(f"Cannot read the account list {path}: {error}") from None
+            time.sleep(_READ_RETRY_SECONDS)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return [], None
-    except (OSError, ValueError) as error:
-        if (path, str(error)) not in _reported:  # read every few seconds by the web UI
-            _reported.add((path, str(error)))
-            logger.warning(f"Cannot read the account list {path}: {error}")
-        return [], None
-    if not isinstance(data, dict):
-        return [], None
+        data = json.loads(content.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+    except ValueError as error:  # also UnicodeDecodeError
+        raise ApiError(
+            f"The account list {path} is damaged ({error}) - delete it and sign in again"
+        ) from None
     entries = []
     for item in data.get("accounts") or []:
         try:
@@ -204,19 +239,51 @@ def account_snapshot() -> tuple[list[Account], Optional[Account]]:
 
     Returns:
         (entries by user, the home tenant first, then by tenant name; the active entry or None)
+
+    Raises:
+        ApiError: accounts.json exists but cannot be read or is damaged (missing: no entries)
     """
     entries, active = _read_store()
     return entries, next((a for a in entries if a.key == active), None)
 
 
 def accounts() -> list[Account]:
-    """The remembered entries: by user, the home tenant first, then by tenant name."""
+    """The remembered entries: by user, the home tenant first, then by tenant name (ApiError:
+    the account list cannot be read, see account_snapshot)."""
     return account_snapshot()[0]
 
 
 def active_account() -> Optional[Account]:
-    """The entry every sign-in uses (None: the next sign-in opens the browser)."""
+    """The entry every sign-in uses (None: the next sign-in opens the browser; ApiError: the
+    account list cannot be read, see account_snapshot)."""
     return account_snapshot()[1]
+
+
+def accounts_changed_since(stamp: Optional[tuple]) -> tuple[bool, Optional[tuple]]:
+    """
+    Whether accounts.json may have changed since `stamp`, without reading it: a cheap check
+    for a poll, which then calls account_snapshot() only when it did.
+
+        changed, stamp = accounts_changed_since(None)       # None: never read - True
+        changed, stamp = accounts_changed_since(stamp)      # every few seconds
+
+    Args:
+        stamp: The stamp an earlier call returned, or None
+
+    Returns:
+        (changed, the new stamp): the file's modification time, size and file id (a writer
+        replaces the file, so the id changes too); a missing file has a stamp of its own. When
+        the file cannot even be looked at, (True, None): read it (that raises the error).
+    """
+    path = AUTH_DIR / ACCOUNTS_FILE
+    try:
+        info = path.stat()
+        new = (str(path), info.st_mtime_ns, info.st_size, info.st_ino)
+    except FileNotFoundError:
+        new = (str(path), None, None, None)
+    except OSError:
+        return True, None
+    return stamp is None or new != stamp, new
 
 
 def use_account(key: str) -> Account:
@@ -228,6 +295,7 @@ def use_account(key: str) -> Account:
 
     Raises:
         ValueError: No entry with that key
+        ApiError: The account list cannot be read (nothing is written then)
     """
     with _store_lock:
         entries, _ = account_snapshot()
@@ -297,15 +365,16 @@ def remove_account(key: str) -> None:
     Forget an entry. When the active entry goes, the same user's home tenant becomes active,
     else that user's other entry, else the first remaining one (none left: no active entry).
     The user's last entry also deletes that user's tokens from the token cache (offline: no
-    sign-in service is asked).
+    sign-in service is asked) - after any sign-in of this process going on meanwhile, and only
+    if the user still has no entry then (a sign-in adding them again keeps its fresh tokens).
 
     Args:
         key: Account.key of a remembered entry
 
     Raises:
         ValueError: No entry with that key
-        ApiError: The entry was removed, but the user's tokens could not be deleted (the
-            message says so)
+        ApiError: The account list cannot be read (nothing is removed then), or the entry was
+            removed but the user's tokens could not be deleted (the message says so)
     """
     with _store_lock:
         entries, active = account_snapshot()
@@ -316,9 +385,11 @@ def remove_account(key: str) -> None:
         if active is not None and active.key == key:
             active = _next_active(account, remaining)
         _write_store(remaining, active.key if active else None)
-    if not any(a.home_account_id == account.home_account_id for a in remaining):
+    if any(a.home_account_id == account.home_account_id for a in remaining):
+        return
+    with _login_lock:  # a sign-in writing fresh tokens for this user ends first
         try:
-            _delete_tokens(account.home_account_id)
+            _delete_unlisted_tokens(account.home_account_id)
         except Exception as error:  # cache file locked / unreadable, keyring refused
             raise ApiError(
                 f"Removed {account.label}, but could not delete the tokens of "
@@ -387,6 +458,17 @@ def _delete_tokens(home_account_id: str) -> None:
             remove(record)
 
 
+def _delete_unlisted_tokens(home_account_id: str) -> bool:
+    """Delete a user's tokens unless the user has an entry (looked up under the store lock).
+    Callers hold _login_lock, so no sign-in of this process writes tokens meanwhile.
+    Returns whether the tokens were deleted."""
+    with _store_lock:
+        if any(a.home_account_id == home_account_id for a in accounts()):
+            return False
+        _delete_tokens(home_account_id)
+        return True
+
+
 def _new_app(authority: str, token_cache):
     """An MSAL public client for one tenant authority (tests replace this)."""
     import msal
@@ -428,8 +510,7 @@ def _sign_in(app, scopes, prompt=None, login_hint=None, claims=None, timeout=LOG
     from msal import BrowserInteractionTimeoutError
 
     _require_browser()
-    with _login_lock:
-        _signing_in.set()
+    with _sign_in_running(), _login_lock:
         try:
             result = app.acquire_token_interactive(
                 list(scopes),
@@ -444,8 +525,6 @@ def _sign_in(app, scopes, prompt=None, login_hint=None, claims=None, timeout=LOG
             raise
         except Exception as error:
             raise ApiError(f"Sign-in failed: {error}") from None
-        finally:
-            _signing_in.clear()
     if not result or "access_token" not in result:
         raise ApiError(f"Sign-in failed: {_msal_error(result)}")
     return result
@@ -539,10 +618,13 @@ def _add_account(
     on_warning: Optional[Callable[[str], None]],
     activate_signed_in: bool,
 ) -> list[Account]:
-    """add_account(); `activate_signed_in` False makes the user's home tenant active (when it
-    is an entry) even after signing in at `tenant`."""
+    """add_account(); `activate_signed_in` False makes the user's home tenant active even after
+    signing in at `tenant` (added as an entry also when the tenants cannot be listed)."""
     _require_browser()
-    with _login_lock:  # the whole add: a caller waiting for the lock then sees the new entries
+    # The whole add: a caller waiting for the lock then sees the new entries, and every tab
+    # sees a sign-in going on until the entries are written
+    with _sign_in_running(), _login_lock:
+        account_snapshot()  # an account list that cannot be read: fail before the browser opens
         app = _app(tenant)
         result = _sign_in(app, [FABRIC_SCOPE], prompt="select_account", timeout=timeout)
         claims = result.get("id_token_claims") or {}
@@ -550,24 +632,21 @@ def _add_account(
             claims.get("preferred_username") or claims.get("upn") or claims.get("name") or "?"
         )
         home_account_id = _home_account_id(result, app)
-        home_tenant = home_account_id.partition(".")[2].casefold()
-        signed_in = str(claims.get("tid") or tenant or home_tenant)
+        home_tenant_id = home_account_id.partition(".")[2]
+        home_tenant = home_tenant_id.casefold()
+        signed_in = str(claims.get("tid") or tenant or home_tenant_id)
 
         def entry(tenant_id: str, tenant_name: str = "") -> Account:
             home = tenant_id.casefold() == home_tenant
             return Account(username, home_account_id, tenant_id, tenant_name, home=home)
 
-        warning = None
+        listing_error = None
         try:
             listed = _list_tenants(_management_token(app, home_account_id))
         except Exception as error:  # ApiError mostly: no access to the management API
-            listed = None
-            warning = (
-                f"Could not list the tenants of {username} ({error}): only the tenant signed in "
-                "to was added or updated - add other tenants by their tenant id or domain"
-            )
+            listed, listing_error = None, error
 
-        with _store_lock:
+        with _store_lock:  # read again: another process may have changed the list meanwhile
             existing, _ = account_snapshot()
             others = [a for a in existing if a.home_account_id != home_account_id]
             if listed is None:  # keep what is known: a failed listing never deletes entries
@@ -587,12 +666,23 @@ def _add_account(
             if listed is None or key not in mine:
                 known = mine.get(key)
                 mine[key] = entry(signed_in, known.tenant_name if known else "")
+            home_added = False
+            if not activate_signed_in and home_tenant and home_tenant not in mine:
+                mine[home_tenant] = entry(home_tenant_id)  # unlisted: the home tenant still
+                home_added = True  # becomes the active entry (its name is unknown then)
             added = _sorted(mine.values())
             active = mine[key]
             if not activate_signed_in:
                 active = next((a for a in added if a.home), active)
             _write_store(others + added, active.key)
-    if warning:
+    if listing_error is not None:
+        which = "the tenant signed in to and the home tenant were" if home_added else (
+            "the tenant signed in to was"
+        )
+        warning = (
+            f"Could not list the tenants of {username} ({listing_error}): only {which} added "
+            "or updated - add other tenants by their tenant id or domain"
+        )
         try:
             if on_warning is not None:
                 on_warning(warning)
@@ -607,7 +697,8 @@ def _ensure_account(tenant: Optional[str], timeout: float) -> Account:
     if account is not None:
         return account
     _require_browser()
-    with _login_lock:  # another caller may be signing in right now: then use its account
+    # Another caller may be signing in right now: then wait for it and use its account
+    with _sign_in_running(), _login_lock:
         account = active_account()
         if account is None:
             _add_account(tenant, timeout, None, activate_signed_in=False)
@@ -662,13 +753,17 @@ class _AccountCredential:
     Tokens for one account entry: the one active when the credential is created, kept for its
     lifetime (a switch affects only credentials created after it). With no active entry the
     first get_token() signs in (ensure_account; with a tenant: there, the home tenant made
-    active) and uses the active user in that tenant. Safe to use from several threads.
+    active) and uses the active user in that tenant. An account list that cannot be read is
+    an error of get_token() (ApiError), never a sign-in. Safe to use from several threads.
     """
 
     def __init__(self, tenant_id: Optional[str] = None):
         self._tenant_id = tenant_id
         self._lock = threading.Lock()
-        self._account = _bound_account(tenant_id)
+        try:
+            self._account = _bound_account(tenant_id)
+        except ApiError:  # unreadable account list: get_token() reads it again (and raises)
+            self._account = None
 
     def _bound(self) -> Account:
         with self._lock:
@@ -714,26 +809,41 @@ class _AccountCredential:
         return AccessToken(result["access_token"], int(time.time()) + expires_in)
 
     def _interactive(self, app, account: Account, scopes, claims) -> dict:
-        waited = not _login_lock.acquire(blocking=False)
-        if waited:
-            _login_lock.acquire()
+        """The browser sign-in a token needs (sign_in_in_progress() meanwhile)."""
+        with _sign_in_running():
+            waited = not _login_lock.acquire(blocking=False)
+            if waited:
+                _login_lock.acquire()
+            try:
+                if waited:  # the other sign-in may have been this user's: try the cache again
+                    result = self._silent(app, account, scopes, claims)
+                    if result and "access_token" in result:
+                        return result
+                result = _sign_in(app, scopes, login_hint=account.username, claims=claims)
+                signed_in = _home_account_id(result, app)
+                if signed_in != account.home_account_id:
+                    self._refuse_other_user(result, signed_in, account)  # raises ApiError
+                return result
+            finally:
+                _login_lock.release()
+
+    @staticmethod
+    def _refuse_other_user(result: dict, signed_in: str, account: Account) -> None:
+        """Signed in as someone else (another account picked): MSAL has cached that user's
+        tokens - delete them unless that user has an entry - and raise ApiError."""
+        other = (result.get("id_token_claims") or {}).get("preferred_username") or signed_in
         try:
-            if waited:  # the other sign-in may have been this user's: try the cache again
-                result = self._silent(app, account, scopes, claims)
-                if result and "access_token" in result:
-                    return result
-            result = _sign_in(app, scopes, login_hint=account.username, claims=claims)
-        finally:
-            _login_lock.release()
-        signed_in = _home_account_id(result, app)
-        if signed_in != account.home_account_id:
-            other = (result.get("id_token_claims") or {}).get("preferred_username") or signed_in
-            raise ApiError(
-                f"Sign-in failed: signed in as {other}, but the account in use is "
-                f"{account.username} - sign in as that user, or add {other} with "
-                "`pbixtractor account add`"
+            _delete_unlisted_tokens(signed_in)  # the caller holds _login_lock
+        except Exception as error:  # account list or token cache unreadable: the tokens stay
+            logger.warning(
+                f"Could not delete the tokens of {other} from {AUTH_DIR / TOKEN_CACHE_FILE}: "
+                f"{error}"
             )
-        return result
+        raise ApiError(
+            f"Sign-in failed: signed in as {other}, but the account in use is "
+            f"{account.username} - sign in as that user, or add {other} with "
+            "`pbixtractor account add`"
+        )
 
 
 def _credential(tenant_id: Optional[str]):
@@ -755,7 +865,8 @@ def default_credential(tenant_id: Optional[str] = None):
     - else the account entry active now, kept for the credential's lifetime (a client keeps
       its account; clients made after a switch use the new one). With no entry the first
       token opens Microsoft's sign-in page (at `tenant_id` when given) and the user's home
-      tenant becomes the active entry; the credential uses that user in `tenant_id`.
+      tenant becomes the active entry; the credential uses that user in `tenant_id`. An
+      account list that cannot be read makes get_token() raise ApiError (no sign-in).
 
     A new credential on every call (get_credential() shares a service principal's).
 
@@ -771,16 +882,17 @@ def default_credential(tenant_id: Optional[str] = None):
 
 def get_credential(tenant_id: Optional[str] = None):
     """
-    default_credential(tenant_id), except that a service principal's credential is made once
-    per process (for the same AZURE_* values) and shared, so its tokens are reused.
+    default_credential(tenant_id) - looked up when called, so a replaced
+    azure_auth.default_credential is used - except that a service principal's credential is
+    made once per process (for the same AZURE_* values) and shared, so its tokens are reused.
     """
     global _service_principal
     if not service_principal_configured():
-        return _credential(tenant_id)
+        return default_credential(tenant_id)
     values = tuple(sorted(item for item in os.environ.items() if item[0].startswith("AZURE_")))
     with _service_principal_lock:
         if _service_principal is None or _service_principal[0] != values:
-            _service_principal = (values, _credential(tenant_id))
+            _service_principal = (values, default_credential(tenant_id))
         return _service_principal[1]
 
 
@@ -836,7 +948,7 @@ class RestClient:
                 self._token = credential.get_token(self._scope)
             except ApiError:
                 raise
-            except Exception as error:  # azure-identity: login cancelled/timed out, az expired
+            except Exception as error:  # login cancelled or timed out, service principal refused
                 raise ApiError(f"Sign-in failed: {error}") from None
         return f"Bearer {self._token.token}"
 

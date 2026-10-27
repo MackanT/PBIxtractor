@@ -261,34 +261,52 @@ src/pbixtractor/
                     tenant_name, home; key, label "<user> · <tenant>") per tenant; a listing
                     replaces the user's entries; a failed listing (or ARM token) keeps them and
                     adds/updates only the signed-in tenant, logs a warning and calls
-                    on_warning(text); `tenant` or the home tenant becomes active. _login_lock
-                    (RLock) is held for the whole add and around every acquire_token_interactive
-                    (one sign-in at a time); sign_in_in_progress() = an Event set only around
-                    acquire_token_interactive (cleared on failure/timeout too). ensure_account()
-                    = the active entry, else one add_account, re-checked under _login_lock (a
-                    caller waiting there gets the first caller's account).
+                    on_warning(text); `tenant` or the home tenant becomes active (ensure_account
+                    / a credential signing in at a guest tenant with no account: the home
+                    tenant, from home_account_id, is added even when unlisted, and made active).
+                    _login_lock (RLock) is held for the whole add, around every
+                    acquire_token_interactive (one sign-in at a time) and while a user's tokens
+                    are deleted. sign_in_in_progress() = a counter (_sign_in_running(); nested
+                    and parallel ones counted, ended on every exit path) over the whole
+                    add_account / ensure_account (browser, tenant listing, writing the entries)
+                    and every interactive sign-in a credential's get_token starts (run threads
+                    too). ensure_account() = the active entry, else one add_account, re-checked
+                    under _login_lock (a caller waiting there gets the first caller's account).
                     account_snapshot() = (entries, active) from ONE read of accounts.json;
                     accounts() (by user, home first, tenant name), active_account(), writers and
-                    _bound_account() all use it. use_account(key), find_account(text, exact)
+                    _bound_account() all use it. Missing file = no entries; a file that exists
+                    but cannot be read (OSError: retried _READ_ATTEMPTS times over ~0.5 s) or is
+                    damaged (bad JSON/UTF-8, not an object: "delete it and sign in again") →
+                    ApiError, never "no accounts": writers read under _store_lock and write
+                    nothing, add_account fails before the browser opens, a credential's
+                    get_token raises instead of signing in. accounts_changed_since(stamp) →
+                    (changed, stamp) from os.stat only (mtime_ns, size, inode; a missing file
+                    has its own stamp; stat error → (True, None)) for cheap polls.
+                    use_account(key), find_account(text, exact)
                     (number / key / user / tenant name / tenant id / label; part of one unless
                     exact), remove_account(key): active removed → same user's home tenant, that
                     user's other entry, else the first remaining (_next_active); the user's last
                     entry deletes their ACCOUNT / REFRESH / ACCESS / ID token records straight
-                    from the persisted TokenCache (search + remove_*, no MSAL app, so offline);
-                    if that fails: ApiError "Removed X, but could not delete the tokens ..."
-                    after the entry is gone. Files in AUTH_DIR (~/.pbixtractor): accounts.json
+                    from the persisted TokenCache (search + remove_*, no MSAL app, so offline),
+                    under _login_lock and only if the user still has no entry then
+                    (_delete_unlisted_tokens, under _store_lock: a sign-in adding them meanwhile
+                    keeps its fresh tokens); if that fails: ApiError "Removed X, but could not
+                    delete the tokens ..." after the entry is gone.
+                    Files in AUTH_DIR (~/.pbixtractor): accounts.json
                     (entries + active key, no secrets; re-read on every call, so all tabs and
                     the CLI share one active entry) and msal_token_cache.bin (msal_extensions:
                     OS-encrypted when possible, else a 0600 plain file; token_cache_encrypted()).
                     default_credential(tenant): EnvironmentCredential when
                     service_principal_configured() (new one per call); else bound to the entry
                     active when called (tenant = the active user in that tenant); get_token:
-                    silent first, browser (login hint) only when MSAL asks for interaction; no
+                    silent first, browser (login hint) only when MSAL asks for interaction; a
+                    sign-in that comes back as another user → ApiError, that user's tokens
+                    deleted first unless they have an entry; no
                     active entry → the first get_token signs in (at `tenant` if given) via
                     _ensure_account, the HOME tenant becomes active, the credential uses that
-                    user in `tenant`. get_credential(tenant) = default_credential, but one
-                    service principal credential per process (re-made when any AZURE_* value
-                    changes). allow_browser_login(False) (embedded) → ApiError naming the
+                    user in `tenant`. get_credential(tenant) = default_credential (looked up
+                    when called: a replaced one is used), but one service principal credential
+                    per process (re-made when any AZURE_* value changes). allow_browser_login(False) (embedded) → ApiError naming the
                     service principal variables. One login serves Fabric, DevOps and Power BI.
                     RestClient(api, scope, credential | pat) .request(method, url, body, raw):
                     _resolve_credential() = the given credential, else get_credential() looked
@@ -685,6 +703,8 @@ pages (several reports per run); the model read from inside a .pbix (no .bim nee
 models fetched from Fabric for live-connected .pbix and DevOps byConnection reports; RLS
 indicators (web UI, lineage viewer, catalog); drop-zone-first upload UI; lineage list click =
 mark, double-click = open.
+Account switching (2026-10-27): built - `pbixtractor account` and the web UI account control;
+automated tests only, real-tenant checks pending.
 
 Versioning (owner, 2026-10-06): `ft_v2` becomes **2.0.0** when it is merged into `main`. No git
 tag exists yet (none on origin either), so the data-platform pin below cannot install until one
@@ -730,11 +750,14 @@ Open, by owner priority:
 - Not planned: XMLA sizes for service models (reports may live in Pro workspaces).
 
 Tests: tests/conftest.py blocks real sign-in (get_credential / default_credential raise,
-AZURE_DEVOPS_PAT and the AZURE_CLIENT_* service principal variables removed, azure_auth.AUTH_DIR
-in a temp folder, no OS keyring, azure_auth._new_app and MSAL's acquire_token_interactive
-raise), allows only local sockets, and points NiceGUI storage at a temp folder - pass fake
-clients/credentials (tests/test_azure_auth.py: a fake MSAL app). Web UI tests poll
-(`_wait_for`) instead of fixed sleeps.
+AZURE_DEVOPS_PAT and the service principal variables AZURE_TENANT_ID, AZURE_CLIENT_ID,
+AZURE_CLIENT_SECRET and AZURE_CLIENT_CERTIFICATE_PATH removed, the browser sign-in allowed again
+for every test (azure_auth._browser_login_allowed reset), azure_auth.AUTH_DIR in a temp folder,
+no OS keyring, azure_auth._new_app and MSAL's acquire_token_interactive raise), allows only local
+sockets, and points NiceGUI storage at a temp folder - pass fake clients/credentials
+(tests/test_azure_auth.py: a fake MSAL app; an autouse fixture there restores the real
+default_credential, which get_credential goes through, and drops a kept service principal
+credential). Web UI tests poll (`_wait_for`) instead of fixed sleeps.
 
 Regression runs (`tools/regress.py`, `Input/regression.json`) use live reports: local only
 (Input/ and output/ are gitignored) - they are not part of PBIxtractor and never go into the repo

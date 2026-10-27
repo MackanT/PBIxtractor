@@ -6,6 +6,7 @@ import os
 import stat
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +40,8 @@ class FakeCloud:
         self.silent_errors = {}  # tenant -> MSAL error result for silent calls
         self.scope_errors = {}  # scope -> MSAL error result for silent calls (e.g. blocked ARM)
         self.listing_fails = False
+        self.on_listing = None  # called while the tenants are listed (to act meanwhile)
+        self.sign_in_as = None  # the user the browser signs in as, whatever the login hint
         self.authorities = []
 
     def add_user(self, name, home, *guest_of):
@@ -64,6 +67,8 @@ class FakeCloud:
 
     def list_tenants(self, access_token):
         assert access_token.endswith(f"|{ARM_SCOPE}"), "the listing needs a management token"
+        if self.on_listing is not None:
+            self.on_listing()
         if self.listing_fails:
             raise ApiError("HTTP 403: AuthorizationFailed [https://management.azure.com/tenants]")
         username = access_token.split("|")[0]
@@ -108,7 +113,9 @@ class FakeApp:
             if isinstance(result, Exception):
                 raise result
             return result
-        if login_hint:
+        if cloud.sign_in_as:  # another account picked in the browser
+            key = cloud.sign_in_as
+        elif login_hint:
             key = next(k for k, u in cloud.users.items() if u["username"] == login_hint)
         else:
             key = cloud.picker
@@ -140,6 +147,14 @@ class FakeApp:
 
     def remove_account(self, account):
         raise AssertionError("tokens are deleted from the token cache, not through an MSAL app")
+
+
+@pytest.fixture(autouse=True)
+def real_default_credential_restored(monkeypatch, no_real_sign_in):
+    """get_credential() goes through azure_auth.default_credential, which conftest replaces:
+    these tests use the real one, and no service principal credential kept by another test."""
+    monkeypatch.setattr(azure_auth, "default_credential", real_default_credential)
+    monkeypatch.setattr(azure_auth, "_service_principal", None)
 
 
 @pytest.fixture
@@ -180,6 +195,52 @@ def _token_records(home_account_id) -> list[int]:
     kinds = cache.CredentialType
     return [len(list(cache.search(kind, query={"home_account_id": home_account_id})))
             for kind in (kinds.ACCOUNT, kinds.REFRESH_TOKEN, kinds.ACCESS_TOKEN, kinds.ID_TOKEN)]
+
+
+class HeldAccountList:
+    """accounts.json held by another process (replacing it, a virus scanner): reading it
+    raises PermissionError for the next `hold(times)` reads (default: until released)."""
+
+    def __init__(self, monkeypatch):
+        real_read = Path.read_bytes
+        self.reads = 0  # attempts to read accounts.json
+        self._refuse = 0.0
+
+        def read_bytes(path):
+            if path.name == azure_auth.ACCOUNTS_FILE:
+                self.reads += 1
+                if self._refuse > 0:
+                    self._refuse -= 1
+                    raise PermissionError(13, "Permission denied", str(path))
+            return real_read(path)
+
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+        monkeypatch.setattr(azure_auth, "_READ_RETRY_SECONDS", 0.001)
+
+    def hold(self, times: float = float("inf")) -> None:
+        self.reads, self._refuse = 0, times
+
+    def release(self) -> None:
+        self._refuse = 0
+
+
+HELD = r"^Cannot read the account list .*accounts\.json: \[Errno 13\] Permission denied"
+MFA = {"error": "interaction_required", "error_description": "MFA"}
+
+
+def _threaded(target, *args) -> tuple[threading.Thread, list]:
+    """A started thread running target(*args); the list gets what it raised."""
+    errors: list = []
+
+    def run():
+        try:
+            target(*args)
+        except Exception as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, errors
 
 
 def _eventually(condition, seconds=5.0) -> bool:
@@ -239,6 +300,28 @@ def test_get_credential_keeps_one_service_principal_default_credential_does_not(
     monkeypatch.setenv("AZURE_CLIENT_SECRET", "rotated")  # other values: another credential
     rotated = real_get_credential()
     assert rotated is not shared and real_get_credential() is rotated
+
+
+def test_get_credential_goes_through_default_credential(monkeypatch):
+    made = []
+
+    def replaced(tenant_id=None):
+        made.append(tenant_id)
+        return object()
+
+    monkeypatch.setattr(azure_auth, "default_credential", replaced)
+    first = real_get_credential(FABRIKAM)
+    assert made == [FABRIKAM]  # a replaced default_credential is what get_credential returns
+    assert real_get_credential() is not first  # accounts: one per call (bound when made)
+
+    for name, value in (("AZURE_CLIENT_ID", "x"), ("AZURE_CLIENT_SECRET", "y"),
+                        ("AZURE_TENANT_ID", CONTOSO)):
+        monkeypatch.setenv(name, value)
+    shared = real_get_credential()
+    assert real_get_credential() is shared and real_get_credential(FABRIKAM) is shared
+    assert made == [FABRIKAM, None, None]  # a service principal's: made once per process
+    monkeypatch.setenv("AZURE_CLIENT_SECRET", "rotated")
+    assert real_get_credential() is not shared and len(made) == 4
 
 
 def test_adding_an_account_lists_every_tenant_and_makes_home_active(cloud, marcus):
@@ -376,34 +459,82 @@ def test_sign_in_errors(cloud, marcus):
     assert azure_auth.accounts() == []
 
 
-def test_a_sign_in_is_in_progress_only_while_the_browser_is_open(cloud, marcus):
+def test_a_sign_in_is_in_progress_for_the_whole_add_and_every_interactive_token(
+    monkeypatch, cloud, marcus
+):
     from msal import BrowserInteractionTimeoutError
 
-    assert azure_auth.sign_in_in_progress() is False
-    azure_auth.add_account()
-    assert cloud.during == [True] and azure_auth.sign_in_in_progress() is False
+    seen = []
+    cloud.on_listing = lambda: seen.append(("listing", azure_auth.sign_in_in_progress()))
+    real_write = azure_auth._write_store
 
+    def write(entries, active):
+        seen.append(("writing", azure_auth.sign_in_in_progress()))
+        real_write(entries, active)
+
+    monkeypatch.setattr(azure_auth, "_write_store", write)
+    assert azure_auth.sign_in_in_progress() is False
+    azure_auth.add_account()  # the browser, listing the tenants, writing the entries
+    assert cloud.during == [True] and seen == [("listing", True), ("writing", True)]
+    assert azure_auth.sign_in_in_progress() is False
+
+    # Every way out ends it: the browser times out or fails, the listing fails, writing fails
     cloud.interactive_result = BrowserInteractionTimeoutError("User did not complete the flow")
     with pytest.raises(ApiError, match="not completed within"):
         azure_auth.add_account()
     cloud.interactive_result = RuntimeError("no browser could be started")
     with pytest.raises(ApiError, match="Sign-in failed: no browser could be started"):
         azure_auth.add_account()
-    assert cloud.during == [True, True, True] and azure_auth.sign_in_in_progress() is False
-
-    # A token that needs interaction (e.g. a tenant's own MFA) is a sign-in too
+    assert azure_auth.sign_in_in_progress() is False
     cloud.interactive_result = None
-    cloud.silent_errors[CONTOSO] = {"error": "interaction_required", "error_description": "MFA"}
-    real_get_credential().get_token(FABRIC_SCOPE)
-    assert cloud.during == [True] * 4 and azure_auth.sign_in_in_progress() is False
+    cloud.listing_fails = True
+    azure_auth.add_account()
+    assert azure_auth.sign_in_in_progress() is False
+    cloud.listing_fails = False
 
-    # Seen from every thread (another tab) while the browser is open
+    def disk_full(entries, active):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(azure_auth, "_write_store", disk_full)
+    with pytest.raises(OSError, match="No space left"):
+        azure_auth.add_account()
+    assert azure_auth.sign_in_in_progress() is False
+    monkeypatch.setattr(azure_auth, "_write_store", write)
+
+    # ensure_account (nested: ensure -> add -> browser): until its entries are written
+    for account in azure_auth.accounts():
+        azure_auth.remove_account(account.key)
+    seen.clear()
+    azure_auth.ensure_account()
+    assert seen == [("listing", True), ("writing", True)]
+    assert azure_auth.sign_in_in_progress() is False
+
+    # A token that needs interaction (e.g. a tenant's own MFA), from a run's thread
+    cloud.silent_errors[CONTOSO] = dict(MFA)
     cloud.interactive_delay = 0.3
-    thread = threading.Thread(target=azure_auth.add_account)
-    thread.start()
+    during = len(cloud.during)
+    thread, errors = _threaded(lambda: real_get_credential().get_token(FABRIC_SCOPE))
     assert _eventually(azure_auth.sign_in_in_progress)
     thread.join(10)
+    assert errors == [] and cloud.during[during:] == [True]
     assert azure_auth.sign_in_in_progress() is False
+
+    # Two at once (a run's token, an "Add account" in another tab): until the last one ends
+    cloud.silent_errors[CONTOSO] = dict(MFA)
+    after_token = []
+
+    def token():
+        real_get_credential().get_token(FABRIC_SCOPE)
+        after_token.append(azure_auth.sign_in_in_progress())
+
+    during = len(cloud.during)
+    first, first_errors = _threaded(token)
+    assert _eventually(lambda: len(cloud.during) > during)  # its browser is open
+    second, second_errors = _threaded(azure_auth.add_account)  # waits for that one
+    first.join(10)
+    assert first_errors == [] and after_token == [True]  # the second one is still going
+    second.join(10)
+    assert second_errors == [] and azure_auth.sign_in_in_progress() is False
 
 
 def test_finding_and_using_an_entry(cloud, marcus):
@@ -510,6 +641,38 @@ def test_tokens_that_cannot_be_deleted_are_reported(monkeypatch, cloud, marcus):
     assert azure_auth.accounts() == [] and azure_auth.active_account() is None  # entry gone
 
 
+def test_removing_a_users_last_entry_during_their_sign_in_keeps_its_tokens(cloud, marcus):
+    azure_auth.add_account()
+    *others, last = azure_auth.accounts()
+    for account in others:
+        azure_auth.remove_account(account.key)
+    listing, finish = threading.Event(), threading.Event()
+
+    def slow_listing():  # signed in again: the fresh tokens are cached, the tenants not listed
+        listing.set()
+        assert finish.wait(10)
+
+    cloud.on_listing = slow_listing
+    adding, adding_errors = _threaded(azure_auth.add_account)
+    assert listing.wait(10)
+    removing, removing_errors = _threaded(azure_auth.remove_account, last.key)
+    try:
+        assert _eventually(lambda: azure_auth.accounts() == [])  # the entry goes at once,
+        assert removing.is_alive()  # its tokens wait for the sign-in to end
+    finally:
+        finish.set()
+    adding.join(10)
+    removing.join(10)
+    assert adding_errors == [] and removing_errors == []
+    assert len(azure_auth.accounts()) == 3  # the sign-in added him again
+    assert all(_token_records(marcus))  # with its fresh tokens
+
+    cloud.on_listing = None  # no sign-in going on: his last entry deletes them at once
+    for account in azure_auth.accounts():
+        azure_auth.remove_account(account.key)
+    assert _token_records(marcus) == [0, 0, 0, 0]
+
+
 def test_the_old_auth_record_is_left_alone(cloud, marcus):
     record = azure_auth.AUTH_DIR / "auth_record.json"
     record.write_text('{"username": "old"}', encoding="utf-8")
@@ -517,6 +680,122 @@ def test_the_old_auth_record_is_left_alone(cloud, marcus):
     azure_auth.remove_account(azure_auth.accounts()[0].key)
     assert record.read_text(encoding="utf-8") == '{"username": "old"}'
     assert not hasattr(azure_auth, "AUTH_RECORD")
+
+
+def test_a_missing_account_list_is_no_accounts(cloud):
+    assert not (azure_auth.AUTH_DIR / azure_auth.ACCOUNTS_FILE).exists()
+    assert azure_auth.account_snapshot() == ([], None)
+    assert azure_auth.accounts() == [] and azure_auth.active_account() is None
+
+
+def test_an_account_list_that_cannot_be_read_is_an_error_never_no_accounts(
+    monkeypatch, cloud, marcus
+):
+    azure_auth.add_account()
+    entries, active = azure_auth.account_snapshot()
+    path = azure_auth.AUTH_DIR / azure_auth.ACCOUNTS_FILE
+    with open(path, "rb") as file:
+        before = file.read()
+    held = HeldAccountList(monkeypatch)
+
+    held.hold(2)  # held for a moment: retried
+    assert azure_auth.account_snapshot() == (entries, active) and held.reads == 3
+
+    held.hold()  # still held after the retries: an error
+    for call in (azure_auth.account_snapshot, azure_auth.accounts, azure_auth.active_account,
+                 lambda: azure_auth.find_account("1")):
+        held.hold()
+        with pytest.raises(ApiError, match=HELD):
+            call()
+        assert held.reads == azure_auth._READ_ATTEMPTS
+
+    # Nothing is written then (an empty list would wipe the entries), no browser opens
+    def no_write(entries, active):
+        raise AssertionError("accounts.json must not be written")
+
+    monkeypatch.setattr(azure_auth, "_write_store", no_write)
+    for call in (lambda: azure_auth.use_account(entries[1].key),
+                 lambda: azure_auth.remove_account(entries[0].key),
+                 azure_auth.add_account, azure_auth.ensure_account):
+        with pytest.raises(ApiError, match=HELD):
+            call()
+    assert len(cloud.interactive) == 1  # only the first add
+    assert all(_token_records(marcus))
+
+    # A credential raises instead of signing in, also one made while the list was held
+    credential = real_get_credential()
+    with pytest.raises(ApiError, match=HELD):
+        credential.get_token(FABRIC_SCOPE)
+    assert len(cloud.interactive) == 1 and azure_auth.sign_in_in_progress() is False
+    held.release()
+    assert _tenant_of(credential.get_token(FABRIC_SCOPE)) == CONTOSO  # readable again: works
+    with open(path, "rb") as file:
+        assert file.read() == before
+
+    # Held from the moment the sign-in lists the tenants: the entries are not written either
+    cloud.on_listing = held.hold
+    with pytest.raises(ApiError, match=HELD):
+        azure_auth.add_account(FABRIKAM)
+    assert len(cloud.interactive) == 2 and azure_auth.sign_in_in_progress() is False
+    held.release()
+    assert azure_auth.account_snapshot() == (entries, active)
+
+
+def test_a_damaged_account_list_is_an_error_that_says_what_to_do(cloud, marcus):
+    path = azure_auth.AUTH_DIR / azure_auth.ACCOUNTS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    damaged = (r"^The account list .*accounts\.json is damaged \(.+\) - delete it and sign "
+               r"in again$")
+    for content in (b'{"active": "x", "accounts": [', b"[]", b"\xff\xfe{\x00"):
+        path.write_bytes(content)
+        for call in (azure_auth.accounts, azure_auth.active_account, azure_auth.add_account,
+                     lambda: real_get_credential().get_token(FABRIC_SCOPE),
+                     lambda: azure_auth.use_account("x")):
+            with pytest.raises(ApiError, match=damaged):
+                call()
+        assert path.read_bytes() == content  # never replaced by an empty list
+    assert cloud.interactive == []
+
+    path.unlink()  # the way out: delete it and sign in again
+    azure_auth.add_account()
+    assert len(azure_auth.accounts()) == 3
+
+
+def test_a_poll_sees_a_changed_account_list_without_reading_it(monkeypatch, cloud, marcus):
+    changed, missing = azure_auth.accounts_changed_since(None)
+    assert changed is True  # never read
+    assert azure_auth.accounts_changed_since(missing) == (False, missing)  # still missing
+    azure_auth.add_account()
+    changed, stamp = azure_auth.accounts_changed_since(missing)
+    assert changed is True and stamp != missing
+
+    def not_read(*args):
+        raise AssertionError("the account list must not be read")
+
+    real_read_store, real_read_bytes = azure_auth._read_store, Path.read_bytes
+    monkeypatch.setattr(azure_auth, "_read_store", not_read)
+    monkeypatch.setattr(Path, "read_bytes", not_read)
+    assert azure_auth.accounts_changed_since(stamp) == (False, stamp)
+    monkeypatch.setattr(azure_auth, "_read_store", real_read_store)
+    monkeypatch.setattr(Path, "read_bytes", real_read_bytes)
+
+    azure_auth.use_account(_by_tenant(FABRIKAM).key)  # same size: a new file all the same
+    changed, newer = azure_auth.accounts_changed_since(stamp)
+    assert changed is True and newer not in (stamp, missing)
+    assert azure_auth.accounts_changed_since(newer) == (False, newer)
+
+    (azure_auth.AUTH_DIR / azure_auth.ACCOUNTS_FILE).unlink()
+    assert azure_auth.accounts_changed_since(newer) == (True, missing)
+
+    real_stat = Path.stat
+
+    def refused(path, *args, **kwargs):
+        if path.name == azure_auth.ACCOUNTS_FILE:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", refused)  # cannot even look: read it (that tells why)
+    assert azure_auth.accounts_changed_since(missing) == (True, None)
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +862,29 @@ def test_the_first_token_with_a_tenant_signs_in_there_and_makes_home_active(clou
         assert len(cloud.interactive) == 1
 
     azure_auth.add_account(FABRIKAM)  # asked for explicitly: that tenant becomes active
+    assert azure_auth.active_account().tenant_id == FABRIKAM
+
+
+def test_a_guest_tenant_without_a_tenant_listing_still_makes_home_active(cloud, marcus, caplog):
+    cloud.listing_fails = True
+    home = Account("marcus@contoso.com", marcus, CONTOSO, "", home=True)
+    for make in (real_get_credential, real_default_credential):
+        for account in azure_auth.accounts():
+            azure_auth.remove_account(account.key)
+        cloud.interactive.clear()
+
+        assert _tenant_of(make(FABRIKAM).get_token(FABRIC_SCOPE)) == FABRIKAM  # this one: there
+        assert [i["tenant"] for i in cloud.interactive] == [FABRIKAM]
+        assert azure_auth.accounts() == [home, Account("marcus@contoso.com", marcus, FABRIKAM)]
+        assert azure_auth.active_account() == home  # the app: the home tenant, name unknown
+        assert _tenant_of(make().get_token(FABRIC_SCOPE)) == CONTOSO
+        assert len(cloud.interactive) == 1
+    assert ("only the tenant signed in to and the home tenant were added or updated"
+            in caplog.text)
+
+    for account in azure_auth.accounts():  # asked for explicitly: that tenant, active
+        azure_auth.remove_account(account.key)
+    azure_auth.add_account(FABRIKAM)
     assert azure_auth.active_account().tenant_id == FABRIKAM
 
 
@@ -686,15 +988,26 @@ def test_interaction_only_when_msal_asks_for_it(cloud, marcus):
     assert cloud.interactive[-1]["login_hint"] == "marcus@contoso.com"
 
 
-def test_signing_in_as_someone_else_is_refused(cloud, marcus):
+def test_signing_in_as_someone_else_is_refused_and_leaves_no_tokens(cloud, marcus):
     azure_auth.add_account()
     anna = cloud.add_user("anna", NORTHWIND)
-    cloud.signed_in.clear()
-    cloud.signed_in.add(anna)
-    cloud.interactive_result = cloud.token(anna, NORTHWIND, [FABRIC_SCOPE])
+    cloud.silent_errors[CONTOSO] = dict(MFA)
+    cloud.sign_in_as = anna  # another account picked in the browser: MSAL caches her tokens
     with pytest.raises(ApiError, match="signed in as anna@northwind.com, but the account in use "
                                        "is marcus@contoso.com"):
         real_get_credential().get_token(FABRIC_SCOPE)
+    assert _token_records(anna) == [0, 0, 0, 0]  # she has no entry: her tokens are deleted
+    assert all(_token_records(marcus)) and azure_auth.sign_in_in_progress() is False
+
+    # Someone with an entry keeps their tokens
+    cloud.sign_in_as, cloud.picker = None, anna
+    azure_auth.add_account()
+    azure_auth.use_account(_entry(marcus, CONTOSO).key)
+    cloud.silent_errors[CONTOSO] = dict(MFA)
+    cloud.sign_in_as = anna
+    with pytest.raises(ApiError, match="signed in as anna@northwind.com"):
+        real_get_credential().get_token(FABRIC_SCOPE)
+    assert all(_token_records(anna)) and all(_token_records(marcus))
 
 
 def test_embedded_never_opens_a_browser(monkeypatch, cloud, marcus):
