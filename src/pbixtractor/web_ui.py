@@ -1278,13 +1278,20 @@ def build_page(
 
     async def start_run() -> None:
         """One download + documentation run at a time across all tabs: a second tab's download
-        replaces the same _fabric/_devops folder, and extractions share the logger."""
+        replaces the same _fabric/_devops folder, and extractions share the logger. None while
+        a browser sign-in is going on in any tab: it may change the account mid-run."""
+        if web_sources.sign_in_pending():
+            ui.notify(web_sources.FINISH_SIGN_IN, type="warning")
+            return
         if _JOB_LOCK.locked():
             run_button.disable()
             step_label.text = "Waiting for a run in another tab to finish…"
         try:
             async with _JOB_LOCK:
                 step_label.text = ""
+                if web_sources.sign_in_pending():  # began while this tab waited for the lock
+                    ui.notify(web_sources.FINISH_SIGN_IN, type="warning")
+                    return
                 await _start_run()
         finally:
             run_button.enable()

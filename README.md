@@ -73,15 +73,19 @@ page shows the lineage viewer inline, the Best Practice Analyzer findings, unuse
 bookmarks, row-level security roles (flagged, so protected reports are shared with care) and
 download links for all output files. Everything runs locally.
 
-Fabric and Azure DevOps use one sign-in account, shown at the top of both panels ("Signed in
-as <user> · <tenant>"). Choose another one from the list (one entry per tenant of each user
-you signed in with), add one with "Add account" (Microsoft's sign-in page with its account
-picker, in your browser) or remove one; without an account, "Sign in / load" opens the
-sign-in page first. Switching reloads the workspaces / projects with the new account; every
-tab follows a switch (also one made with `pbixtractor account use`), and the account cannot
-be changed while a download or documentation run is in progress. A service principal in the
-environment replaces the accounts, and a personal access token in `AZURE_DEVOPS_PAT` replaces
-the account for Azure DevOps; the panels say which is used.
+Fabric and Azure DevOps use one sign-in account, shown at the top of both panels ("Signed in as
+<user> · <tenant>"). Choose another one from the list (one entry per tenant of each user you
+signed in with), or remove any entry with the icon next to it in the list. "Add account" opens
+Microsoft's sign-in page with its account picker in your browser; type a tenant (id or domain)
+next to it to sign in there and make it active - for a tenant that is not listed, for example
+when the tenants could not be listed (a warning says so). Without an account, "Sign in / load"
+opens the sign-in page first (once, even when several tabs ask at once). Switching reloads the
+workspaces / projects with the new account; every tab follows a switch (also one made with
+`pbixtractor account use`). The account cannot be changed while a download or documentation run
+is in progress, and while a sign-in is waiting in your browser every tab says so and no run
+starts. A service principal in the environment replaces the accounts, and a personal access
+token in `AZURE_DEVOPS_PAT` replaces the account for Azure DevOps; the panels say which is
+used.
 
 ### Command line
 

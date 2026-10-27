@@ -13,9 +13,11 @@ batch.run_batch).
 
 Stand-alone, both panels start with the same account control (AccountState + AccountControl):
 which account signs in, switching between the remembered entries, adding one through the
-browser sign-in, removing one. A switch - here, in another tab or with `pbixtractor account` -
-makes both panels drop their clients and reload what they had loaded with the new account.
-Embedded there is no control (a service principal from the environment signs in).
+browser sign-in (optionally at a typed tenant), removing any one (each entry has its own
+remove icon). A switch - here, in another tab or with `pbixtractor account` - makes both
+panels drop their clients and reload what they had loaded with the new account. While a
+sign-in is going on in any tab (sign_in_pending()), every tab shows it and no switch or run
+starts. Embedded there is no control (a service principal from the environment signs in).
 
 API calls block (and the first one may open a browser sign-in), so they run in threads.
 """
@@ -271,13 +273,42 @@ class PlanPicker:
 # The sign-in account (stand-alone only: embedded, a service principal signs in)
 # ============================================================================
 
-BUSY_POLL_SECONDS = 0.5  # how soon the controls notice a run starting or ending
+BUSY_POLL_SECONDS = 0.5  # how soon the controls notice a run or a sign-in starting or ending
 ACCOUNT_POLL_SECONDS = 3.0  # how soon a tab follows a switch made elsewhere (tab, command line)
 WAIT_FOR_RUN = "Wait for the run to finish"
 WAITING_FOR_SIGN_IN = "Waiting for sign-in in your browser…"
+FINISH_SIGN_IN = "Finish the sign-in in your browser first"
 UNENCRYPTED = "Tokens stored unencrypted, readable only by your user"
 SERVICE_PRINCIPAL = "Using the service principal from the environment"
 DEVOPS_PAT = "Using the personal access token from AZURE_DEVOPS_PAT"
+REMOVE_ENTRY = "Remove this account from the list"
+LIST_CHANGED = "The account list changed meanwhile - try again."
+
+_tabs_signing_in = 0  # tabs of this process adding an account (the sign-in + listing its tenants)
+
+# Each entry of the account select has its own remove icon (Quasar's option slot). The click
+# must not choose the entry (.stop), and reaches Python as the select's "remove_entry" event
+# with the option's index and label (the browser knows the options by index).
+_OPTION_SLOT = """
+<q-item v-bind="props.itemProps">
+  <q-item-section><q-item-label>{{ props.opt.label }}</q-item-label></q-item-section>
+  <q-item-section side>
+    <q-btn flat round dense size="sm" icon="person_remove" aria-label="%(tip)s"
+      @click.stop.prevent="$root.$refs['r%(id)s'].$emit('remove_entry', {index: props.opt.value, label: props.opt.label})">
+      <q-tooltip>%(tip)s</q-tooltip>
+    </q-btn>
+  </q-item-section>
+</q-item>
+"""
+
+
+def sign_in_pending() -> bool:
+    """
+    A sign-in is going on in this process: a browser sign-in is open (in any tab, or for a run
+    whose token needs one), or a tab is still adding the account it signed in (listing its
+    tenants). Every tab shows it; no switch and no documentation run may start meanwhile.
+    """
+    return _tabs_signing_in > 0 or azure_auth.sign_in_in_progress()
 
 
 class AccountState:
@@ -285,7 +316,8 @@ class AccountState:
     The active sign-in account as one tab shows it, shared by the account controls of the
     Fabric and the DevOps panel (one account for both, for the whole app). A switch - made
     here, in another tab or with `pbixtractor account` - tells every panel that listens, which
-    drops its client and reloads with the new account.
+    drops its client and reloads with the new account. With a service principal in the
+    environment the accounts are not used: nothing is followed then.
 
         accounts = AccountState(busy=run_lock.locked)  # no switching while busy() is True
         FabricPanel(on_choose, accounts)               # shows a control, follows switches
@@ -301,9 +333,9 @@ class AccountState:
         self._controls: list["AccountControl"] = []
         self._listeners: list[Callable[[], None]] = []
         self.service_principal = azure_auth.service_principal_configured()
-        self.entries, self.active = self._read()
+        self.entries, self.active = ([], None) if self.service_principal else self._read()
         self.encrypted: Optional[bool] = None  # asked once there are tokens to keep
-        self.signing_in = False
+        self.signing_in = sign_in_pending()  # as last shown (a sign-in anywhere in the process)
         self.blocked = bool(busy())
         self._read_at = time.monotonic()
         ui.timer(BUSY_POLL_SECONDS, self._poll)
@@ -312,8 +344,8 @@ class AccountState:
 
     @staticmethod
     def _read() -> tuple[list, Optional[str]]:
-        active = azure_auth.active_account()
-        return azure_auth.accounts(), active.key if active else None
+        entries, active = azure_auth.account_snapshot()  # one read: never two file versions
+        return entries, active.key if active else None
 
     @property
     def account(self) -> Optional[azure_auth.Account]:
@@ -335,6 +367,8 @@ class AccountState:
     def _sync(self) -> bool:
         """Re-read the account list; show a change and, after a switch, tell the panels.
         Returns whether anything changed."""
+        if self.service_principal:  # it signs in, whatever accounts.json says
+            return False
         self._read_at = time.monotonic()
         entries, active = self._read()
         if entries == self.entries and active == self.active:
@@ -350,13 +384,14 @@ class AccountState:
         return True
 
     def _poll(self) -> None:
-        blocked = bool(self._busy())
-        if blocked != self.blocked:
-            self.blocked = blocked
+        blocked, signing_in = bool(self._busy()), sign_in_pending()
+        ended = self.signing_in and not signing_in  # a sign-in (maybe another tab's) is over
+        if (blocked, signing_in) != (self.blocked, self.signing_in):
+            self.blocked, self.signing_in = blocked, signing_in
             self._show()
         # A switch made elsewhere waits for a run here to end: its lists are the old account's
-        if not blocked and not self.signing_in and (
-            time.monotonic() - self._read_at >= ACCOUNT_POLL_SECONDS
+        if not blocked and not signing_in and (
+            ended or time.monotonic() - self._read_at >= ACCOUNT_POLL_SECONDS
         ):
             self._sync()
 
@@ -376,17 +411,40 @@ class AccountState:
         refused = ""
         if self._busy():
             refused = f"{WAIT_FOR_RUN}."
-        elif self.signing_in:
+        elif sign_in_pending():
             refused = WAITING_FOR_SIGN_IN
         if refused:
             ui.notify(refused, type="warning")
             self._show()
         return bool(refused)
 
+    async def _sign_in(self, function: Callable, *args, **kwargs) -> bool:
+        """Run a blocking azure_auth sign-in in a thread; every tab shows it meanwhile.
+        Returns False when it failed, was cancelled or timed out (the error is shown)."""
+        global _tabs_signing_in
+        _tabs_signing_in += 1
+        self.signing_in = True
+        self._show()
+        try:
+            return await run.io_bound(function, *args, **kwargs) is not None
+        except (ApiError, ValueError, OSError) as error:
+            ui.notify(str(error), type="negative", multi_line=True, timeout=15000)
+            return False
+        except Exception as error:  # UI boundary: never let a click end without any message
+            logger.exception(f"Sign-in failed unexpectedly: {error}")
+            ui.notify(f"Sign-in failed: {error}", type="negative", multi_line=True, timeout=15000)
+            return False
+        finally:
+            _tabs_signing_in -= 1
+            self.signing_in = sign_in_pending()
+            if not self._sync():
+                self._show()
+
     async def ensure_signed_in(self) -> bool:
         """
-        Before a panel's first call: with no active account (and no service principal) sign
-        in first; the user's home tenant becomes active.
+        Before a panel's first call: with no active account (and no service principal) one
+        browser sign-in whose home tenant becomes active. Tabs asking at once share it
+        (azure_auth.ensure_account: one sign-in, the others wait and use its account).
 
         Returns:
             False when the sign-in failed or was cancelled (the error is shown)
@@ -396,34 +454,32 @@ class AccountState:
         self._sync()
         if self.active is not None:
             return True
-        return await self.add()
+        if self._busy():  # signing in makes an account active: not during a run
+            ui.notify(f"{WAIT_FOR_RUN}.", type="warning")
+            return False
+        return await self._sign_in(azure_auth.ensure_account)
 
-    async def add(self) -> bool:
+    async def add(self, tenant: Optional[str] = None) -> bool:
         """
         Sign in through Microsoft's sign-in page (with its account picker), in a thread: the
-        user's tenants become entries, the home tenant the active one.
+        user's tenants become entries, the home tenant (or `tenant`) the active one. When the
+        tenants cannot be listed, a warning says so (only the tenant signed in to was added).
+
+        Args:
+            tenant: Tenant id or domain to sign in to and make active (default: the home tenant)
 
         Returns:
             False when the sign-in failed, was cancelled or timed out (the error is shown)
         """
         if self._refuse():
             return False
-        self.signing_in = True
-        self._show()
-        try:
-            await run.io_bound(azure_auth.add_account)
-            return True
-        except (ApiError, ValueError, OSError) as error:
-            ui.notify(str(error), type="negative", multi_line=True, timeout=15000)
-            return False
-        except Exception as error:  # UI boundary: never let a click end without any message
-            logger.exception(f"Sign-in failed unexpectedly: {error}")
-            ui.notify(f"Sign-in failed: {error}", type="negative", multi_line=True, timeout=15000)
-            return False
-        finally:
-            self.signing_in = False
-            if not self._sync():
-                self._show()
+        warnings: list[str] = []  # on_warning runs in the sign-in thread: shown here afterwards
+        added = await self._sign_in(
+            azure_auth.add_account, (tenant or "").strip() or None, on_warning=warnings.append
+        )
+        for text in warnings:
+            ui.notify(text, type="warning", multi_line=True, timeout=30000)
+        return added
 
     def choose(self, key: Optional[str]) -> None:
         """Make another entry the active one (a select's choice)."""
@@ -437,16 +493,19 @@ class AccountState:
             self._show()
 
     async def remove(self, key: Optional[str]) -> None:
-        """Forget an entry; when it was the active one, the first remaining one is active."""
+        """Forget an entry (any one: it is not chosen first). When it was the active one, the
+        next one is active and the panels reload as after a switch; else they keep their lists."""
         if not key or self._refuse():
             return
         removed = next((a.label for a in self.entries if a.key == key), key)
         try:
-            # The user's last entry also deletes their tokens (may ask the sign-in service)
+            # The user's last entry also deletes their tokens from the token cache
             await run.io_bound(azure_auth.remove_account, key)
             ui.notify(f"Removed {removed}")
         except ValueError as error:  # removed meanwhile
             ui.notify(str(error), type="warning")
+        except ApiError as error:  # the entry is gone, but its tokens could not be deleted
+            ui.notify(str(error), type="warning", multi_line=True, timeout=30000)
         except Exception as error:  # UI boundary
             logger.exception(f"Removing {removed} failed: {error}")
             ui.notify(f"Removing {removed} failed: {error}", type="negative", multi_line=True)
@@ -485,23 +544,48 @@ class AccountControl:
                     .tooltip("One account for Fabric and Azure DevOps, in every tab")
                     .mark(f"{marker}_account")
                 )
+                self.select.add_slot("option", _OPTION_SLOT % {"id": self.select.id, "tip": REMOVE_ENTRY})
+                self.select.on("remove_entry", self._remove_entry)
+                self.tenant = (
+                    ui.input("Tenant (id or domain)", placeholder="optional")
+                    .props("dense clearable")
+                    .classes("w-48")
+                    .tooltip(
+                        "Add account signs in at this tenant and makes it active (default: the "
+                        "user's home tenant) - for a tenant that is not listed"
+                    )
+                    .mark(f"{marker}_account_tenant")
+                )
                 self.add_button = (
-                    ui.button("Add account", icon="person_add", on_click=state.add)
+                    ui.button("Add account", icon="person_add", on_click=self._add)
                     .props("flat no-caps")
                     .tooltip("Sign in in your browser: the user's tenants are added")
                     .mark(f"{marker}_account_add")
-                )
-                self.remove_button = (
-                    ui.button(icon="person_remove", on_click=lambda: state.remove(self.select.value))
-                    .props("flat round dense")
-                    .tooltip("Remove this account from the list")
-                    .mark(f"{marker}_account_remove")
                 )
             self.hint = ui.label("").classes("text-sm text-grey-7").mark(f"{marker}_account_hint")
             self.note = (
                 ui.label(UNENCRYPTED).classes("text-caption text-grey-7").mark(f"{marker}_account_note")
             )
         state.attach(self)
+
+    async def _add(self) -> None:
+        if await self._state.add(self.tenant.value):
+            self.tenant.value = ""  # a one-off: the next "Add account" asks for the home tenant
+
+    async def _remove_entry(self, event) -> None:
+        """An entry's remove icon: the browser names the option by its index and label."""
+        args = event.args if isinstance(event.args, dict) else {}
+        index, label = args.get("index"), args.get("label")
+        options = list(self.select.options.items())
+        if isinstance(index, int) and 0 <= index < len(options) and options[index][1] == label:
+            key = options[index][0]
+        else:  # the list changed while the menu was open: only an unambiguous label
+            keys = [k for k, text in options if text == label]
+            key = keys[0] if len(keys) == 1 else None
+        if key is None:
+            ui.notify(LIST_CHANGED, type="warning")
+            return
+        await self._state.remove(key)
 
     def show(self) -> None:
         """Show the state: the active entry, the choices, and why they are disabled."""
@@ -515,9 +599,12 @@ class AccountControl:
         self.hint.text = hint
         self.hint.visible = bool(hint)
         locked = state.signing_in or state.blocked
+        # A disabled select cannot open: its entries' remove icons are disabled with it
         self.select.set_enabled(not locked and bool(state.entries))
+        if locked and self.select.is_showing_popup:
+            self.select.run_method("hidePopup")
+        self.tenant.set_enabled(not locked)
         self.add_button.set_enabled(not locked)
-        self.remove_button.set_enabled(not locked and state.active is not None)
         self.note.visible = bool(state.entries) and state.encrypted is False
 
 

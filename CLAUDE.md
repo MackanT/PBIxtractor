@@ -166,7 +166,9 @@ src/pbixtractor/
                     models/<key>/<file> (checked on the resolved path); logs render as escaped
                     text (_log_text), uploads capped at MAX_UPLOAD_BYTES (2 GB).
                     One download + run at a time across tabs (_JOB_LOCK; a second tab shows
-                    "Waiting for a run in another tab"). Account control (stand-alone only):
+                    "Waiting for a run in another tab"); start_run refuses with "Finish the
+                    sign-in in your browser first" while web_sources.sign_in_pending() (checked
+                    before and after taking _JOB_LOCK). Account control (stand-alone only):
                     build_page makes one web_sources.AccountState(busy=_JOB_LOCK.locked) for
                     both panels (embedded: none, no control); register() calls
                     azure_auth.allow_browser_login(False) (only a service principal signs in
@@ -425,17 +427,32 @@ src/pbixtractor/
                     make_devops_client are the test seams. Choices remembered in
                     app.storage.general (.nicegui/, gitignored).
                     Account (stand-alone; panels take accounts=AccountState, embedded None):
-                    AccountState = one tab's view of the active azure_auth entry, shared by an
-                    AccountControl at the top of each panel (above "Sign in / load"): "Signed in
-                    as <label>" / "Not signed in", searchable select of accounts() (choosing =
-                    use_account), "Add account" (add_account in run.io_bound, "Waiting for
-                    sign-in in your browser…", ApiError → negative notify), remove (the selected
-                    = active entry; remove_account); the unencrypted-tokens note when entries
-                    exist and token_cache_encrypted() is False (asked once, in a thread). A
-                    service principal → "Using the service principal from the environment",
-                    no choices; AZURE_DEVOPS_PAT → the DevOps panel says the token is used and
-                    ignores the account. "Sign in / load" with no active entry runs the add
-                    flow first (ensure_signed_in). A change of the active entry (here, another
+                    AccountState = one tab's view of the active azure_auth entry (one
+                    account_snapshot() per re-read), shared by an AccountControl at the top of
+                    each panel (above "Sign in / load"): "Signed in as <label>" / "Not signed
+                    in", searchable select of the entries (choosing = use_account; each option
+                    has its own remove icon: Quasar option slot, the click emits the select's
+                    "remove_entry" event with {index, label} via $root.$refs['r<id>'], checked
+                    against the options; remove_account without choosing it first - the active
+                    one → switch behaviour, another → the lists stay; ApiError (tokens not
+                    deleted, entry gone) → warning notify, not "Removed"), an optional "Tenant
+                    (id or domain)" input + "Add account" (add_account(tenant,
+                    on_warning=...) in run.io_bound; the listing warning, collected in the
+                    thread, → warning notify; the input is cleared after a sign-in; ApiError →
+                    negative notify); the unencrypted-tokens note when entries exist and
+                    token_cache_encrypted() is False (asked once, in a thread). A service
+                    principal → "Using the service principal from the environment", no
+                    choices, and accounts.json is neither read nor followed (no switch
+                    listeners, no clearing); AZURE_DEVOPS_PAT → the DevOps panel says the token
+                    is used and ignores the account. "Sign in / load" with no active entry
+                    calls azure_auth.ensure_account() first (ensure_signed_in; tabs asking at
+                    once share one sign-in). sign_in_pending() = a tab of this process is in an
+                    add/ensure (module counter _tabs_signing_in, also covers listing the
+                    tenants) or azure_auth.sign_in_in_progress() (any browser sign-in, also a
+                    run's): every tab polls it (BUSY_POLL_SECONDS) and then shows "Waiting for
+                    sign-in in your browser…" with the select / tenant / Add disabled
+                    (switch/add/remove refused); when it ends the tab re-reads the accounts at
+                    once. A change of the active entry (here, another
                     tab or `pbixtractor account`: re-read every ACCOUNT_POLL_SECONDS, 3 s) calls
                     each panel's _account_switched: client dropped, generation +1 (answers on
                     their way are dropped; DevOps _selection() includes it, PlanPicker has its
@@ -443,8 +460,8 @@ src/pbixtractor/
                     projects reloaded if they had been loaded (not when no entry is left).
                     busy() (polled every 0.5 s) disables the control with "Wait for the run to
                     finish" (switch/add/remove are also refused then); a switch made elsewhere
-                    is applied after the run. Markers <fabric|devops>_account[_status|_add|
-                    _remove|_hint|_note].
+                    is applied after the run. Markers <fabric|devops>_account[_status|_tenant|
+                    _add|_hint|_note] (tests trigger "remove_entry" on <panel>_account).
   fabric.py         Fabric REST (stdlib urllib): FabricClient (workspaces/reports/
                     semanticModels lists, getDefinition as long-running operation with
                     polling), fetch_report() → <report>.Report + <model>.SemanticModel (TMDL)
