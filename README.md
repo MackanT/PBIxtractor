@@ -122,8 +122,9 @@ Reports with an encrypting sensitivity label cannot be downloaded from Fabric (a
 Output (default `output\<report name>\`): `<name>.xlsx`, `<name>_data.xlsx`, `<name>.json`,
 `<name>_lineage.html` (offline lineage viewer), `<name>_Relationships.png` and
 `documentation.tsv` (every table, column, hierarchy, level, measure, relationship and partition,
-in Tabular Editor 2's export format; DAX as in the model - with `--tabular-editor-tsv` Tabular
-Editor writes it instead, with DAX formatted by daxformatter.com).
+in Tabular Editor 2's export format; measures and calculated columns formatted offline in
+daxformatter.com's style, the rest as in the model - with `--tabular-editor-tsv` Tabular Editor
+writes it instead, with DAX formatted by daxformatter.com).
 
 ### From Python
 

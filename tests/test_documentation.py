@@ -614,3 +614,46 @@ def test_model_quality_column_absent_without_bpa_and_empty_without_findings(tmp_
     assert columns and set(columns.values()) == {""}
     common = _xlsx_rows(main, "Sample Common")
     assert any(row[len(OBJECT_COLUMNS) :] == ["Model quality"] for row in common)
+
+
+def test_definition_cells_are_formatted_while_the_json_keeps_the_dax(tmp_path):
+    from copy import deepcopy
+
+    bim = deepcopy(BIM)
+    sales = next(t for t in bim["model"]["tables"] if t["name"] == "Sales")
+    sales["measures"].append(
+        {"name": "Online", "expression": "calculate([Total Amount],all(Sales),all(Dates))"}
+    )
+    write_sample_pbix(tmp_path / "Sample.pbix")
+    (tmp_path / "Sample.bim").write_text(json.dumps(bim), encoding="utf-8")
+    output = tmp_path / "output"
+    result = run_extraction(
+        ExtractionOptions(
+            report_path=tmp_path / "Sample.pbix",
+            model_path=tmp_path / "Sample.bim",
+            output_dir=output,
+            tabular_editor_analysis=False,
+            write_log_file=False,
+        )
+    )
+    assert result.ok, result.message
+
+    definition = OBJECT_COLUMNS.index("Definition")
+    for path, sheet in ((output / "Sample.xlsx", "Sample Common"),
+                        (output / "Sample_data.xlsx", "common")):  # fmt: skip
+        name = OBJECT_COLUMNS.index("Name")
+        rows = {row[name]: row for row in _xlsx_rows(path, sheet) if len(row) > definition}
+        # highlight_dax() spaces the tokens; the layout (lines, tab indents, casing) is the
+        # formatter's
+        online = rows["Online"][definition]
+        assert online.startswith("CALCULATE ( \n\t")
+        assert "ALL ( Sales )" in online and "\n)" in online
+        is_big = rows["Is Big"][definition]  # calculated column: four lines in the model
+        assert "\n" not in is_big and "TRUE ( )" in is_big
+
+    data = json.loads((output / "Sample.json").read_text(encoding="utf-8"))
+    tables = {t["name"]: t for t in data["model"]["tables"]}
+    measures = {m["name"]: m["expression"] for m in tables["Sales"]["measures"]}
+    columns = {c["name"]: c["expression"] for c in tables["Sales"]["columns"]}
+    assert measures["Online"] == "calculate([Total Amount],all(Sales),all(Dates))"
+    assert columns["Is Big"] == "IF (\n    Sales[Amount] > 100,\n    TRUE()\n)"

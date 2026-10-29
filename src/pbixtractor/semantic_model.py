@@ -680,8 +680,9 @@ def write_documentation_tsv(model: SemanticModel, path: Path | str) -> Path:
 
     Header Object + DATASET_COLUMNS' properties, tab-separated; rows joined by "\\n" with no
     trailing newline; line breaks and tabs inside a value written as \\n, \\r and \\t; missing
-    values empty, nothing quoted; UTF-8 without a BOM. The DAX is as it is in the model (Tabular
-    Editor's export runs FormatDax, which calls daxformatter.com).
+    values empty, nothing quoted; UTF-8 without a BOM. Measures and calculated columns are
+    formatted offline by dax_format.format_dax() (Tabular Editor's export runs FormatDax, which
+    calls daxformatter.com); calculated tables, partitions and the rest stay as in the model.
 
     Args:
         model: Model from read_model()
@@ -690,8 +691,15 @@ def write_documentation_tsv(model: SemanticModel, path: Path | str) -> Path:
     Returns:
         The written path
     """
+    from .dax_format import format_dax  # here: dax_format -> dax_parser imports this module
+
     path = Path(path)
     dataset = documentation_tsv_rows(model)
+    formatted = {f"Model.T.{m.table}.M.{m.name}" for m in model.all_measures} | {
+        f"Model.T.{c.table}.C.{c.name}" for c in model.all_columns if c.kind == "calculated"
+    }
+    rows = dataset["Object"].isin(formatted)
+    dataset.loc[rows, "Expression"] = dataset.loc[rows, "Expression"].map(format_dax)
     lines = ["\t".join(DATASET_COLUMNS)]
     for row in dataset.itertuples(index=False):
         lines.append("\t".join(_tsv_value(value) for value in row))

@@ -5,6 +5,7 @@ write_data_workbook("Report_data.xlsx", documentation, graph_path, known_functio
 """
 
 import logging
+import re
 import warnings
 
 import xlsxwriter
@@ -13,6 +14,7 @@ from xlsxwriter.worksheet import Worksheet
 
 from .constants import DEFAULT_COLORS
 from .dax import find_columns, find_measures, highlight_dax, text_dependencies
+from .dax_format import format_dax
 from .documentation import (
     OBJECT_COLUMNS,
     Documentation,
@@ -168,6 +170,15 @@ def _set_object_columns(worksheet, formats: dict) -> None:
     worksheet.set_column(DEPENDS_ON_INDEX, DEPENDS_ON_INDEX, 50, formats["wrap"])
 
 
+# Common-sheet rows whose Definition cell shows formatted DAX (calculated tables etc. do not)
+FORMATTED_TYPES = ("Measure", "Calculated Column")
+
+
+def _tab_indents(dax: str) -> str:
+    """Leading 4-space indents as tabs: highlight_dax() keeps tabs and drops spaces."""
+    return re.sub(r"(?m)^(?: {4})+", lambda m: "\t" * (len(m.group()) // 4), dax)
+
+
 def _write_objects(
     worksheet,
     documentation: Documentation,
@@ -190,7 +201,10 @@ def _write_objects(
         if row["Type"] == "Column":  # data columns: see the "model columns" sheet
             continue
 
-        definition = highlight_dax(row["Definition"], formats, known_functions)
+        text = row["Definition"]
+        if row["Type"] in FORMATTED_TYPES:
+            text = _tab_indents(format_dax(text))
+        definition = highlight_dax(text, formats, known_functions)
         parents = documentation.depends_on(row["Table"], row["Name"])
         if parents is None:
             parents = text_dependencies(row["Definition"])
@@ -202,6 +216,8 @@ def _write_objects(
         for col, value in enumerate(row):
             if col == DEFINITION_INDEX and definition:
                 write_to_excel(worksheet, row_num, col, definition)
+            elif col == DEFINITION_INDEX and text != "":
+                worksheet.write(row_num, col, text)
             elif col == DEPENDS_ON_INDEX and parents_rich:
                 write_to_excel(worksheet, row_num, col, parents_rich)
             elif value != "":

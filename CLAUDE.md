@@ -26,7 +26,8 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
     comparison tool only.
   - TSV export (default off; `--tabular-editor-tsv`): TE writes `documentation.tsv` itself (and the
     dataset is read from it); runs FormatDax, which sends DAX to daxformatter.com. Without it the
-    same file is written offline by semantic_model.write_documentation_tsv() (DAX unformatted).
+    same file is written offline by semantic_model.write_documentation_tsv() (DAX formatted
+    offline by dax_format.py: measures and calculated columns).
 - sqlglot (native SQL in partitions), msal + msal-extensions (Fabric / DevOps browser sign-in,
   account list, token cache), azure-identity (only EnvironmentCredential: a service principal)
 
@@ -55,7 +56,8 @@ TMDL `definition/`. A live-connected .pbix (no model inside) gets its published 
 Fabric (pbix_model.live_connection → fabric.fetch_connected_model; sign-in, Contributor on the
 model). `extract` exits 2
 when there is none. The model is read from the `.bim` / TMDL on every run; a
-`documentation.tsv` is written on every run (TE2 ExportProperties format, DAX as in the model);
+`documentation.tsv` is written on every run (TE2 ExportProperties format; measures and
+calculated columns formatted offline by dax_format.py, everything else as in the model);
 `--tabular-editor-tsv` (ExtractionOptions.tabular_editor_tsv) only changes who writes it: Tabular
 Editor, with FormatDax'ed DAX, and then the dataset is read from that file.
 Real test reports are local only (never commit; this PC's list: `CLAUDE.local.md`; on another
@@ -270,6 +272,23 @@ src/pbixtractor/
                     Table, unless a VAR of that name is in scope (to the end of its RETURN
                     block); "RETURN [X]" is no qualified ref. Comments/strings never count.
                     Targets once per source; drop_redundant_table_refs applied.
+  dax_format.py     format_dax(dax) → daxformatter.com "long line" style, offline (D3/D12 of
+                    the python-analysis spec; close, not byte-identical): tokenize → tree (atoms,
+                    calls, ( ) / { } groups, VAR blocks, comments with line-break-before/after
+                    flags; comments on the "(" / "," / "=" / RETURN line stay there) → layout:
+                    "SUM ( x )", "F ( )", spaces around binary operators (none after a unary
+                    sign), a call inline when it fits LINE_LENGTH (120) at its column AND has ≤1
+                    nested function call (groups/{ } do not count), else one argument per line
+                    (INDENT 4) and ")" on its own line; VAR value on the VAR line when it renders
+                    on one line, else on the next one deeper; RETURN alone, its expression one
+                    deeper; functions (identifier before "(") and KEYWORDS upper case; names,
+                    strings, numbers, comments as written. Unparseable (unbalanced brackets,
+                    unclosed string/name/comment, unknown character, VAR without RETURN) or a
+                    changed _signature() (tokens without whitespace, function/keyword case
+                    ignored) → the input unchanged, logged at DEBUG only. Idempotent. Used by
+                    write_documentation_tsv() and the Common sheets' Definition cells only:
+                    JSON, lineage viewer, catalog, dependencies and text matching keep the DAX
+                    as written (D4/D11).
   excel_report.py   create_formats(), write_main_workbook(), write_data_workbook(); shared
                     helpers per sheet type (_write_relations, _write_objects, _write_page_sheet,
                     _write_pages_sheet, _write_dependencies_sheet). _Workbook/_Worksheet: text
@@ -279,6 +298,10 @@ src/pbixtractor/
                     Main workbook only, when the BPA ran: Common sheets get "Model quality"
                     after OBJECT_COLUMNS (QUALITY_INDEX; OBJECT_COLUMNS itself does not grow,
                     the data workbook's "common" is unchanged); _write_objects(quality=).
+                    _write_objects: the Definition cell of a Measure / Calculated Column
+                    (FORMATTED_TYPES) shows format_dax() output (leading 4-space indents → tabs:
+                    highlight_dax drops spaces) in both workbooks; Depends On / text matching use
+                    the original Definition.
   relationship_graph.py save_relationship_graph() → PNG (networkx spring layout).
   m_sources.py      m_sources(M, queries, name) → (connector, source objects): Schema/Item,
                     Name (single-db connectors), Lakehouse Id/ItemKind, native SQL
@@ -609,7 +632,9 @@ src/pbixtractor/
                     path) → documentation.tsv exactly like TE2 ExportProperties + SaveFile (header
                     Object+properties, \n-joined, no trailing newline, \n/\r/tab escaped, empty
                     cells, no quoting, UTF-8 no BOM; documentation_tsv_rows() = TE's order: all
-                    hierarchies, then all levels). structurally_used_columns():
+                    hierarchies, then all levels); the Expression of measures and calculated
+                    columns goes through dax_format.format_dax() (imported in the function:
+                    dax_format → dax_parser imports semantic_model), the rest as in the model. structurally_used_columns():
                     relationship keys, sort-by and hierarchy-level columns. Hierarchy levels are
                     sorted by `ordinal` (the .bim array order is not the level order).
   tmdl.py           TMDL folder → TMSL dict (same shape as a .bim) → parse_model(), so
