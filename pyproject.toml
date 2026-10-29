@@ -31,7 +31,9 @@ dependencies = [
     "nicegui>=3.0",
     "fastapi",  # imported directly (comes with nicegui)
     "sqlglot>=26",
-    "azure-identity>=1.19",
+    "azure-identity>=1.19",  # service principal (EnvironmentCredential)
+    "msal>=1.30",  # browser sign-in, accounts (azure_auth.py)
+    "msal-extensions>=1.2",  # token cache: OS-encrypted, else a 0600 file
     "pbixray>=0.15",  # reads the model inside a .pbix (MIT; native wheels for Windows + Linux)
 ]
 

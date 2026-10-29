@@ -416,3 +416,198 @@ def test_resolve_hierarchy_columns(model):
     )
     resolved = resolve_hierarchy_columns(report_info, model)
     assert list(resolved["Name"]) == ["Year Number", "Month", "Year", "Week"]
+
+
+# ============================================================================
+# "Model quality" column (BPA findings per object, main workbook only)
+# ============================================================================
+
+
+def _xlsx_rows(path, sheet: str) -> list[list[str]]:
+    """A sheet's cell texts as rows (openpyxl is not a dependency: read the XML)."""
+    import re
+    import xml.etree.ElementTree as ET
+
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    rel_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+    with zipfile.ZipFile(path) as book:
+        workbook = ET.fromstring(book.read("xl/workbook.xml"))
+        rels = ET.fromstring(book.read("xl/_rels/workbook.xml.rels"))
+        targets = {r.get("Id"): r.get("Target") for r in rels}
+        rid = next(
+            s.get(rel_ns) for s in workbook.iter(f"{{{ns['m']}}}sheet") if s.get("name") == sheet
+        )
+        strings = [
+            "".join(t.text or "" for t in si.iter(f"{{{ns['m']}}}t"))
+            for si in ET.fromstring(book.read("xl/sharedStrings.xml")).findall("m:si", ns)
+        ]
+        root = ET.fromstring(book.read("xl/" + targets[rid]))
+    rows = []
+    for row in root.iter(f"{{{ns['m']}}}row"):
+        cells = {}
+        for cell in row.findall("m:c", ns):
+            column = re.match(r"[A-Z]+", cell.get("r")).group()
+            index = 0
+            for char in column:
+                index = index * 26 + ord(char) - 64
+            value = cell.find("m:v", ns)
+            if value is not None:
+                text = strings[int(value.text)] if cell.get("t") == "s" else value.text
+                cells[index - 1] = text
+        number = int(row.get("r")) - 1
+        rows.extend([] for _ in range(number - len(rows) + 1))
+        rows[number] = [cells.get(i, "") for i in range(max(cells, default=-1) + 1)]
+    return rows
+
+
+def _violation(object_type, object_name, rule, severity):
+    from pbixtractor.tabular_editor import BpaViolation
+
+    return BpaViolation(
+        object_type=object_type, object_name=object_name, rule=rule, severity=severity
+    )
+
+
+ODD_TABLE = {
+    "name": "O'Brien",
+    "columns": [{"name": "Key", "dataType": "int64", "sourceColumn": "Key"}],
+    "measures": [{"name": "Net]Total", "expression": "1"}],
+}
+
+VIOLATIONS = [
+    _violation("Measure", "'Sales'[Total Amount]", "[Formatting] Provide format string", "Low"),
+    _violation("Measure", "'sales'[TOTAL AMOUNT]", "[DAX] Use DIVIDE", "High"),  # case-insensitive
+    _violation("Measure", "'Sales'[Total Amount]", "[DAX] Avoid IFERROR", "High"),
+    _violation(
+        "Calculated Column", "'Sales'[Is Big]", "[Performance] Avoid calculated columns", "Medium"
+    ),
+    _violation(
+        "Column", "'Sales'[Amount]", "[Performance] Do not use floating point data types", "High"
+    ),
+    _violation("Table", "'Dates'", "[Metadata] Mark the date table", "Medium"),
+    _violation(
+        "Relationship",
+        "'Sales'[Date Key] -> 'Dates'[Date Key]",
+        "[Model] Relationship rule",
+        "High",
+    ),
+    _violation("Measure", "'O''Brien'[Net]]Total]", "[Naming] Odd name", "Low"),
+    _violation("Data Column", "'O''Brien'[Key]", "[Metadata] Hide keys", "Low"),
+]
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("'Sales'[Amount]", ("Sales", "Amount")),
+        ("Sales[Amount]", ("Sales", "Amount")),
+        ("[Total]", (None, "Total")),
+        ("'O''Brien'[Net]]Total]", ("O'Brien", "Net]Total")),
+        ("'Dates'", (None, "Dates")),
+        ("Dates", (None, "Dates")),
+    ],
+)
+def test_parse_bpa_object_name(name, expected):
+    from pbixtractor.model_sheets import parse_bpa_object_name
+
+    assert parse_bpa_object_name(name) == expected
+
+
+def test_bpa_by_object_sorts_and_skips_other_types():
+    from pbixtractor.model_sheets import bpa_by_object, bpa_cell
+
+    cells = bpa_by_object(VIOLATIONS)
+    assert bpa_cell(cells, "SALES", "total amount") == (
+        "High: [DAX] Avoid IFERROR\nHigh: [DAX] Use DIVIDE\nLow: [Formatting] Provide format string"
+    )
+    assert bpa_cell(cells, "Dates") == "Medium: [Metadata] Mark the date table"
+    assert bpa_cell(cells, "O'Brien", "Net]Total") == "Low: [Naming] Odd name"
+    assert bpa_cell(cells, "Sales") == ""  # no table finding
+    assert not any("Relationship rule" in text for text in cells.values())
+
+
+def _write_quality_workbooks(tmp_path, report, violations):
+    from copy import deepcopy
+
+    from pbixtractor.excel_report import write_data_workbook, write_main_workbook
+    from pbixtractor.relationship_graph import save_relationship_graph
+
+    bim = deepcopy(BIM)
+    bim["model"]["tables"].append(ODD_TABLE)
+    model = parse_model(bim)
+    documentation = _documentation(model, report, bpa_violations=violations)
+    main, data = tmp_path / "Sample.xlsx", tmp_path / "Sample_data.xlsx"
+    graph = str(tmp_path / "graph.png")
+    save_relationship_graph(documentation.relations, graph)
+    write_main_workbook(str(main), documentation, graph, extractor.known_functions)
+    write_data_workbook(str(data), documentation, graph, extractor.known_functions)
+    return main, data
+
+
+def _quality_by_row(rows: list[list[str]], header_row: int, *key_columns: int) -> dict:
+    headers = rows[header_row]
+    assert headers[-1] == "Model quality"
+    column = len(headers) - 1
+    return {
+        tuple(row[i] for i in key_columns): (row[column] if len(row) > column else "")
+        for row in rows[header_row + 1 :]
+        if row and all(row[i] for i in key_columns)
+    }
+
+
+def test_model_quality_column_in_main_workbook(tmp_path, report):
+    main, data = _write_quality_workbooks(tmp_path, report, VIOLATIONS)
+
+    common = _xlsx_rows(main, "Sample Common")
+    header_row = next(
+        i for i, row in enumerate(common) if row[: len(OBJECT_COLUMNS)] == OBJECT_COLUMNS
+    )
+    assert len(common[header_row]) == len(OBJECT_COLUMNS) + 1  # added at the end
+    name, table = OBJECT_COLUMNS.index("Name"), OBJECT_COLUMNS.index("Table")
+    common_rows = common[header_row + 1 :]
+    end = next((i for i, row in enumerate(common_rows) if not row), len(common_rows))
+    quality = _quality_by_row(common[: header_row + 1 + end], header_row, table, name)
+    assert quality[("Sales", "Total Amount")] == (
+        "High: [DAX] Avoid IFERROR\nHigh: [DAX] Use DIVIDE\nLow: [Formatting] Provide format string"
+    )
+    assert quality[("Sales", "Is Big")] == "Medium: [Performance] Avoid calculated columns"
+    assert quality[("O'Brien", "Net]Total")] == "Low: [Naming] Odd name"
+    assert quality[("Sales", "Dynamic")] == ""
+
+    tables = _quality_by_row(_xlsx_rows(main, "model tables"), 0, 0)
+    assert tables == {
+        ("Sales",): "",
+        ("Dates",): "Medium: [Metadata] Mark the date table",
+        ("O'Brien",): "",
+    }
+    columns = _quality_by_row(_xlsx_rows(main, "model columns"), 0, 0, 1)
+    assert (
+        columns[("Sales", "Amount")] == "High: [Performance] Do not use floating point data types"
+    )
+    assert columns[("Sales", "Is Big")] == "Medium: [Performance] Avoid calculated columns"
+    assert columns[("O'Brien", "Key")] == "Low: [Metadata] Hide keys"
+    assert columns[("Dates", "Month")] == ""
+
+    with zipfile.ZipFile(main) as book:
+        assert "Relationship rule" in book.read("xl/sharedStrings.xml").decode()  # quality sheet
+    for sheet in ("Sample Common", "model tables", "model columns"):
+        assert not any(
+            "Relationship rule" in cell for row in _xlsx_rows(main, sheet) for cell in row
+        )
+
+    with zipfile.ZipFile(data) as book:
+        assert "Model quality" not in book.read("xl/sharedStrings.xml").decode()
+
+
+def test_model_quality_column_absent_without_bpa_and_empty_without_findings(tmp_path, report):
+    main, _ = _write_quality_workbooks(tmp_path, report, None)
+    for sheet in ("Sample Common", "model tables", "model columns"):
+        assert not any("Model quality" in cell for row in _xlsx_rows(main, sheet) for cell in row)
+
+    main, _ = _write_quality_workbooks(tmp_path, report, [])
+    tables = _quality_by_row(_xlsx_rows(main, "model tables"), 0, 0)
+    columns = _quality_by_row(_xlsx_rows(main, "model columns"), 0, 0, 1)
+    assert tables and set(tables.values()) == {""}
+    assert columns and set(columns.values()) == {""}
+    common = _xlsx_rows(main, "Sample Common")
+    assert any(row[len(OBJECT_COLUMNS) :] == ["Model quality"] for row in common)

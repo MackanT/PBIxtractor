@@ -73,6 +73,20 @@ page shows the lineage viewer inline, the Best Practice Analyzer findings, unuse
 bookmarks, row-level security roles (flagged, so protected reports are shared with care) and
 download links for all output files. Everything runs locally.
 
+Fabric and Azure DevOps use one sign-in account, shown at the top of both panels ("Signed in as
+<user> · <tenant>"). Choose another one from the list (one entry per tenant of each user you
+signed in with), or remove any entry with the icon next to it in the list. "Add account" opens
+Microsoft's sign-in page with its account picker in your browser; type a tenant (id or domain)
+next to it to sign in there and make it active - for a tenant that is not listed, for example
+when the tenants could not be listed (a warning says so). Without an account, "Sign in / load"
+opens the sign-in page first (once, even when several tabs ask at once). Switching reloads the
+workspaces / projects with the new account; every tab follows a switch (also one made with
+`pbixtractor account use`). The account cannot be changed while a download or documentation run
+is in progress, and while a sign-in is waiting in your browser every tab says so and no run
+starts. A service principal in the environment replaces the accounts, and a personal access
+token in `AZURE_DEVOPS_PAT` replaces the account for Azure DevOps; the panels say which is
+used.
+
 ### Command line
 
 ```powershell
@@ -81,7 +95,12 @@ pbixtractor extract Sales.pbix --model Model.bim -o out\Sales --no-tabular-edito
 pbixtractor extract Sales.pbip                              # PBIP: model.bim or TMDL
 pbixtractor extract --help
 
-# From the Power BI service / Azure DevOps (sign-in opens a browser, or uses `az login`)
+# From the Power BI service / Azure DevOps (sign-in opens Microsoft's sign-in page; switch
+# with `pbixtractor account`)
+pbixtractor account add                                     # sign in: one entry per tenant
+pbixtractor account list                                    # the entries, * = the active one
+pbixtractor account use 2                                   # switch (number, user or tenant)
+pbixtractor account remove 3                                # forget an entry
 pbixtractor fabric list                                     # your workspaces
 pbixtractor extract --fabric "Sales WS/Sales"              # download + document
 pbixtractor extract --fabric "Sales WS/Sales" --all-reports  # every report on its model
@@ -135,7 +154,7 @@ pbixtractor/
 ├── src/
 │   └── pbixtractor/          # Main package
 │       ├── __init__.py       # Package initialization
-│       ├── cli.py            # Command line (extract, web, fabric, devops, catalog)
+│       ├── cli.py            # Command line (extract, web, fabric, devops, catalog, account)
 │       ├── web_ui.py         # Web UI (NiceGUI)
 │       ├── pipeline.py       # run_extraction(): the whole documentation run
 │       ├── readers.py        # .pbix / PBIR / PBIP report readers
@@ -218,4 +237,4 @@ For issues and questions, please use the [GitHub Issues](https://github.com/Mack
 
 Created by Marcus Toftås
 
-Built with: pandas, xlsxwriter, matplotlib, networkx, NiceGUI, sqlglot, azure-identity
+Built with: pandas, xlsxwriter, matplotlib, networkx, NiceGUI, sqlglot, msal, azure-identity

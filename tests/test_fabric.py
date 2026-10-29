@@ -355,6 +355,10 @@ class _Handler(BaseHTTPRequestHandler):
             assert self.headers["Authorization"] == "Bearer fake-token"
             body = json.dumps({"value": [{"id": WS_SALES, "displayName": "Sales WS"}]}).encode()
             self.send_response(200)
+        elif self.path == f"/v1/groups/{WS_SALES}/reports":  # Power BI REST
+            assert self.headers["Authorization"] == "Bearer fake-token"
+            body = json.dumps({"value": [{"id": REPORT_ID, "datasetId": MODEL_ID}]}).encode()
+            self.send_response(200)
         else:
             body = json.dumps({"errorCode": "InsufficientPrivileges", "message": "Nope"}).encode()
             self.send_response(403)
@@ -394,6 +398,27 @@ def test_http_retries_sign_in_pages_and_redirects(server):
     # The token is never carried to another host on a redirect
     client.request("GET", "redirect")
     assert _Handler.calls["landing_auth"] is None
+
+
+def test_power_bi_and_fabric_calls_of_a_client_use_one_credential(server, monkeypatch):
+    from pbixtractor import azure_auth, fabric
+
+    made = []
+
+    class Credential(_Credential):
+        def __init__(self, tenant_id=None):
+            made.append(self)
+
+    # get_credential() is looked up when the client needs it (a replaced one is used), and
+    # each call makes another credential - e.g. another account after a switch
+    monkeypatch.setattr(azure_auth, "get_credential", Credential)
+    monkeypatch.setattr(fabric, "POWERBI_API", server)
+    client = FabricClient(api=server)
+    assert made == []  # nothing until the first call
+    assert client.powerbi_reports(WS_SALES) == [{"id": REPORT_ID, "datasetId": MODEL_ID}]  # first
+    assert client.workspaces() == [{"id": WS_SALES, "displayName": "Sales WS"}]  # then Fabric
+    assert len(made) == 1
+    assert client._credential is client.powerbi._credential is made[0]
 
 
 def test_credentials_are_never_sent_over_plain_http():

@@ -13,6 +13,7 @@ from nicegui.testing.user_simulation import user_simulation  # noqa: E402
 
 import pbixtractor.web_config as web_config  # noqa: E402
 import pbixtractor.web_ui as web_ui  # noqa: E402
+from pbixtractor import azure_auth  # noqa: E402
 
 from .sample_layout import write_sample_pbix  # noqa: E402
 from .test_semantic_model import BIM  # noqa: E402
@@ -32,6 +33,7 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setitem(web_ui._CATALOG, "dir", None)
     yield tmp_path
     web_config.configure()  # back to stand-alone for the other tests
+    azure_auth.allow_browser_login(True)  # register() forbade it
 
 
 def _any(user, marker: str):
@@ -103,6 +105,19 @@ def test_embedded_run_uses_the_prefix_output_root_and_storage_prefix(host):
         assert app.storage.general.get("pbx.catalog_enabled") is True
         assert "catalog_enabled" not in app.storage.general
         assert "pbx.catalog_dir" not in app.storage.general  # a server path is never kept
+
+    _simulate(host, scenario)
+
+
+def test_embedded_there_is_no_account_control_and_no_browser_sign_in(host):
+    async def scenario(user):
+        await user.open("/")
+        await user.should_see("Create documentation")
+        markers = {marker for e in user.client.elements.values() for marker in e._markers}
+        assert not [marker for marker in markers if "_account" in marker]  # also hidden ones
+        # A browser would open on the server: only a service principal signs in
+        with pytest.raises(azure_auth.ApiError, match="service principal"):
+            azure_auth.add_account()
 
     _simulate(host, scenario)
 

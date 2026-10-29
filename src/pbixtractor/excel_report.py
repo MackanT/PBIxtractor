@@ -21,7 +21,14 @@ from .documentation import (
     field_description,
     field_display_name,
 )
-from .model_sheets import add_bpa_sheets, add_model_sheets, write_table
+from .model_sheets import (
+    MODEL_QUALITY_HEADER,
+    add_bpa_sheets,
+    add_model_sheets,
+    bpa_by_object,
+    bpa_cell,
+    write_table,
+)
 from .utils import excel_sheet_name, rgba_tuple_to_hex, write_to_excel
 
 # Colours for nested brackets in DAX (cycled by nesting depth)
@@ -61,8 +68,11 @@ class _Worksheet(Worksheet):
 class _Workbook(xlsxwriter.Workbook):
     worksheet_class = _Worksheet
 
+
 DEFINITION_INDEX = OBJECT_COLUMNS.index("Definition")
 DEPENDS_ON_INDEX = OBJECT_COLUMNS.index("Depends On")
+# Main workbook only (when the BPA ran): "Model quality" after the shared OBJECT_COLUMNS
+QUALITY_INDEX = len(OBJECT_COLUMNS)
 
 PAGE_SHEET_HEADERS = [
     "Item Type",
@@ -159,10 +169,19 @@ def _set_object_columns(worksheet, formats: dict) -> None:
 
 
 def _write_objects(
-    worksheet, documentation: Documentation, formats: dict, row_num: int, known_functions
+    worksheet,
+    documentation: Documentation,
+    formats: dict,
+    row_num: int,
+    known_functions,
+    quality: dict | None = None,
 ) -> int:
     """
     Write measures and calculated columns with highlighted DAX and dependencies.
+
+    Args:
+        quality: From model_sheets.bpa_by_object(): fills a "Model quality" column after
+            OBJECT_COLUMNS (None: no such column)
 
     Returns:
         Next free row
@@ -187,6 +206,10 @@ def _write_objects(
                 write_to_excel(worksheet, row_num, col, parents_rich)
             elif value != "":
                 worksheet.write(row_num, col, value)
+        if quality is not None:
+            text = bpa_cell(quality, row["Table"], row["Name"])
+            if text:
+                worksheet.write(row_num, QUALITY_INDEX, text, formats["top_wrap"])
         row_num += 1
     return row_num
 
@@ -414,7 +437,8 @@ def write_main_workbook(
 ) -> None:
     """
     The documentation workbook: "<report> Common" (relationships, measures with DAX, unused
-    objects), one sheet per page, "Pages", and the model/BPA sheets.
+    objects), one sheet per page, "Pages", and the model/BPA sheets. When the BPA ran, the
+    Common, "model tables" and "model columns" sheets end with a "Model quality" column.
 
     Args:
         path: .xlsx file to write
@@ -430,12 +454,21 @@ def write_main_workbook(
 
     formats = create_formats(workbook)
 
+    quality = None
+    if documentation.bpa_violations is not None:
+        quality = bpa_by_object(documentation.bpa_violations)
+
     worksheet = workbook.add_worksheet(sheet_name(f"{documentation.report_name} Common"))
     _set_object_columns(worksheet, formats)
     row_num = _write_relations(worksheet, documentation, formats, graph_path) + 2
-    for col, name in enumerate(OBJECT_COLUMNS):
+    headers = OBJECT_COLUMNS + ([MODEL_QUALITY_HEADER] if quality is not None else [])
+    if quality is not None:
+        worksheet.set_column(QUALITY_INDEX, QUALITY_INDEX, 60, formats["top_wrap"])
+    for col, name in enumerate(headers):
         worksheet.write(row_num, col, name, formats["bi"])
-    row_num = _write_objects(worksheet, documentation, formats, row_num + 1, known_functions)
+    row_num = _write_objects(
+        worksheet, documentation, formats, row_num + 1, known_functions, quality
+    )
 
     row_num += 6
     for title, objects in (
@@ -467,7 +500,12 @@ def write_main_workbook(
     add_report_sheets(workbook, documentation, formats, sheet_name)
 
     add_model_sheets(
-        workbook, documentation.model, formats["bi"], sheet_name, documentation.live_statistics
+        workbook,
+        documentation.model,
+        formats["bi"],
+        sheet_name,
+        documentation.live_statistics,
+        bpa=quality,
     )
     if documentation.bpa_violations is not None:
         add_bpa_sheets(workbook, documentation.bpa_violations, formats["bi"], sheet_name)

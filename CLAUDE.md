@@ -25,7 +25,8 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
   - TSV export (default off; `--tabular-editor-tsv`): TE writes `documentation.tsv` itself (and the
     dataset is read from it); runs FormatDax, which sends DAX to daxformatter.com. Without it the
     same file is written offline by semantic_model.write_documentation_tsv() (DAX unformatted).
-- sqlglot (native SQL in partitions), azure-identity (Fabric / DevOps sign-in)
+- sqlglot (native SQL in partitions), msal + msal-extensions (Fabric / DevOps browser sign-in,
+  account list, token cache), azure-identity (only EnvironmentCredential: a service principal)
 
 ## Running
 Machine-specific notes (working clone, real test reports, what was verified on which report)
@@ -75,6 +76,14 @@ done on request.
 ```
 src/pbixtractor/
   cli.py            argparse: no command → web UI; `web [--port] [--no-browser]`;
+                    `account list | add [--tenant X] | use <n|name> | remove <n|name>`
+                    (azure_auth; use = find_account (part of a name), remove = find_account(
+                    exact=True): number / key / whole user, tenant name, tenant id or label;
+                    add prints a failed tenant listing (on_warning) once as "WARNING: ..." on
+                    stderr, exit 0 - a logger filter keeps Python's last-resort handler from
+                    printing it again; list = one account_snapshot(), numbered labels, *
+                    active, notes for unencrypted tokens / a service principal; errors (also
+                    "Removed X, but could not delete the tokens ...") → "ERROR: ..." + exit 1);
                     `devops list ORG [PROJECT [REPO]] [--history PATH]`, `devops fetch URL
                     [--ref branch|tag:x|commit:x] [-o]`;
                     `extract [report | --fabric WS/REPORT | --devops URL [--ref]] [--tenant] [--model] [-o] [--name]
@@ -161,7 +170,19 @@ src/pbixtractor/
                     models/<key>/<file> (checked on the resolved path); logs render as escaped
                     text (_log_text), uploads capped at MAX_UPLOAD_BYTES (2 GB).
                     One download + run at a time across tabs (_JOB_LOCK; a second tab shows
-                    "Waiting for a run in another tab"). Power BI Desktop detection runs in
+                    "Waiting for a run in another tab"). "Create documentation" is enabled only
+                    by show_run_button(): disabled for this tab's whole start_run (running) and,
+                    whatever the source, while a sign-in is going on in the process
+                    (sign_in_going_on() = the tab's AccountState.pending(), or
+                    web_sources.sign_in_pending() without one; it follows
+                    AccountState.on_sign_in), with "Waiting for sign-in in your
+                    browser…" next to it (marker run_sign_in). start_run still refuses with
+                    "Finish the sign-in in your browser first" then (the safety net; checked
+                    before and after taking _JOB_LOCK). Account control (stand-alone only):
+                    build_page makes one web_sources.AccountState(busy=_JOB_LOCK.locked) for
+                    both panels (embedded: none, no control); register() calls
+                    azure_auth.allow_browser_login(False) (only a service principal signs in
+                    there), start() leaves it allowed. Power BI Desktop detection runs in
                     run.io_bound (psutil takes seconds), debounced 0.5 s while typing a path.
                     Catalog option (switch + folder, default output/_catalog, remembered via
                     stored_choices()); header link "Catalog" → /catalog/.
@@ -232,6 +253,9 @@ src/pbixtractor/
                     over Excel's 32,767-character cell limit ends in TRUNCATED_MARKER and logs a
                     warning (xlsxwriter cuts plain text silently and drops a too-long rich
                     string altogether). WORKBOOK_OPTIONS: no strings_to_formulas/_urls.
+                    Main workbook only, when the BPA ran: Common sheets get "Model quality"
+                    after OBJECT_COLUMNS (QUALITY_INDEX; OBJECT_COLUMNS itself does not grow,
+                    the data workbook's "common" is unchanged); _write_objects(quality=).
   relationship_graph.py save_relationship_graph() → PNG (networkx spring layout).
   m_sources.py      m_sources(M, queries, name) → (connector, source objects): Schema/Item,
                     Name (single-db connectors), Lakehouse Id/ItemKind, native SQL
@@ -240,10 +264,79 @@ src/pbixtractor/
                     followed (shared expressions + single-M-partition tables; parameter
                     queries skipped), "Entered data". Partition.source_summary() uses it;
                     parse_model() sets Partition.queries.
-  azure_auth.py     Shared sign-in + REST: get_credential(tenant) (one per process; AzureCli
-                    if `az` exists, else InteractiveBrowserCredential with DPAPI cache + account
-                    record ~/.pbixtractor/auth_record.json; one login serves Fabric and DevOps),
+  azure_auth.py     Shared sign-in + REST. Accounts (no Azure CLI): MSAL PublicClientApplication
+                    (client id 04b07795-..., one app per tenant authority, one shared token
+                    cache) - add_account(tenant, timeout, on_warning) = browser sign-in for
+                    FABRIC_SCOPE with the account picker (LOGIN_TIMEOUT 180 s), then an ARM
+                    token SILENTLY (acquire_token_silent_with_error; a tenant blocking Azure
+                    management never opens the browser for it) and the user's tenants from ARM
+                    GET /tenants (_list_tenants: _OPENER directly, not RestClient - one attempt
+                    per page, TENANTS_PAGE_TIMEOUT 15 s, TENANTS_DEADLINE 30 s for all pages,
+                    no 429/5xx retries or Retry-After waits; nextLink followed only over https
+                    to management.azure.com) → one Account(username, home_account_id, tenant_id,
+                    tenant_name, home; key, label "<user> · <tenant>") per tenant; a listing
+                    replaces the user's entries; a failed listing (or ARM token) keeps them and
+                    adds/updates only the signed-in tenant, logs a warning and calls
+                    on_warning(text); `tenant` or the home tenant becomes active (ensure_account
+                    / a credential signing in at a guest tenant with no account: the home
+                    tenant, from home_account_id, is added even when unlisted, and made active).
+                    _login_lock (RLock) is held for the whole add, around every
+                    acquire_token_interactive (one sign-in at a time) and while a user's tokens
+                    are deleted. sign_in_in_progress() = a counter (_sign_in_running(); nested
+                    and parallel ones counted, ended on every exit path) over the whole
+                    add_account / ensure_account (browser, tenant listing, writing the entries)
+                    and every interactive sign-in a credential's get_token starts (run threads
+                    too). Anything failing after the browser sign-in of an add (the store
+                    re-read, _write_store) first deletes the new user's tokens unless that user
+                    has an entry (_drop_new_tokens → _delete_unlisted_tokens, as a refused
+                    other user's; a failure to delete = a warning), then the error propagates.
+                    ensure_account() = the active entry, else one add_account, re-checked
+                    under _login_lock (a caller waiting there gets the first caller's account).
+                    account_snapshot(wait=True) = (entries, active) from ONE read of
+                    accounts.json (wait=False: one attempt, no sleeping - the web UI's poll);
+                    accounts() (by user, home first, tenant name), active_account(), writers and
+                    _bound_account() all use it. Missing file = no entries; a file that exists
+                    but cannot be read (OSError: retried _READ_ATTEMPTS times over ~0.5 s; the
+                    replace in _write_store retries PermissionError - both via _retried()) or
+                    is damaged (bad JSON/UTF-8, not an object, "accounts" present but not a
+                    list, or a non-empty list without one valid entry - D45: "delete it and
+                    sign in again"; null / [] = no accounts, invalid entries among valid ones
+                    are skipped) →
+                    ApiError, never "no accounts": writers read under _store_lock and write
+                    nothing, add_account fails before the browser opens, a credential's
+                    get_token raises instead of signing in (`account list` → "ERROR: ..."
+                    exit 1). accounts_changed_since(stamp) →
+                    (changed, stamp) from os.stat only (mtime_ns, size, inode; a missing file
+                    has its own stamp; stat error → (True, None)) for cheap polls.
+                    use_account(key), find_account(text, exact)
+                    (number / key / user / tenant name / tenant id / label; part of one unless
+                    exact), remove_account(key): active removed → same user's home tenant, that
+                    user's other entry, else the first remaining (_next_active); the user's last
+                    entry deletes their ACCOUNT / REFRESH / ACCESS / ID token records straight
+                    from the persisted TokenCache (search + remove_*, no MSAL app, so offline),
+                    under _login_lock and only if the user still has no entry then
+                    (_delete_unlisted_tokens, under _store_lock: a sign-in adding them meanwhile
+                    keeps its fresh tokens); if that fails: ApiError "Removed X, but could not
+                    delete the tokens ..." after the entry is gone.
+                    Files in AUTH_DIR (~/.pbixtractor): accounts.json
+                    (entries + active key, no secrets; re-read on every call, so all tabs and
+                    the CLI share one active entry) and msal_token_cache.bin (msal_extensions:
+                    OS-encrypted when possible, else a 0600 plain file; token_cache_encrypted()).
+                    default_credential(tenant): EnvironmentCredential when
+                    service_principal_configured() (new one per call); else bound to the entry
+                    active when called (tenant = the active user in that tenant); get_token:
+                    silent first, browser (login hint) only when MSAL asks for interaction; a
+                    sign-in that comes back as another user → ApiError, that user's tokens
+                    deleted first unless they have an entry; no
+                    active entry → the first get_token signs in (at `tenant` if given) via
+                    _ensure_account, the HOME tenant becomes active, the credential uses that
+                    user in `tenant`. get_credential(tenant) = default_credential (looked up
+                    when called: a replaced one is used), but one service principal credential
+                    per process (re-made when any AZURE_* value changes). allow_browser_login(False) (embedded) → ApiError naming the
+                    service principal variables. One login serves Fabric, DevOps and Power BI.
                     RestClient(api, scope, credential | pat) .request(method, url, body, raw):
+                    _resolve_credential() = the given credential, else get_credential() looked
+                    up at call time (once per client; sub-clients reuse it);
                     https only (except localhost), retries 429/5xx/network errors (MAX_ATTEMPTS
                     5, Retry-After seconds or date, max 120 s), no Authorization header on a
                     redirect to another host, a 203/HTML answer = "sign-in page" error.
@@ -377,6 +470,67 @@ src/pbixtractor/
                     fetch(progress) → (report folder, model folder). make_fabric_client /
                     make_devops_client are the test seams. Choices remembered in
                     app.storage.general (.nicegui/, gitignored).
+                    Account (stand-alone; panels take accounts=AccountState, embedded None):
+                    AccountState = one tab's view of the active azure_auth entry (one
+                    account_snapshot() per re-read; an ApiError there - accounts.json
+                    unreadable or damaged - keeps the tab's last state: no switch, no clearing,
+                    logged once per process per distinct message (module-level
+                    _logged_read_error under a lock, reset by a good read in any tab), and
+                    the poll backs off: doubling from ACCOUNT_POLL_SECONDS up to
+                    ACCOUNT_POLL_MAX_SECONDS 60 s, back to normal after a good read), shared
+                    by an
+                    AccountControl at the top of each panel (above "Sign in / load"): "Signed
+                    in as <label>" / "Not signed
+                    in", searchable select of the entries (choosing = use_account; ValueError →
+                    warning, ApiError/OSError → negative "Could not switch the account: ...";
+                    either way the select and status go back to the active entry; each option
+                    has its own remove icon: Quasar option slot, the click emits the select's
+                    "remove_entry" event with {index, label} via $root.$refs['r<id>'], checked
+                    against the options; remove_account without choosing it first - the active
+                    one → switch behaviour, another → the lists stay; ApiError → judged after
+                    re-reading the list: the entry gone (tokens not deleted) → warning, not
+                    "Removed"; still listed or the list unreadable (nothing removed) →
+                    negative), an optional "Tenant (id or domain)" input + "Add account"
+                    (add_account(tenant, on_warning=...) in run.io_bound; the listing warning,
+                    collected in the thread, → warning notify; the input is cleared after a
+                    sign-in; ApiError, also an unreadable list → negative notify); the
+                    unencrypted-tokens note when entries exist and token_cache_encrypted() is
+                    False (asked once, in a thread). A service principal → "Using the service
+                    principal from the environment", no choices, and accounts.json is neither
+                    read nor followed (no timers at all, no switch listeners, no clearing);
+                    AZURE_DEVOPS_PAT → the DevOps panel says the token is used and ignores the
+                    account. "Sign in / load" with no active entry calls
+                    azure_auth.ensure_account() first (ensure_signed_in; tabs asking at once
+                    share one sign-in; otherwise _sync(force=False): re-read only when the
+                    file changed); during a run (busy()) or a sign-in it does not re-read the
+                    list (a switch made elsewhere is never applied mid-run). "Sign in / load"
+                    then uses the panel's client (bound to its account when it was made); a
+                    panel without one binds to the entry active in accounts.json, which the tab
+                    shows after the run (D37/D46; none + a run → "Wait for the run to
+                    finish").
+                    sign_in_pending() = azure_auth.sign_in_in_progress() (the whole add/ensure
+                    and every browser sign-in a token needs, also a run's); the tab adds its
+                    own sign-in from the click on (_own_sign_ins; AccountState.pending() =
+                    both, also used by web_ui's run button):
+                    every tab polls it (BUSY_POLL_SECONDS) and then shows "Waiting for sign-in
+                    in your browser…" with the select / tenant / Add disabled
+                    (switch/add/remove refused) and tells on_sign_in listeners (the run
+                    button); when it ends the tab re-reads the accounts at once. A change of the
+                    active entry (here, another tab or `pbixtractor account`: every
+                    ACCOUNT_POLL_SECONDS, 3 s, accounts_changed_since() looks at the file and
+                    account_snapshot(wait=False) reads it only if it changed - or anyway when
+                    the last full read is ACCOUNT_FULL_READ_SECONDS, 30 s, old, catching a
+                    replaced file whose stamp did not change; the poll runs on the event loop
+                    and never sleeps; user actions keep the retrying read) calls each panel's
+                    _account_switched → the shared _drop_old_account(panel, clear, reload):
+                    client dropped, generation +1 (answers on their way are dropped; DevOps
+                    _selection() includes it, PlanPicker has its own), the panel's
+                    _clear_lists (lists/model-mode switches) and model list cleared, then the
+                    workspaces / projects reloaded if they had been loaded (not when no entry
+                    is left). busy() (polled every 0.5 s) disables the control with "Wait for
+                    the run to finish" (switch/add/remove are also refused then); a switch made
+                    elsewhere is applied after the run. Markers <fabric|devops>_account[_status|
+                    _tenant|_add|_hint|_note] (tests trigger "remove_entry" on <panel>_account).
   fabric.py         Fabric REST (stdlib urllib): FabricClient (workspaces/reports/
                     semanticModels lists, getDefinition as long-running operation with
                     polling), fetch_report() → <report>.Report + <model>.SemanticModel (TMDL)
@@ -385,8 +539,10 @@ src/pbixtractor/
                     every workspace you can open) + download into <root>/<workspace>/
                     + fabric_source.json; definition.pbir rewritten to byPath. Model found via
                     semanticmodelid in the pbir connection string (other workspace by name).
-                    Sign-in via azure_auth.get_credential(). getDefinition needs Contributor
-                    (read+write) on the item. reports_on_model(not_searched=...) records
+                    Sign-in via azure_auth.get_credential(); FabricClient.powerbi (Power BI REST
+                    sub-client) gets the client's own credential (_resolve_credential()), so
+                    both APIs use one account even when Power BI is called first.
+                    getDefinition needs Contributor (read+write) on the item. reports_on_model(not_searched=...) records
                     workspaces it could not search (→ FetchedReport.skipped).
                     fetch_model_reports(client, model_ws, model, [(ws, report)], dest) for
                     batch.py: the model once + the given reports (each bound byPath, with its
@@ -449,7 +605,12 @@ src/pbixtractor/
                     COLUMNSTATISTICS() + TOM measure DataType; build_statistics() aggregates
                     like VertiPaq Analyzer (dictionary + data + H$ hierarchy per column).
   model_sheets.py   add_model_sheets() (model tables/columns/roles/parameters, optional live
-                    stats columns) and add_bpa_sheets() (model quality summary + findings).
+                    stats columns; bpa= adds a last "Model quality" column to tables/columns -
+                    main workbook only) and add_bpa_sheets() (model quality summary + findings).
+                    bpa_by_object(violations) → {key: cell text} ("<severity>: <rule>" per line,
+                    High/Medium/Low/other, then rule name), bpa_cell(cells, table, name=None);
+                    matched case-insensitively by ObjectType (Measure, *Column → 'Table'[Name];
+                    *Table → name; others ignored) via parse_bpa_object_name() ('' and ]] escapes).
   readers.py        read_report(path): .pbix (legacy Report/Layout or PBIR Report/definition/),
                     .pbip, or <name>.Report folder → ReportDefinition → PageDefinition →
                     VisualDefinition (fields as FieldBinding(role, expr, query_ref,
@@ -545,6 +706,10 @@ src/pbixtractor/
    Common sheets (OBJECT_COLUMNS) list measures and calculated columns (Type "Calculated
    Column" = a column with DAX; data columns are only on "model columns") in model order,
    with "Depends On" (what the object references; was "Dependants" before 2026-09-29).
+   When the BPA ran (bpa_violations not None), `<name>.xlsx`'s Common, model tables and model
+   columns sheets end with a "Model quality" column: the rules each object breaks, one per line
+   (`High: [Performance] ...`), empty when none; no column at all when the BPA did not run.
+   `<name>_data.xlsx` never gets it (its model quality sheets hold the findings).
 
 ## Known bugs / gotchas (open as of 2026-09-29)
 - Never trust the Select `Name`/queryRef string for table/field — it goes stale when
@@ -603,6 +768,8 @@ pages (several reports per run); the model read from inside a .pbix (no .bim nee
 models fetched from Fabric for live-connected .pbix and DevOps byConnection reports; RLS
 indicators (web UI, lineage viewer, catalog); drop-zone-first upload UI; lineage list click =
 mark, double-click = open.
+Account switching (2026-10-27): built - `pbixtractor account` and the web UI account control;
+automated tests only, real-tenant checks pending.
 
 Versioning (owner, 2026-10-06): `ft_v2` becomes **2.0.0** when it is merged into `main`. No git
 tag exists yet (none on origin either), so the data-platform pin below cannot install until one
@@ -647,9 +814,15 @@ Open, by owner priority:
 - Excel → lineage viewer links (low). Web UI polish (run history, model tab, JSON search).
 - Not planned: XMLA sizes for service models (reports may live in Pro workspaces).
 
-Tests: tests/conftest.py blocks real sign-in (get_credential raises, AZURE_DEVOPS_PAT removed),
-allows only local sockets, and points NiceGUI storage at a temp folder - pass fake
-clients/credentials. Web UI tests poll (`_wait_for`) instead of fixed sleeps.
+Tests: tests/conftest.py blocks real sign-in (get_credential / default_credential raise,
+AZURE_DEVOPS_PAT and the service principal variables AZURE_TENANT_ID, AZURE_CLIENT_ID,
+AZURE_CLIENT_SECRET and AZURE_CLIENT_CERTIFICATE_PATH removed, the browser sign-in allowed again
+for every test (azure_auth._browser_login_allowed reset), azure_auth.AUTH_DIR in a temp folder,
+no OS keyring, azure_auth._new_app and MSAL's acquire_token_interactive raise), allows only local
+sockets, and points NiceGUI storage at a temp folder - pass fake clients/credentials
+(tests/test_azure_auth.py: a fake MSAL app; an autouse fixture there restores the real
+default_credential, which get_credential goes through, and drops a kept service principal
+credential). Web UI tests poll (`_wait_for`) instead of fixed sleeps.
 
 Regression runs (`tools/regress.py`, `Input/regression.json`) use live reports: local only
 (Input/ and output/ are gitignored) - they are not part of PBIxtractor and never go into the repo
