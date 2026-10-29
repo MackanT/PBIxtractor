@@ -228,6 +228,9 @@ src/pbixtractor/
                     over Excel's 32,767-character cell limit ends in TRUNCATED_MARKER and logs a
                     warning (xlsxwriter cuts plain text silently and drops a too-long rich
                     string altogether). WORKBOOK_OPTIONS: no strings_to_formulas/_urls.
+                    Main workbook only, when the BPA ran: Common sheets get "Model quality"
+                    after OBJECT_COLUMNS (QUALITY_INDEX; OBJECT_COLUMNS itself does not grow,
+                    the data workbook's "common" is unchanged); _write_objects(quality=).
   relationship_graph.py save_relationship_graph() → PNG (networkx spring layout).
   m_sources.py      m_sources(M, queries, name) → (connector, source objects): Schema/Item,
                     Name (single-db connectors), Lakehouse Id/ItemKind, native SQL
@@ -440,7 +443,12 @@ src/pbixtractor/
                     COLUMNSTATISTICS() + TOM measure DataType; build_statistics() aggregates
                     like VertiPaq Analyzer (dictionary + data + H$ hierarchy per column).
   model_sheets.py   add_model_sheets() (model tables/columns/roles/parameters, optional live
-                    stats columns) and add_bpa_sheets() (model quality summary + findings).
+                    stats columns; bpa= adds a last "Model quality" column to tables/columns -
+                    main workbook only) and add_bpa_sheets() (model quality summary + findings).
+                    bpa_by_object(violations) → {key: cell text} ("<severity>: <rule>" per line,
+                    High/Medium/Low/other, then rule name), bpa_cell(cells, table, name=None);
+                    matched case-insensitively by ObjectType (Measure, *Column → 'Table'[Name];
+                    *Table → name; others ignored) via parse_bpa_object_name() ('' and ]] escapes).
   readers.py        read_report(path): .pbix (legacy Report/Layout or PBIR Report/definition/),
                     .pbip, or <name>.Report folder → ReportDefinition → PageDefinition →
                     VisualDefinition (fields as FieldBinding(role, expr, query_ref,
@@ -536,6 +544,10 @@ src/pbixtractor/
    Common sheets (OBJECT_COLUMNS) list measures and calculated columns (Type "Calculated
    Column" = a column with DAX; data columns are only on "model columns") in model order,
    with "Depends On" (what the object references; was "Dependants" before 2026-09-29).
+   When the BPA ran (bpa_violations not None), `<name>.xlsx`'s Common, model tables and model
+   columns sheets end with a "Model quality" column: the rules each object breaks, one per line
+   (`High: [Performance] ...`), empty when none; no column at all when the BPA did not run.
+   `<name>_data.xlsx` never gets it (its model quality sheets hold the findings).
 
 ## Known bugs / gotchas (open as of 2026-09-29)
 - Never trust the Select `Name`/queryRef string for table/field — it goes stale when
