@@ -15,6 +15,9 @@ from typing import Callable, Optional
 from . import __version__
 
 TENANT_HELP = "Entra tenant (id or domain) for the active account; default: the active entry's"
+BPA_RULES_HELP = (
+    "custom model quality rules (YAML; default: ~/.pbixtractor/bpa_rules.yaml if it exists)"
+)
 
 EXAMPLES = """
 Examples:
@@ -138,6 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="use Tabular Editor's TSV export (formats DAX via daxformatter.com - sends DAX online)",
     )
     extract.add_argument("--description-tag", help="delimiter of descriptions embedded in DAX")
+    extract.add_argument("--bpa-rules", type=Path, metavar="FILE", help=BPA_RULES_HELP)
     extract.add_argument("--no-log-file", action="store_true", help="do not write logs/*.txt")
     extract.add_argument("-q", "--quiet", action="store_true", help="only print the result")
 
@@ -256,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
                              help="skip the Tabular Editor analysis (faster)")
     catalog_add.add_argument("--no-service-statistics", action="store_true",
                              help="do not read row counts / distinct values from the Power BI service")
+    catalog_add.add_argument("--bpa-rules", type=Path, metavar="FILE", help=BPA_RULES_HELP)
     catalog_add.add_argument("--no-log-file", action="store_true", help="do not write logs/*.txt")
     catalog_add.add_argument("--tenant", help=TENANT_HELP)
     catalog_add.add_argument("-q", "--quiet", action="store_true", help="only print the result")
@@ -513,6 +518,7 @@ def run_catalog_add(args: argparse.Namespace) -> int:
             tabular_editor_analysis=not args.no_tabular_editor,
             service_statistics=not args.no_service_statistics,
             write_log_file=not args.no_log_file,
+            bpa_rules=args.bpa_rules,
         ),
         progress=progress,
     )
@@ -707,6 +713,7 @@ def run_extract(args: argparse.Namespace) -> int:
         not_included=not_included,
         service_statistics=not args.no_service_statistics,
         catalog_dir=args.catalog,
+        bpa_rules=args.bpa_rules,
         service_model=(
             ServiceModel(connected[-1].workspace_id, connected[-1].model_id, connected[-1].model)
             if connected

@@ -126,6 +126,35 @@ in Tabular Editor 2's export format; measures and calculated columns formatted o
 daxformatter.com's style, the rest as in the model - with `--tabular-editor-tsv` Tabular Editor
 writes it instead, with DAX formatted by daxformatter.com).
 
+### Custom model quality rules
+
+Every run checks the model against Microsoft's Best Practice Analyzer rules. Add your own, or
+switch built-in ones off, in `~/.pbixtractor/bpa_rules.yaml` (used by every run on this PC), or
+point a run at another file with `--bpa-rules FILE` (`extract` and `catalog add`). Findings show
+on the model quality sheets and in the "Model quality" column like any other.
+
+```yaml
+version: 1
+disabled: [AVOID_FLOATING_POINT_DATA_TYPES]   # built-in rule ids switched off
+rules:
+  - id: MEASURES_IN_FOLDERS                   # unique; letters, digits, _ and -
+    name: Measures should be in a display folder
+    category: Custom                          # optional, default "Custom"
+    severity: Medium                          # Low | Medium | High
+    description: Put every measure in a display folder.   # optional
+    scope: Measure       # Measure | Column | CalculatedColumn | Table | Relationship | Model
+    conditions:          # all must hold
+      - {property: display_folder, op: is_empty}
+    any:                 # optional: at least one must hold
+      - {property: name, op: matches, value: "^[A-Z]"}
+```
+
+Properties: `name`, `table`, `description`, `format_string`, `data_type`, `display_folder`,
+`hidden`, `expression` (measures and calculated columns) and `dependants` (how many objects'
+DAX reference it). Ops: `equals`, `not_equals`, `contains` (case-insensitive), `matches` (a
+regex, case-insensitive), `is_empty`, `not_empty` and `in` (a list). A broken rule never stops a
+run: it is left out with a warning naming it, and the built-in rules still run.
+
 ### From Python
 
 ```python

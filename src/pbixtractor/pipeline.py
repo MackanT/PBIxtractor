@@ -18,6 +18,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
+from . import bpa_custom
 from .azure_auth import ApiError
 from .bpa import run_bpa
 from .catalog import add_to_catalog
@@ -85,6 +86,9 @@ class ExtractionOptions:
     # Also add the result to this catalog folder (catalog.py): one searchable page for many models
     catalog_dir: Optional[Path] = None
     catalog_rebuild: bool = True  # rebuild its pages now (a batch rebuilds once, at the end)
+    # Custom model quality rules (bpa_custom.py); None = ~/.pbixtractor/bpa_rules.yaml if it
+    # exists. A given file that is missing is a warning.
+    bpa_rules: Optional[Path] = None
 
     def __post_init__(self):
         self.report_path = Path(self.report_path)
@@ -92,6 +96,7 @@ class ExtractionOptions:
         self.output_dir = Path(self.output_dir)
         self.extra_reports = [Path(p) for p in self.extra_reports]
         self.catalog_dir = Path(self.catalog_dir) if self.catalog_dir else None
+        self.bpa_rules = Path(self.bpa_rules) if self.bpa_rules else None
         if not self.name:
             self.name = report_name(self.report_path)
 
@@ -228,9 +233,34 @@ def _live_statistics(model, options: ExtractionOptions, progress):
     return live_statistics
 
 
-def _best_practice_analyzer(model, statistics, progress) -> tuple[Optional[list], list]:
+def _custom_rules(path: Optional[Path]) -> bpa_custom.RuleFile:
     """
-    The Python Best Practice Analyzer (bpa.py) on every run, with or without Tabular Editor.
+    The custom model quality rules of a run: the given file, else the user's file if it exists.
+    Each problem of the file is one warning (the built-in rules run regardless).
+    """
+    if path is None:
+        path = bpa_custom.USER_RULES_PATH
+        if not path.is_file():
+            return bpa_custom.RuleFile()
+    elif not path.is_file():
+        logger.warning(f"Custom model quality rule file not found: {path}")
+        return bpa_custom.RuleFile()
+    rule_file = bpa_custom.load_rule_file(path)
+    for error in rule_file.errors:
+        logger.warning(f"Custom model quality rule {error}")
+    logger.debug(
+        f"Custom model quality rules from {path}: {len(rule_file.rules)} rule(s), "
+        f"{len(rule_file.disabled)} built-in rule(s) switched off"
+    )
+    return rule_file
+
+
+def _best_practice_analyzer(
+    model, statistics, progress, rules_file: Optional[Path] = None
+) -> tuple[Optional[list], list]:
+    """
+    The Python Best Practice Analyzer (bpa.py) on every run, with or without Tabular Editor,
+    plus the custom rules (bpa_custom.py) of rules_file / the user's rule file.
 
     Returns:
         (violations, [(rule ID, reason)] for the rules not checked); violations is None when
@@ -238,7 +268,10 @@ def _best_practice_analyzer(model, statistics, progress) -> tuple[Optional[list]
     """
     progress("Best Practice Analyzer", 0.48)
     try:
-        violations, not_checked = run_bpa(model, statistics)
+        rules = _custom_rules(rules_file)
+        violations, not_checked = run_bpa(
+            model, statistics, custom=rules.rules, disabled=rules.disabled
+        )
     except Exception as e:  # a bug in the engine must not fail the run
         logger.warning(f"Best Practice Analyzer failed: {e!r}")
         return None, []
@@ -393,7 +426,9 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
                 (measure.table, measure.name), measure.data_type
             )
 
-    bpa_violations, bpa_not_checked = _best_practice_analyzer(model, live_statistics, progress)
+    bpa_violations, bpa_not_checked = _best_practice_analyzer(
+        model, live_statistics, progress, options.bpa_rules
+    )
 
     if options.tabular_editor_tsv:
         progress("Tabular Editor TSV export", 0.5)

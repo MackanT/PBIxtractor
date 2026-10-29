@@ -95,13 +95,15 @@ src/pbixtractor/
                     `extract [report | --fabric WS/REPORT | --devops URL [--ref]] [--tenant] [--model] [-o] [--name]
                     [--all-reports] [--all-workspaces] [--also REPORT] [--catalog FOLDER]
                     [--no-service-statistics] [--no-tabular-editor] [--tabular-editor-tsv]
-                    [--description-tag] [--no-log-file] [-q]` (exit 0 ok/warnings, 1 error,
+                    [--description-tag] [--bpa-rules FILE] [--no-log-file] [-q]` (exit 0
+                    ok/warnings, 1 error,
                     2 no model/bad args); `fabric list [WS]`, `fabric fetch WS/REPORT [-o]`
                     (default download folder output/_fabric/<ws>; with extract -o: <o>/source);
                     `catalog list|remove|rebuild FOLDER [KEY]`; `catalog add FOLDER [FILE ...] |
                     --fabric-workspace WS [...] [--all-workspaces] | --devops REPO_URL [--ref]
                     [--only NAME ...] [--list] [-o ROOT] [--no-tabular-editor]
-                    [--no-service-statistics] [--no-log-file] [-q]` (batch.py; .bim files among
+                    [--no-service-statistics] [--bpa-rules FILE] [--no-log-file] [-q]`
+                    (batch.py; BatchSettings.bpa_rules; .bim files among
                     FILE are models; a ?path= in the repo URL limits it to a folder; --only =
                     batch.select (model or report name, wildcards); --list = plan only; exit 1 if
                     any model failed). `--ref` was `--version` (still
@@ -117,7 +119,10 @@ src/pbixtractor/
                     always; a crash = a bug → warning + None = text matching) → live stats
                     (Tabular Editor + Desktop, until ticket 08; skipped with
                     tabular_editor_analysis=False; TE not found → INFO note, not a warning) → service / .pbix statistics → Python BPA
-                    (bpa.run_bpa on every run, with or without TE, using those statistics →
+                    (bpa.run_bpa on every run, with or without TE, using those statistics, plus
+                    the custom rules of ExtractionOptions.bpa_rules (None = bpa_custom.
+                    USER_RULES_PATH if it exists; a given file that is missing → warning; each
+                    RuleFile error → one WARNING "Custom model quality rule <id>: <problem>") →
                     (violations, not_checked) → build_documentation(bpa_violations=,
                     bpa_not_checked=); a crash → warning + (None, [])) →
                     dataset →
@@ -681,7 +686,11 @@ src/pbixtractor/
                     block lists each rule not checked (severity, category, name, "Not checked",
                     reason; not_checked_rows()), so "missing" never reads as "passed".
   bpa.py            Python Best Practice Analyzer (D16: the only BPA a run uses). run_bpa(model,
-                    statistics=None, rules_path=DEFAULT_BPA_RULES) → (violations [BpaViolation
+                    statistics=None, rules_path=DEFAULT_BPA_RULES, custom=None, disabled=())
+                    (custom = bpa_custom CustomRules, checked after the built-ins by
+                    rule_findings(); disabled = built-in ids skipped: neither findings nor
+                    "not checked"; a raising custom rule → not_checked "error: ..." + warning)
+                    → (violations [BpaViolation
                     from tabular_editor, most severe first], not_checked [(rule ID, reason)]).
                     Rule metadata from data/BPARules.json (load_rules / rule_by_id, BpaRule);
                     each check is a hand port of the rule's Expression (quoted in a comment),
@@ -709,6 +718,26 @@ src/pbixtractor/
                     [...]}) on an object or the model (= every object) suppress findings. KPIs
                     are not modelled (their scope is never checked). TE scope names/ObjectType
                     strings are assumed from TE2, not yet compared on Windows (ticket 07).
+  bpa_custom.py     Custom model quality rules (D6, D17, D18): a YAML file defined by
+                    PBIxtractor, USER_RULES_PATH = azure_auth.AUTH_DIR / "bpa_rules.yaml" (tests:
+                    conftest points it at a temp folder) or --bpa-rules FILE. `version: 1`,
+                    `disabled: [built-in ids]`, `rules: [{id ([A-Za-z0-9_-]+, unique, not a
+                    built-in's), name, category (default Custom), severity Low|Medium|High,
+                    description, scope, conditions (all hold), any (one holds)}]`, condition
+                    {property, op, value}. SCOPES: Measure, Column (every column), CalculatedColumn,
+                    Table (also calculated / calculation group), Relationship, Model; PROPERTIES
+                    name, table, description, format_string, data_type (TE spelling, e.g. Double),
+                    display_folder, hidden, expression (measures + calculated columns), dependants
+                    (ReferencedBy count from model_dependencies), each with the scopes it exists on
+                    (another scope = validation error); OPS equals / not_equals / contains (case-
+                    insensitive), matches (re.search, IGNORECASE), is_empty / not_empty (no
+                    value), in (a list); hidden/dependants compare values. load_rule_file(path) →
+                    RuleFile(rules, disabled, errors "<id | rule #n | file X>: <problem>"), never
+                    raises for content: bad YAML → no rules; a bad rule is dropped; unknown
+                    disabled ids named. validate_rule(dict), rule_from_dict / rule_to_dict,
+                    save_rule_file(path, rules, disabled) (temp file + os.replace, key order as
+                    above), evaluate_rule(rule, model, statistics=None) (for the web UI's
+                    "Test"; ignore annotations apply). Findings use iter_objects' names/types.
   readers.py        read_report(path): .pbix (legacy Report/Layout or PBIR Report/definition/),
                     .pbip, or <name>.Report folder → ReportDefinition → PageDefinition →
                     VisualDefinition (fields as FieldBinding(role, expr, query_ref,

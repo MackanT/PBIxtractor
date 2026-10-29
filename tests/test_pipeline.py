@@ -269,6 +269,30 @@ def test_cli_extract(sample, capsys):
     assert "Done" in capsys.readouterr().out
 
 
+def test_cli_extract_with_custom_rules(sample, capsys):
+    rules = sample / "rules.yaml"
+    rules.write_text(
+        "version: 1\n"
+        "rules:\n"
+        "  - id: NO_AMOUNT\n"
+        "    name: Columns called Amount\n"
+        "    severity: Low\n"
+        "    scope: Column\n"
+        "    conditions:\n"
+        "      - {property: name, op: equals, value: amount}\n",
+        encoding="utf-8",
+    )
+    output = sample / "cli_rules"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", str(sample / "Sample.pbix"), "-o", str(output), "--bpa-rules",
+              str(rules), "-q"])
+    assert exit_info.value.code == 0
+    quality = json.loads((output / "Sample.json").read_text(encoding="utf-8"))["quality"]
+    assert {"Columns called Amount"} == {
+        q["rule"] for q in quality if q["rule"] == "Columns called Amount"
+    }
+
+
 def test_cli_extract_without_model(tmp_path, capsys):
     write_sample_pbix(tmp_path / "Lonely.pbix")
     with pytest.raises(SystemExit) as exit_info:

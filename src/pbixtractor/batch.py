@@ -99,6 +99,7 @@ class BatchSettings:
     service_statistics: bool = True
     write_log_file: bool = True
     description_tag: str = ExtractionOptions.description_tag
+    bpa_rules: Optional[Path] = None  # custom model quality rules (None: the user's file)
 
 
 # ============================================================================
@@ -574,6 +575,7 @@ def _run_job(
         service_statistics=settings.service_statistics,
         catalog_dir=settings.catalog_dir,
         catalog_rebuild=False,  # once, after the last model (run_batch)
+        bpa_rules=settings.bpa_rules,
     )
     result = run_extraction(
         options,

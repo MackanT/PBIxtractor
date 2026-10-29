@@ -7,6 +7,10 @@ Tabular Editor's analyzer gives (tabular_editor.BpaViolation), so the "Model qua
 column read them unchanged.
 
     violations, not_checked = run_bpa(model, statistics)
+    violations, not_checked = run_bpa(model, statistics, custom=rules, disabled=ids)
+
+Custom rules (bpa_custom.py, the user's rule file) run next to the built-in ones, and built-in
+rules can be switched off by id.
 
 Every rule of the bundled file has a check here. The DAX rules use the Python DAX tokenizer and
 dax_parser.model_dependencies (Tabular Editor's DependsOn / ReferencedBy); their regexes run on the
@@ -24,6 +28,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from .bpa_custom import SCOPES as CUSTOM_SCOPES
+from .bpa_custom import CustomRule, breaks
 from .dax_parser import model_dependencies, model_index, reference_occurrences
 from .live_model import LiveStatistics
 from .semantic_model import DATA_TYPES, Column, Measure, Relationship, SemanticModel, Table
@@ -32,6 +38,7 @@ from .tabular_editor import DEFAULT_BPA_RULES, SEVERITIES, BpaViolation
 __all__ = [
     "BpaRule",
     "BpaViolation",
+    "CustomRule",
     "DEFAULT_BPA_RULES",
     "load_rules",
     "rule_by_id",
@@ -1265,23 +1272,63 @@ def _ignored_rules(annotations: dict[str, str]) -> set[str]:
     return {str(rule_id).upper() for rule_id in ids}
 
 
+def rule_findings(
+    rule: CustomRule, ctx: "_Context", objects: list[BpaObject]
+) -> list[BpaViolation]:
+    """
+    One custom rule's findings: the objects of its scope that break it, minus the ones whose
+    (or whose model's) ignore annotation lists its id.
+
+    Args:
+        rule: A validated custom rule (bpa_custom)
+        ctx: The model's _Context
+        objects: iter_objects(model)
+
+    Returns:
+        Findings in model order
+    """
+    rule_id = rule.id.upper()
+    if rule_id in _ignored_rules(ctx.model.annotations):
+        return []
+    scopes = CUSTOM_SCOPES[rule.scope]
+    return [
+        BpaViolation(
+            object_type=obj.object_type,
+            object_name=obj.object_name,
+            rule=rule.name,
+            category=rule.category,
+            severity=rule.severity,
+            description=rule.description,
+        )
+        for obj in objects
+        if obj.scope in scopes
+        and rule_id not in _ignored_rules(obj.annotations)
+        and breaks(ctx, obj, rule)
+    ]
+
+
 def run_bpa(
     model: SemanticModel,
     statistics: Optional[LiveStatistics] = None,
     rules_path: Path = DEFAULT_BPA_RULES,
+    custom: Optional[list[CustomRule]] = None,
+    disabled: tuple[str, ...] | list[str] = (),
 ) -> tuple[list[BpaViolation], list[tuple[str, str]]]:
     """
     Check the model against the Best Practice Analyzer rules, in Python.
 
     Rules whose CompatibilityLevel is above the model's are skipped, as Tabular Editor does.
     Objects (or the model) with a BestPracticeAnalyzer_IgnoreRules annotation listing a rule
-    get no finding for it; the model's list applies to every object.
+    get no finding for it; the model's list applies to every object. This holds for custom
+    rules' ids too.
 
     Args:
         model: Model from semantic_model.read_model()
         statistics: Row counts / distinct values (from the .pbix, the service or Desktop) for
             the rules on cardinality and table size; None: those rules are "not checked"
         rules_path: Rules file (default: Microsoft's standard rules)
+        custom: Custom rules (bpa_custom.load_rule_file().rules), checked after the built-ins
+        disabled: Built-in rule ids switched off: neither findings nor "not checked"
 
     Returns:
         (violations most severe first, [(rule ID, reason)] for the rules not checked)
@@ -1290,10 +1337,13 @@ def run_bpa(
     objects = list(iter_objects(model))
     model_ignored = _ignored_rules(model.annotations)
     level = model.compatibility_level or 0
+    switched_off = {rule_id.upper() for rule_id in disabled}
 
     violations: list[BpaViolation] = []
     not_checked: list[tuple[str, str]] = []
     for rule in load_rules(rules_path):
+        if rule.id.upper() in switched_off:
+            continue
         if level and rule.compatibility_level > level:
             logger.debug(f"BPA rule {rule.id} skipped: needs compatibility level "
                          f"{rule.compatibility_level}")
@@ -1332,6 +1382,15 @@ def run_bpa(
             not_checked.append((rule.id, f"error: {e}"))
             continue
         violations.extend(found)
+
+    for custom_rule in custom or ():
+        try:
+            violations.extend(rule_findings(custom_rule, ctx, objects))
+        except Exception as e:  # e.g. a property a model object lacks: never fail the run
+            logger.warning(
+                f"Custom model quality rule {custom_rule.id} could not be checked: {e!r}"
+            )
+            not_checked.append((custom_rule.id, f"error: {e}"))
 
     violations.sort(key=lambda v: (_SEVERITY_ORDER.get(v.severity, 3), v.category, v.rule))
     return violations, not_checked
