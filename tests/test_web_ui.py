@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -10,25 +11,164 @@ pytest.importorskip("nicegui")
 
 from fastapi import HTTPException  # noqa: E402
 from nicegui import ui  # noqa: E402
+from nicegui.testing.user import User  # noqa: E402
+from nicegui.testing.user_notify import UserNotify  # noqa: E402
 from nicegui.testing.user_simulation import user_simulation  # noqa: E402
 
 import pbixtractor.web_sources as web_sources  # noqa: E402
 import pbixtractor.web_ui as web_ui  # noqa: E402
+from pbixtractor import azure_auth  # noqa: E402
+from pbixtractor.azure_auth import Account, ApiError  # noqa: E402
 
 from .sample_layout import write_sample_pbix  # noqa: E402
 from .test_semantic_model import BIM  # noqa: E402
 
+ALICE = Account("alice@contoso.com", "oid-a.contoso-id", "contoso-id", "Contoso", home=True)
+ALICE_GUEST = Account("alice@contoso.com", "oid-a.contoso-id", "fabrikam-id", "Fabrikam")
+BOB = Account("bob@fabrikam.com", "oid-b.fabrikam-id", "fabrikam-id", "Fabrikam", home=True)
+
+
+class FakeAccounts:
+    """azure_auth's account functions over an in-memory list: no MSAL, no browser. The next
+    add_account() signs in as `next_user` (waiting for `browser` first, when set - meanwhile
+    sign_in_in_progress() is True); ensure_account() signs in only when no entry is active,
+    one caller at a time (as azure_auth's login lock does). With `unreadable` set, the list
+    "exists but cannot be read": every function that reads it raises ApiError (D43)."""
+
+    def __init__(self, monkeypatch, *entries: Account, active: str = None, encrypted: bool = True):
+        self.entries = list(entries)
+        self.active = active
+        self.encrypted = encrypted
+        self.next_user: list[Account] = [BOB]
+        self.add_error = None  # ApiError text the next add_account() raises
+        self.listing_warning = None  # text add_account() passes to on_warning (tenants unlisted)
+        self.remove_error = None  # ApiError text remove_account() raises after removing
+        self.browser = None  # threading.Event the "browser sign-in" waits for
+        self.signing = threading.Event()  # set while the "browser sign-in" waits
+        self.added = 0
+        self.ensured = 0
+        self.polls = 0  # sign_in_in_progress() calls: every tab asks every BUSY_POLL_SECONDS
+        self.tenants: list = []  # the tenant each add_account() was asked for
+        self.removed: list[str] = []
+        self.unreadable = None  # ApiError text: the account list exists but cannot be read
+        self.use_error = None  # exception use_account() raises (e.g. the list cannot be written)
+        self.snapshots = 0  # account_snapshot() calls: the account list read (parsed)
+        self.waits: list[bool] = []  # account_snapshot()'s wait= of each call
+        self.stamps = 0  # accounts_changed_since() calls: the cheap look at the file
+        self._login = threading.Lock()
+        for name in ("account_snapshot", "accounts", "active_account", "accounts_changed_since",
+                     "use_account", "add_account", "ensure_account", "remove_account",
+                     "sign_in_in_progress", "token_cache_encrypted"):
+            monkeypatch.setattr(azure_auth, name, getattr(self, name))
+
+    def _readable(self) -> None:
+        if self.unreadable:
+            raise ApiError(self.unreadable)
+
+    def _active(self):
+        return next((a for a in self.entries if a.key == self.active), None)
+
+    def account_snapshot(self, wait=True):
+        self.snapshots += 1
+        self.waits.append(wait)
+        self._readable()
+        return list(self.entries), self._active()
+
+    def accounts(self):
+        self._readable()
+        return list(self.entries)
+
+    def active_account(self):
+        self._readable()
+        return self._active()
+
+    def accounts_changed_since(self, stamp):
+        """The "file" changed when its content did (the real one compares time, size, id)."""
+        self.stamps += 1
+        new = (tuple(self.entries), self.active)
+        return stamp is None or new != stamp, new
+
+    def use_account(self, key):
+        self._readable()
+        account = next((a for a in self.entries if a.key == key), None)
+        if account is None:
+            raise ValueError(f"No account {key}")
+        if self.use_error is not None:
+            raise self.use_error
+        self.active = key
+        return account
+
+    def add_account(self, tenant=None, timeout=azure_auth.LOGIN_TIMEOUT, on_warning=None):
+        self._readable()  # as azure_auth: before the browser opens
+        self.added += 1
+        self.tenants.append(tenant)
+        if self.browser is not None:
+            self.signing.set()
+            try:
+                assert self.browser.wait(10), "the test never finished the sign-in"
+            finally:
+                self.signing.clear()
+        if self.add_error:
+            raise ApiError(self.add_error)
+        user = self.next_user[0].home_account_id
+        self.entries = [a for a in self.entries if a.home_account_id != user] + self.next_user
+        self.active = self.next_user[0].key
+        if self.listing_warning and on_warning is not None:
+            on_warning(self.listing_warning)
+        return list(self.next_user)
+
+    def ensure_account(self, timeout=azure_auth.LOGIN_TIMEOUT):
+        self.ensured += 1
+        with self._login:  # a second caller waits, then finds the first one's account
+            if self.active_account() is None:
+                self.add_account()
+        return self.active_account()
+
+    def remove_account(self, key):
+        self._readable()
+        if not any(a.key == key for a in self.entries):
+            raise ValueError(f"No account {key}")
+        self.removed.append(key)
+        self.entries = [a for a in self.entries if a.key != key]
+        if self.active == key:
+            self.active = self.entries[0].key if self.entries else None
+        if self.remove_error:  # the entry is gone, its tokens are not
+            raise ApiError(self.remove_error)
+
+    def sign_in_in_progress(self):
+        self.polls += 1
+        return self.signing.is_set()
+
+    def token_cache_encrypted(self):
+        return self.encrypted
+
+
+class Notifications(UserNotify):
+    """A simulated tab's notifications with their type (user.notify = Notifications())."""
+
+    def __init__(self):
+        super().__init__()
+        self.types: dict[str, str] = {}
+
+    def __call__(self, message: str, **kwargs) -> None:
+        super().__call__(message, **kwargs)
+        self.types[message] = kwargs.get("type")
+
 
 @pytest.fixture
 def sample(tmp_path, monkeypatch):
-    """Sample.pbix + Sample.bim; no Tabular Editor and no Power BI Desktop."""
+    """Sample.pbix + Sample.bim; no Tabular Editor and no Power BI Desktop; signed in as ALICE
+    (a test that needs other accounts makes its own FakeAccounts)."""
     write_sample_pbix(tmp_path / "Sample.pbix")
     (tmp_path / "Sample.bim").write_text(json.dumps(BIM), encoding="utf-8")
+    FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
     monkeypatch.setattr(web_ui, "find_tabular_editor", lambda: None)
     monkeypatch.setattr(web_ui, "find_local_instances", lambda: [])
     # The catalog in use is module state: another test's catalog must not show up (its rail
     # entries would, e.g. "Lineage across models" - and "Lineage" is what tests wait for)
     monkeypatch.setitem(web_ui._CATALOG, "dir", None)
+    # "Cannot read the account list" is logged once per process: not left over from a test
+    monkeypatch.setattr(web_sources, "_logged_read_error", "")
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -645,5 +785,751 @@ def test_only_the_ticked_models_of_a_devops_repository_are_documented(sample, mo
         # Another scope (here: a folder): the listed models no longer apply
         await _choose(user, "devops_folder", "/Reports")
         await _wait_for(lambda: not _any_element(user, "devops_plan_table").rows)
+
+    _simulate(scenario)
+
+
+# ---------------------------------------------------------------------------
+# The account control (one account for Fabric and DevOps, switchable in both panels)
+# ---------------------------------------------------------------------------
+
+
+def _account_clients(monkeypatch) -> dict:
+    """Fake Fabric and DevOps clients bound to the account active when they are made (as
+    get_credential is): their lists name that account's tenant. Returns the clients made
+    (and under "loads" the tenant of each workspace list asked for)."""
+    made = {"fabric": [], "devops": [], "loads": []}
+
+    def tenant() -> str:
+        return getattr(azure_auth.active_account(), "tenant_name", "nobody")
+
+    class Fabric:
+        def __init__(self):
+            self.tenant = tenant()
+            made["fabric"].append(self)
+
+        def workspaces(self):
+            made["loads"].append(self.tenant)
+            return [{"id": f"ws-{self.tenant}", "displayName": f"{self.tenant} workspace"}]
+
+        def reports(self, workspace):
+            return [{"id": f"r-{self.tenant}", "displayName": f"{self.tenant} report"}]
+
+    class DevOps:
+        def __init__(self, org):
+            self.org, self.tenant = org, tenant()
+            made["devops"].append(self)
+
+        def projects(self):
+            return [f"{self.tenant} project"]
+
+    monkeypatch.setattr(web_sources, "make_fabric_client", Fabric)
+    monkeypatch.setattr(web_sources, "make_devops_client", DevOps)
+    return made
+
+
+def _run_button(user):
+    """The "Create documentation" button (also while it is disabled)."""
+    return next(iter(user.find("Create documentation").elements))
+
+
+def _account_timers(user) -> list:
+    """The timers an AccountState started in this tab (its poll; a once-timer while due)."""
+    return [
+        element
+        for element in list(user.client.elements.values())
+        if isinstance(element, ui.timer)
+        and isinstance(getattr(element.callback, "__self__", None), web_sources.AccountState)
+    ]
+
+
+def _remove_entry(user, panel: str, account: Account) -> None:
+    """Click an entry's remove icon in the account dropdown: the browser sends the option's
+    index and label (the select's "remove_entry" event)."""
+    options = _element(user, f"{panel}_account").options
+    index = list(options).index(account.key)
+    user.find(marker=f"{panel}_account").trigger(
+        "remove_entry", {"index": index, "label": options[account.key]}
+    )
+
+
+def test_the_account_control_shows_the_active_account(sample, monkeypatch):
+    FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE_GUEST.key, encrypted=False)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await user.should_see("Signed in as alice@contoso.com · Fabrikam")
+        assert _value(user, "fabric_account") == ALICE_GUEST.key
+        assert list(_options(user, "fabric_account").values()) == [ALICE.label, ALICE_GUEST.label]
+        await _wait_for(lambda: _any_element(user, "fabric_account_note").visible)
+        await user.should_see(web_sources.UNENCRYPTED)
+        # The DevOps panel shows the same account
+        await _choose(user, "source", "devops")
+        assert _value(user, "devops_account") == ALICE_GUEST.key
+        await user.should_see(marker="devops_account_note")
+
+    _simulate(scenario)
+
+
+def test_switching_the_account_reloads_both_panels_with_new_clients(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    made = _account_clients(monkeypatch)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "devops")
+        await _choose(user, "devops_org", "contoso")
+        user.find(marker="devops_load").click()
+        await _wait_for(lambda: list(_options(user, "devops_project")) == ["Contoso project"])
+        await _choose(user, "source", "fabric")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: _options(user, "fabric_workspace"))
+        await _choose(user, "fabric_workspace", "ws-Contoso", until=lambda: _options(user, "fabric_report"))
+        await _choose(user, "fabric_report", "r-Contoso")
+        await _choose(user, "fabric_all_reports", True)
+
+        await _choose(user, "fabric_account", ALICE_GUEST.key)
+        assert accounts.active == ALICE_GUEST.key
+        # What the old account loaded is gone, and loaded again with the new one
+        await _wait_for(lambda: _options(user, "fabric_workspace") == {"ws-Fabrikam": "Fabrikam workspace"})
+        assert _value(user, "fabric_workspace") is None and not _options(user, "fabric_report")
+        assert not _value(user, "fabric_all_reports")
+        await user.should_see("Signed in as alice@contoso.com · Fabrikam")
+        await _choose(user, "source", "devops")
+        await _wait_for(lambda: list(_options(user, "devops_project")) == ["Fabrikam project"])
+        assert _value(user, "devops_account") == ALICE_GUEST.key
+        assert [client.tenant for client in made["fabric"]] == ["Contoso", "Fabrikam"]
+        assert [client.tenant for client in made["devops"]] == ["Contoso", "Fabrikam"]
+
+    _simulate(scenario)
+
+
+def test_add_account_waits_for_the_browser_sign_in_and_shows_failures(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch)  # nobody signed in yet
+    accounts.browser = threading.Event()
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await user.should_see("Not signed in")
+        user.find(marker="fabric_account_add").click()
+        await user.should_see(web_sources.WAITING_FOR_SIGN_IN)
+        assert not _element(user, "fabric_account_add").enabled
+        accounts.browser.set()  # the user signs in in the browser
+        await user.should_see("Signed in as bob@fabrikam.com · Fabrikam")
+        assert _value(user, "fabric_account") == BOB.key
+        assert _any_element(user, "devops_account").value == BOB.key  # the other panel too
+        assert not _any_element(user, "fabric_account_hint").visible
+        # A failed (or timed-out) sign-in says why
+        accounts.add_error = "Sign-in timed out after 180 s"
+        user.find(marker="fabric_account_add").click()
+        await user.should_see("Sign-in timed out after 180 s")
+        assert accounts.added == 2 and accounts.active == BOB.key
+
+    _simulate(scenario)
+
+
+def test_sign_in_and_load_without_an_account_signs_in_first(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch)
+    made = _account_clients(monkeypatch)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        accounts.add_error = "Sign-in was cancelled"
+        user.find(marker="fabric_load").click()
+        await user.should_see("Sign-in was cancelled")
+        assert accounts.added == 1 and not made["fabric"]  # nothing is loaded without an account
+        accounts.add_error = None
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: _options(user, "fabric_workspace") == {"ws-Fabrikam": "Fabrikam workspace"})
+        assert accounts.added == 2 and accounts.active == BOB.key
+        assert accounts.ensured == 2  # through ensure_account: tabs asking at once share one sign-in
+        await user.should_see("Signed in as bob@fabrikam.com · Fabrikam")
+
+    _simulate(scenario)
+
+
+def test_removing_the_active_account_switches_to_the_next_one(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, BOB, active=ALICE.key)
+    made = _account_clients(monkeypatch)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Contoso"])
+        _remove_entry(user, "fabric", ALICE)
+        await user.should_see("Signed in as bob@fabrikam.com · Fabrikam")
+        assert accounts.removed == [ALICE.key]
+        assert list(_options(user, "fabric_account")) == [BOB.key]
+        assert list(_any_element(user, "devops_account").options) == [BOB.key]
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Fabrikam"])
+        # The last one: not signed in, nothing loaded - and no sign-in on its own
+        _remove_entry(user, "fabric", BOB)
+        await user.should_see("Not signed in")
+        await _wait_for(lambda: not _options(user, "fabric_workspace"))
+        assert not _element(user, "fabric_account").enabled  # nothing left to choose or remove
+        assert accounts.added == 0 and len(made["fabric"]) == 2
+
+    _simulate(scenario)
+
+
+def test_the_account_cannot_change_during_a_run(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await web_ui._JOB_LOCK.acquire()  # a download or documentation run, in any tab
+        try:
+            await _wait_for(lambda: _any_element(user, "fabric_account_hint").visible)
+            await user.should_see(web_sources.WAIT_FOR_RUN)
+            for marker in ("fabric_account", "fabric_account_add", "fabric_account_tenant"):
+                assert not _element(user, marker).enabled
+            _element(user, "fabric_account").value = ALICE_GUEST.key  # it is refused
+            await user.should_see(f"{web_sources.WAIT_FOR_RUN}.")
+            assert accounts.active == ALICE.key and _value(user, "fabric_account") == ALICE.key
+            _remove_entry(user, "fabric", ALICE_GUEST)  # so is removing (a menu left open)
+            await _wait_for(lambda: user.notify.messages.count(f"{web_sources.WAIT_FOR_RUN}.") == 2)
+            assert not accounts.removed and len(_options(user, "fabric_account")) == 2
+        finally:
+            web_ui._JOB_LOCK.release()
+        await _wait_for(lambda: _element(user, "fabric_account_add").enabled)
+        assert not _any_element(user, "fabric_account_hint").visible
+
+    _simulate(scenario)
+
+
+def test_a_switch_made_in_another_tab_or_on_the_command_line_is_followed(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    _account_clients(monkeypatch)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.2)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Contoso"])
+        accounts.active = ALICE_GUEST.key  # `pbixtractor account use 2`, or another tab
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE_GUEST.key)
+        await user.should_see("Signed in as alice@contoso.com · Fabrikam")
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Fabrikam"])
+
+    _simulate(scenario)
+
+
+def test_the_devops_panel_says_when_a_personal_access_token_is_used(sample, monkeypatch):
+    monkeypatch.setenv("AZURE_DEVOPS_PAT", "token")
+    accounts = FakeAccounts(monkeypatch)  # no account: the token needs none
+    _account_clients(monkeypatch)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "devops")
+        await user.should_see(web_sources.DEVOPS_PAT)
+        await user.should_not_see(marker="devops_account")
+        await _choose(user, "devops_org", "contoso")
+        user.find(marker="devops_load").click()
+        await _wait_for(lambda: _options(user, "devops_project"))
+        assert accounts.added == 0
+        await _choose(user, "source", "fabric")  # Fabric still uses the account
+        await user.should_see("Not signed in")
+        await user.should_see(marker="fabric_account")
+
+    _simulate(scenario)
+
+
+def test_a_service_principal_replaces_the_account_choice(sample, monkeypatch):
+    for name in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"):
+        monkeypatch.setenv(name, "x")
+    accounts = FakeAccounts(monkeypatch)
+    _account_clients(monkeypatch)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await user.should_see(web_sources.SERVICE_PRINCIPAL)
+        await user.should_not_see(marker="fabric_account")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: _options(user, "fabric_workspace"))
+        assert accounts.added == 0  # no browser sign-in
+
+    _simulate(scenario)
+
+
+def test_any_entry_is_removed_with_its_own_icon_without_choosing_it(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, BOB, active=ALICE.key)
+    made = _account_clients(monkeypatch)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Contoso"])
+        await _choose(user, "fabric_workspace", "ws-Contoso", until=lambda: _options(user, "fabric_report"))
+        # Another entry: removed without switching to it, and the lists stay
+        _remove_entry(user, "fabric", BOB)
+        await _wait_for(lambda: BOB.key not in _options(user, "fabric_account"))
+        await user.should_see(f"Removed {BOB.label}")
+        assert accounts.removed == [BOB.key] and accounts.active == ALICE.key
+        assert BOB.key not in _any_element(user, "devops_account").options
+        assert _value(user, "fabric_account") == ALICE.key
+        assert _value(user, "fabric_workspace") == "ws-Contoso" and _options(user, "fabric_report")
+        assert len(made["fabric"]) == 1
+        # The active entry: the next one is active, and the panels reload as after a switch
+        _remove_entry(user, "fabric", ALICE)
+        await user.should_see("Signed in as alice@contoso.com · Fabrikam")
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Fabrikam"])
+        assert _value(user, "fabric_workspace") is None and not _options(user, "fabric_report")
+        assert [client.tenant for client in made["fabric"]] == ["Contoso", "Fabrikam"]
+
+    _simulate(scenario)
+
+
+def test_an_entry_whose_tokens_could_not_be_deleted_is_removed_with_a_warning(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, BOB, active=ALICE.key)
+    accounts.remove_error = (
+        f"Removed {BOB.label}, but could not delete the tokens of bob@fabrikam.com from "
+        "msal_token_cache.bin: locked"
+    )
+
+    async def scenario(user):
+        notes = user.notify = Notifications()
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        _remove_entry(user, "fabric", BOB)
+        await _wait_for(lambda: BOB.key not in _options(user, "fabric_account"))
+        await user.should_see("could not delete the tokens")
+        assert notes.types[accounts.remove_error] == "warning"
+        assert f"Removed {BOB.label}" not in notes.messages  # not shown as a plain success
+        assert accounts.active == ALICE.key
+
+    _simulate(scenario)
+
+
+def test_add_account_signs_in_at_a_typed_tenant_and_warns_when_tenants_are_not_listed(
+    sample, monkeypatch
+):
+    accounts = FakeAccounts(monkeypatch)
+    accounts.listing_warning = (
+        "Could not list the tenants of bob@fabrikam.com (HTTP 403): only the tenant signed in to "
+        "was added or updated - add other tenants by their tenant id or domain"
+    )
+
+    async def scenario(user):
+        notes = user.notify = Notifications()
+        await user.open("/")
+        await _choose(user, "source", "devops")  # the same control as the Fabric panel's
+        await _choose(user, "devops_account_tenant", " fabrikam.onmicrosoft.com ")
+        user.find(marker="devops_account_add").click()
+        await user.should_see("Signed in as bob@fabrikam.com · Fabrikam")
+        assert accounts.tenants == ["fabrikam.onmicrosoft.com"]
+        await user.should_see("Could not list the tenants of bob@fabrikam.com")
+        assert notes.types[accounts.listing_warning] == "warning"
+        assert _value(user, "devops_account_tenant") == ""  # a one-off: cleared after the sign-in
+        # Without a tenant: the user's home tenant
+        accounts.listing_warning = None
+        user.find(marker="devops_account_add").click()
+        await _wait_for(lambda: accounts.added == 2)
+        assert accounts.tenants[-1] is None
+
+    _simulate(scenario)
+
+
+def test_a_sign_in_in_another_tab_disables_the_control_and_refuses_runs(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
+    accounts.browser = threading.Event()
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.1)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        other = User(user.http_client)  # a second tab
+        await other.open("/")
+        await _choose(other, "source", "fabric")
+        user.find(marker="fabric_account_add").click()  # the first tab opens the browser sign-in
+        await _wait_for(accounts.signing.is_set)
+        # The second tab shows it, and can neither switch, add, remove nor run
+        await _wait_for(lambda: _any_element(other, "fabric_account_hint").visible)
+        await other.should_see(web_sources.WAITING_FOR_SIGN_IN)
+        for marker in ("fabric_account", "fabric_account_add", "fabric_account_tenant"):
+            assert not _element(other, marker).enabled
+        await _wait_for(lambda: not _run_button(other).enabled)  # no run starts meanwhile
+        await other.should_see(marker="run_sign_in")
+        other.find("Create documentation").trigger("click")  # the safety net behind it
+        await other.should_see(web_sources.FINISH_SIGN_IN)
+        _remove_entry(other, "fabric", ALICE)
+        await _wait_for(lambda: web_sources.WAITING_FOR_SIGN_IN in other.notify.messages)
+        assert not accounts.removed
+        # The sign-in ends: the second tab follows the new active entry and is usable again
+        accounts.browser.set()
+        await _wait_for(lambda: _value(other, "fabric_account") == BOB.key)
+        await _wait_for(lambda: _element(other, "fabric_account_add").enabled)
+        assert not _any_element(other, "fabric_account_hint").visible
+        await _wait_for(lambda: _run_button(other).enabled)
+        assert not _any_element(other, "run_sign_in").visible
+
+    _simulate(scenario)
+
+
+def test_two_tabs_loading_without_an_account_share_one_sign_in(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch)
+    accounts.browser = threading.Event()
+    made = _account_clients(monkeypatch)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        other = User(user.http_client)  # a second tab
+        await other.open("/")
+        await _choose(other, "source", "fabric")
+        user.find(marker="fabric_load").click()  # the first tab opens the browser sign-in
+        await _wait_for(accounts.signing.is_set)
+        other.find(marker="fabric_load").click()  # the second waits for it
+        await _wait_for(lambda: accounts.ensured == 2)
+        accounts.browser.set()
+        for tab in (user, other):
+            await _wait_for(
+                lambda: _options(tab, "fabric_workspace") == {"ws-Fabrikam": "Fabrikam workspace"}
+            )
+            assert _value(tab, "fabric_account") == BOB.key
+        assert accounts.added == 1  # one browser sign-in for both tabs
+        assert [client.tenant for client in made["fabric"]] == ["Fabrikam", "Fabrikam"]
+
+    _simulate(scenario)
+
+
+def test_a_service_principal_ignores_the_account_list_and_starts_no_timers(sample, monkeypatch):
+    for name in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"):
+        monkeypatch.setenv(name, "x")
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    made = _account_clients(monkeypatch)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Contoso"])
+        await _choose(user, "fabric_workspace", "ws-Contoso", until=lambda: _options(user, "fabric_report"))
+        accounts.active = ALICE_GUEST.key  # another tab or `pbixtractor account use`
+        # The service principal signs in, whatever the account list says: nothing polls it,
+        # nothing reads it, nothing is reloaded
+        assert not _account_timers(user)
+        assert accounts.stamps == 0 and accounts.snapshots == 0
+        assert _value(user, "fabric_workspace") == "ws-Contoso" and _options(user, "fabric_report")
+        assert len(made["fabric"]) == 1
+        assert _run_button(user).enabled
+
+    _simulate(scenario)
+
+
+def test_the_account_list_is_read_again_only_when_it_changed(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        assert _account_timers(user)  # the poll (no service principal)
+        reads, looks = accounts.snapshots, accounts.stamps
+        await _wait_for(lambda: accounts.stamps >= looks + 3)  # it looks at the file every poll,
+        assert accounts.snapshots == reads  # but an unchanged file is not read again
+        accounts.active = ALICE_GUEST.key  # changed: `pbixtractor account use 2`
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE_GUEST.key)
+        assert accounts.snapshots == reads + 1
+        looks = accounts.stamps
+        await _wait_for(lambda: accounts.stamps >= looks + 3)
+        assert accounts.snapshots == reads + 1
+
+    _simulate(scenario)
+
+
+def test_an_unreadable_account_list_changes_nothing_and_actions_show_the_error(
+    sample, monkeypatch
+):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, BOB, active=ALICE.key)
+    made = _account_clients(monkeypatch)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_MAX_SECONDS", 0.2)  # it backs off up to this
+    logged: list[str] = []
+    monkeypatch.setattr(web_sources.logger, "error", lambda message, *a, **k: logged.append(message))
+    damaged = "The account list accounts.json is damaged (not a JSON object) - delete it and sign in again"
+
+    async def scenario(user):
+        notes = user.notify = Notifications()
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Contoso"])
+        await _choose(user, "fabric_workspace", "ws-Contoso", until=lambda: _options(user, "fabric_report"))
+        accounts.unreadable = damaged
+        accounts.active = ALICE_GUEST.key  # changed meanwhile, but it cannot be read
+        reads = accounts.snapshots
+        await _wait_for(lambda: accounts.snapshots >= reads + 3)  # tried again by the poll
+        assert logged == [f"{damaged} (the web UI keeps the accounts it showed)"]  # logged once
+        # No switch, nothing cleared
+        assert _value(user, "fabric_account") == ALICE.key
+        await user.should_see("Signed in as alice@contoso.com · Contoso")
+        assert _value(user, "fabric_workspace") == "ws-Contoso" and _options(user, "fabric_report")
+        assert len(made["fabric"]) == 1
+        # Switching, adding and removing show the error and change nothing
+        _element(user, "fabric_account").value = BOB.key
+        switch_error = f"Could not switch the account: {damaged}"
+        await _wait_for(lambda: switch_error in notes.messages)
+        assert notes.types[switch_error] == "negative"
+        assert _value(user, "fabric_account") == ALICE.key
+        user.find(marker="fabric_account_add").click()
+        await _wait_for(lambda: damaged in notes.messages)
+        assert notes.types[damaged] == "negative"
+        _remove_entry(user, "fabric", BOB)
+        await _wait_for(lambda: notes.messages.count(damaged) == 2)
+        assert notes.types[damaged] == "negative"
+        assert accounts.added == 0 and not accounts.removed and accounts.active == ALICE_GUEST.key
+        assert len(_options(user, "fabric_account")) == 3 and _value(user, "fabric_account") == ALICE.key
+        assert len(logged) == 1
+        # Readable again: the next poll follows it (the switch made meanwhile)
+        accounts.unreadable = None
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE_GUEST.key)
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Fabrikam"])
+
+    _simulate(scenario)
+
+
+def test_a_page_opened_while_the_account_list_cannot_be_read_still_works(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
+    accounts.unreadable = "Cannot read the account list accounts.json: locked"
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+
+    async def scenario(user):
+        await user.open("/")
+        await user.should_see("Create documentation")
+        await _choose(user, "source", "fabric")
+        await user.should_see("Not signed in")
+        accounts.unreadable = None  # it can be read again: the next poll shows the account
+        await _wait_for(
+            lambda: _element(user, "fabric_account_status").text
+            == "Signed in as alice@contoso.com · Contoso"
+        )
+
+    _simulate(scenario)
+
+
+def test_an_unreadable_account_list_backs_off_and_the_poll_never_sleeps(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_MAX_SECONDS", 60.0)
+    monkeypatch.setattr(web_sources.logger, "error", lambda *a, **k: None)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await user.should_see("Signed in as alice@contoso.com · Contoso")
+        accounts.unreadable = "Cannot read the account list accounts.json: locked"
+        accounts.active = ALICE_GUEST.key
+        reads, polls, waits = accounts.snapshots, accounts.polls, len(accounts.waits)
+        await _wait_for(lambda: accounts.polls >= polls + 40, timeout=20)  # 2 s of polls
+        tried = accounts.snapshots - reads
+        # Without the backoff the poll would read every 0.1 s (about 20 times); doubling from
+        # 0.1 s it reads after 0.2, 0.4, 0.8 s...
+        assert 1 <= tried <= 5, tried
+        assert accounts.waits[waits:] == [False] * tried  # one attempt each: never sleeping
+        # A good read resets the backoff: a switch is followed again at once
+        accounts.unreadable = None
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE_GUEST.key, timeout=20)
+        reads = accounts.snapshots
+        accounts.active = ALICE.key
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE.key, timeout=1.5)
+        assert accounts.snapshots == reads + 1 and accounts.waits[-1] is False
+
+    _simulate(scenario)
+
+
+def test_a_change_the_stamp_cannot_see_is_read_within_the_full_read_time(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(web_sources, "ACCOUNT_FULL_READ_SECONDS", 0.6)
+    looks = []
+
+    def same_stamp(stamp):  # replaced, same inode, size and modification time
+        looks.append(stamp)
+        return stamp is None, "the same stamp"
+
+    monkeypatch.setattr(azure_auth, "accounts_changed_since", same_stamp)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await user.should_see("Signed in as alice@contoso.com · Contoso")
+        accounts.active = ALICE_GUEST.key  # `pbixtractor account use 2`: the stamp says nothing
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE_GUEST.key)
+        # The polls in between only looked (the cheap check); a full read now and then
+        assert looks.count("the same stamp") > looks.count(None)
+        assert accounts.waits and all(wait is False for wait in accounts.waits)
+
+    _simulate(scenario)
+
+
+def test_an_unreadable_account_list_is_logged_once_for_all_tabs(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_MAX_SECONDS", 0.2)
+    logged: list[str] = []
+    monkeypatch.setattr(web_sources.logger, "error", lambda message, *a, **k: logged.append(message))
+    locked = "Cannot read the account list accounts.json: locked"
+
+    async def scenario(user):
+        await user.open("/")
+        other = User(user.http_client)  # a second tab
+        await other.open("/")
+        for tab in (user, other):
+            await _choose(tab, "source", "fabric")
+            await tab.should_see("Signed in as alice@contoso.com · Contoso")
+        accounts.unreadable = locked
+        accounts.entries = [ALICE, ALICE_GUEST]  # changed: the tabs read it (and cannot)
+        reads = accounts.snapshots
+        await _wait_for(lambda: accounts.snapshots >= reads + 6)  # both tabs tried, again
+        assert logged == [f"{locked} (the web UI keeps the accounts it showed)"]
+        # A good read anywhere: the same error coming back later is logged again
+        accounts.unreadable = None
+        await _wait_for(lambda: web_sources._logged_read_error == "")
+        accounts.unreadable = locked
+        accounts.entries = [ALICE]
+        await _wait_for(lambda: len(logged) == 2)
+        reads = accounts.snapshots
+        await _wait_for(lambda: accounts.snapshots >= reads + 4)
+        assert len(logged) == 2
+
+    _simulate(scenario)
+
+
+def test_sign_in_and_load_reads_the_account_list_only_when_it_changed(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
+    made = _account_clients(monkeypatch)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        await user.should_see("Signed in as alice@contoso.com · Contoso")
+        reads, looks = accounts.snapshots, accounts.stamps
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Contoso"])
+        assert accounts.stamps > looks  # it looked at the file,
+        assert accounts.snapshots == reads  # but an unchanged one is not read again
+        assert len(made["fabric"]) == 1
+
+    _simulate(scenario)
+
+
+def test_create_documentation_asks_the_account_state_for_a_pending_sign_in(sample, monkeypatch):
+    FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
+    # This tab's own sign-in, as AccountState.pending() sees it - before anything is shown
+    monkeypatch.setattr(web_sources.AccountState, "pending", lambda self: True)
+    monkeypatch.setattr(web_sources.AccountState, "_set", lambda self, blocked, signing_in: None)
+    monkeypatch.setattr(web_sources, "sign_in_pending", lambda: False)
+
+    async def scenario(user):
+        await user.open("/")
+        assert not _run_button(user).enabled
+        await user.should_see(marker="run_sign_in", content=web_sources.WAITING_FOR_SIGN_IN)
+        user.find("Create documentation").trigger("click")
+        await user.should_see(web_sources.FINISH_SIGN_IN)
+
+    _simulate(scenario)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ApiError("Cannot read the account list accounts.json: locked"), PermissionError(13, "Permission denied")],
+    ids=["unreadable", "not-writable"],
+)
+def test_a_failed_switch_puts_the_choice_back_on_the_active_account(sample, monkeypatch, error):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    accounts.use_error = error
+    made = _account_clients(monkeypatch)
+
+    async def scenario(user):
+        notes = user.notify = Notifications()
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Contoso"])
+        await _choose(user, "fabric_account", ALICE_GUEST.key)
+        message = f"Could not switch the account: {error}"
+        await _wait_for(lambda: message in notes.messages)
+        assert notes.types[message] == "negative"
+        # The select (in both panels) and the status are back on the active entry
+        assert _value(user, "fabric_account") == ALICE.key
+        assert _any_element(user, "devops_account").value == ALICE.key
+        await user.should_see("Signed in as alice@contoso.com · Contoso")
+        assert accounts.active == ALICE.key
+        assert list(_options(user, "fabric_workspace")) == ["ws-Contoso"] and len(made["fabric"]) == 1
+
+    _simulate(scenario)
+
+
+def test_sign_in_and_load_during_a_run_does_not_apply_a_switch_made_elsewhere(sample, monkeypatch):
+    accounts = FakeAccounts(monkeypatch, ALICE, ALICE_GUEST, active=ALICE.key)
+    made = _account_clients(monkeypatch)
+    monkeypatch.setattr(web_sources, "ACCOUNT_POLL_SECONDS", 0.2)
+
+    async def scenario(user):
+        await user.open("/")
+        await _choose(user, "source", "fabric")
+        user.find(marker="fabric_load").click()
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Contoso"])
+        await web_ui._JOB_LOCK.acquire()  # a download or documentation run, in any tab
+        try:
+            accounts.active = ALICE_GUEST.key  # `pbixtractor account use 2` during the run
+            reads = accounts.snapshots
+            user.find(marker="fabric_load").click()
+            await _wait_for(lambda: made["loads"] == ["Contoso", "Contoso"])
+            await _wait_for(lambda: not _element(user, "fabric_workspace").props.get("loading"))
+            # Loaded with the client it had; the account list was not even read
+            assert accounts.snapshots == reads and len(made["fabric"]) == 1
+            assert _value(user, "fabric_account") == ALICE.key
+            assert list(_options(user, "fabric_workspace")) == ["ws-Contoso"]
+        finally:
+            web_ui._JOB_LOCK.release()
+        # After the run the switch is followed
+        await _wait_for(lambda: _value(user, "fabric_account") == ALICE_GUEST.key)
+        await _wait_for(lambda: list(_options(user, "fabric_workspace")) == ["ws-Fabrikam"])
+
+    _simulate(scenario)
+
+
+def test_a_pending_sign_in_disables_create_documentation_in_every_tab(sample, monkeypatch):
+    monkeypatch.setenv("AZURE_DEVOPS_PAT", "token")  # the DevOps panel shows no account control
+    accounts = FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
+    monkeypatch.setattr(web_sources, "BUSY_POLL_SECONDS", 0.05)
+
+    async def scenario(user):
+        await user.open("/")  # local files, the default source
+        other = User(user.http_client)  # a second tab, on Azure DevOps with the token
+        await other.open("/")
+        await _choose(other, "source", "devops")
+        await other.should_see(web_sources.DEVOPS_PAT)
+        tabs = (user, other)
+        for tab in tabs:
+            assert _run_button(tab).enabled and not _any_element(tab, "run_sign_in").visible
+        accounts.signing.set()  # a browser sign-in: another tab's, or a run's token
+        for tab in tabs:
+            await _wait_for(lambda: not _run_button(tab).enabled)
+            await tab.should_see(marker="run_sign_in", content=web_sources.WAITING_FOR_SIGN_IN)
+        user.find("Create documentation").trigger("click")  # the safety net behind it
+        await user.should_see(web_sources.FINISH_SIGN_IN)
+        accounts.signing.clear()  # the sign-in ended
+        for tab in tabs:
+            await _wait_for(lambda: _run_button(tab).enabled)
+            assert not _any_element(tab, "run_sign_in").visible
 
     _simulate(scenario)

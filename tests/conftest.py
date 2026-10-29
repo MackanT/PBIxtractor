@@ -9,6 +9,7 @@ import tempfile
 # never wipe the web UI's remembered choices in <repo>/.nicegui.
 os.environ["NICEGUI_STORAGE_PATH"] = tempfile.mkdtemp(prefix="pbixtractor_nicegui_")
 
+import msal  # noqa: E402
 import pytest  # noqa: E402
 
 from pbixtractor import azure_auth  # noqa: E402
@@ -25,13 +26,25 @@ def _local_only_connection(address, *args, **kwargs):
 
 
 @pytest.fixture(autouse=True)
-def no_real_sign_in(monkeypatch):
-    """No real credential, no personal access token and no network beyond 127.0.0.1."""
+def no_real_sign_in(monkeypatch, tmp_path_factory):
+    """No real credential, no personal access token and no network beyond 127.0.0.1. The
+    account list and token cache live in a temp folder (never ~/.pbixtractor or the OS
+    keyring), and no MSAL app or browser sign-in can start (tests pass fake MSAL apps)."""
 
-    def refuse(tenant_id=None):
+    def refuse(*args, **kwargs):
         raise azure_auth.ApiError("Real sign-in is disabled in tests")
+
+    def no_keyring(path):
+        raise RuntimeError("OS-encrypted token storage is disabled in tests")
 
     monkeypatch.setattr(azure_auth, "get_credential", refuse)
     monkeypatch.setattr(azure_auth, "default_credential", refuse)
-    monkeypatch.delenv("AZURE_DEVOPS_PAT", raising=False)
+    monkeypatch.setattr(azure_auth, "AUTH_DIR", tmp_path_factory.mktemp("pbixtractor_auth"))
+    monkeypatch.setattr(azure_auth, "_new_app", refuse)
+    monkeypatch.setattr(azure_auth, "_encrypted_persistence", no_keyring)
+    monkeypatch.setattr(azure_auth, "_browser_login_allowed", True)
+    monkeypatch.setattr(msal.PublicClientApplication, "acquire_token_interactive", refuse)
+    for name in ("AZURE_DEVOPS_PAT", "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET",
+                 "AZURE_CLIENT_CERTIFICATE_PATH"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(socket, "create_connection", _local_only_connection)

@@ -4,6 +4,7 @@
     pbixtractor                          # web UI (NiceGUI) in the browser
     pbixtractor web --port 8081          # same, with options
     pbixtractor extract Sales.pbix       # document a report from the command line
+    pbixtractor account list             # the sign-in accounts for Fabric / Azure DevOps
 """
 
 import argparse
@@ -13,9 +14,15 @@ from typing import Callable, Optional
 
 from . import __version__
 
+TENANT_HELP = "Entra tenant (id or domain) for the active account; default: the active entry's"
+
 EXAMPLES = """
 Examples:
   pbixtractor                                     Start the web UI
+  pbixtractor account add                         Sign in (Microsoft's sign-in page); every
+                                                  tenant of that user becomes an entry
+  pbixtractor account list                        The entries; * = the one in use
+  pbixtractor account use 2                       Switch (number, user or tenant name)
   pbixtractor extract C:/Reports/Sales.pbix       Document a report (model: Sales.bim next to it)
   pbixtractor extract Sales.pbix --model Model.bim -o out/Sales --no-tabular-editor
   pbixtractor extract C:/Reports/Sales.pbip       PBIP project (model.bim or TMDL, found via
@@ -109,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="also add the result to this catalog folder (one searchable catalog.html for many "
         "models; documenting the same model again replaces its entry)",
     )
-    extract.add_argument("--tenant", help="Entra tenant id for the Fabric / DevOps sign-in")
+    extract.add_argument("--tenant", help=TENANT_HELP)
     extract.add_argument(
         "--model",
         type=Path,
@@ -176,7 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--output", type=Path, help="local root (default: output/_devops/<project>/<repo>/<version>)"
     )
     for sub in (fabric_list, fabric_fetch, devops_list, devops_fetch):
-        sub.add_argument("--tenant", help="Entra tenant id for the sign-in")
+        sub.add_argument("--tenant", help=TENANT_HELP)
 
     catalog = commands.add_parser(
         "catalog",
@@ -250,8 +257,34 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_add.add_argument("--no-service-statistics", action="store_true",
                              help="do not read row counts / distinct values from the Power BI service")
     catalog_add.add_argument("--no-log-file", action="store_true", help="do not write logs/*.txt")
-    catalog_add.add_argument("--tenant", help="Entra tenant id for the Fabric / DevOps sign-in")
+    catalog_add.add_argument("--tenant", help=TENANT_HELP)
     catalog_add.add_argument("-q", "--quiet", action="store_true", help="only print the result")
+
+    account = commands.add_parser(
+        "account",
+        help="sign in, list and switch the account used for Fabric and Azure DevOps",
+        description="The Microsoft accounts for Fabric and Azure DevOps. Signing in opens "
+        "Microsoft's sign-in page; every tenant of that user becomes an entry '<user> · "
+        "<tenant>'. One entry is active: the web UI and every command use it.",
+    )
+    account_commands = account.add_subparsers(dest="account_command", required=True)
+    account_commands.add_parser("list", help="the entries; * marks the active one")
+    account_add = account_commands.add_parser(
+        "add", help="sign in (with the account picker) and add that user's tenants"
+    )
+    account_add.add_argument(
+        "--tenant",
+        help="Entra tenant (id or domain) to sign in to and make active (default: the user's "
+        "home tenant)",
+    )
+    for name, text, which in (
+        ("use", "make an entry the active one",
+         "number from 'account list', or (part of) a user / tenant name"),
+        ("remove", "remove an entry (a user's last entry also deletes its tokens)",
+         "number from 'account list', or the exact user / tenant name / tenant id"),
+    ):
+        account_sub = account_commands.add_parser(name, help=text)
+        account_sub.add_argument("account", metavar="N|NAME", help=which)
 
     web = commands.add_parser("web", help="start the web UI (default)")
     web.add_argument("--port", type=int, default=8081, help="port (default: 8081)")
@@ -515,6 +548,78 @@ def run_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_accounts() -> None:
+    """The account entries, numbered, the active one marked, and how the tokens are kept."""
+    from .azure_auth import (
+        AUTH_DIR,
+        TOKEN_CACHE_FILE,
+        account_snapshot,
+        service_principal_configured,
+        token_cache_encrypted,
+    )
+
+    entries, active = account_snapshot()
+    if entries:
+        print("Accounts (* = active):")
+        for number, account in enumerate(entries, 1):
+            mark = "*" if active is not None and account.key == active.key else " "
+            print(f"{mark} {number}. {account.label}")
+        if not token_cache_encrypted():
+            print(f"Tokens stored unencrypted, readable only by your user: {AUTH_DIR / TOKEN_CACHE_FILE}")
+    else:
+        print("No accounts - run `pbixtractor account add`")
+    if service_principal_configured():
+        print("A service principal from the environment (AZURE_CLIENT_ID) is used instead of "
+              "these accounts.")
+
+
+def _add_account(tenant: Optional[str]) -> None:
+    """`account add`: sign in; a tenant-listing problem is printed once as WARNING: ...
+    (not a second time by Python's last-resort log handler)."""
+    import logging
+
+    from . import azure_auth
+
+    printed: set[str] = set()
+
+    def warn(text: str) -> None:
+        printed.add(text)
+        print(f"WARNING: {text}", file=sys.stderr)
+
+    def not_printed(record: logging.LogRecord) -> bool:
+        return record.getMessage() not in printed
+
+    log = logging.getLogger("pbixtractor")
+    log.addFilter(not_printed)
+    try:
+        azure_auth.add_account(tenant, on_warning=warn)
+    finally:
+        log.removeFilter(not_printed)
+
+
+def run_account(args: argparse.Namespace) -> int:
+    """Handle `pbixtractor account list|add|use|remove`. Returns the process exit code."""
+    from . import azure_auth
+
+    try:
+        if args.account_command == "add":
+            print(f"Opening Microsoft's sign-in page in your browser (waiting up to "
+                  f"{azure_auth.LOGIN_TIMEOUT} s)...")
+            _add_account(args.tenant)
+        elif args.account_command == "use":
+            account = azure_auth.use_account(azure_auth.find_account(args.account).key)
+            print(f"Now using {account.label}")
+        elif args.account_command == "remove":
+            account = azure_auth.find_account(args.account, exact=True)
+            azure_auth.remove_account(account.key)
+            print(f"Removed {account.label}")
+        _print_accounts()
+        return 0
+    except (azure_auth.ApiError, ValueError, OSError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+
 def run_extract(args: argparse.Namespace) -> int:
     """Handle `pbixtractor extract`. Returns the process exit code."""
     from .azure_auth import ApiError
@@ -646,6 +751,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(run_devops(args))
     if args.command == "catalog":
         sys.exit(run_catalog(args))
+    if args.command == "account":
+        sys.exit(run_account(args))
 
     from .web_ui import start
 
