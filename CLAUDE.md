@@ -963,7 +963,11 @@ pipeline and CLI on the anonymised sample data.
 - Don't commit anything in `output/` or `Input/` (both gitignored; regression config and
   baselines live there and may contain client data).
 - `tools/` holds developer scripts (not part of the package): regress.py, compare_xlsx.py,
-  compare_models.py.
+  compare_models.py, compare_tabular_editor.py (`MODEL [--tabular-editor PATH] [-o OUT.xlsx]`:
+  the Python BPA + dax_parser dependencies vs Tabular Editor 2's on one .bim / TMDL / .pbix model;
+  prints per-rule and dependency differences, writes compare_tabular_editor.xlsx with sheets
+  summary, bpa differences, dependency differences, object types; exit 2 = no TE or model, 1 = TE
+  failed. Python side gets no statistics, so statistics rules are "not checked" there).
 
 ## Branches
 - `main`: legacy single-file `PB-Ixtractor.py` (has working button/bookmark logic).
