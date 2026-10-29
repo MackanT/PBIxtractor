@@ -22,8 +22,9 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
   - Tabular Editor analysis (default on; `--no-tabular-editor`): Best Practice Analyzer (a `-S`
     script calling the Analyzer, not `-A`), exact DAX dependencies (`-S` script using
     `DependsOn`) and live statistics — all local/offline.
-  - TSV export (default off; `--tabular-editor-tsv`): old `documentation.tsv` export; runs FormatDax, which
-    sends DAX to daxformatter.com.
+  - TSV export (default off; `--tabular-editor-tsv`): TE writes `documentation.tsv` itself (and the
+    dataset is read from it); runs FormatDax, which sends DAX to daxformatter.com. Without it the
+    same file is written offline by semantic_model.write_documentation_tsv() (DAX unformatted).
 - sqlglot (native SQL in partitions), msal + msal-extensions (Fabric / DevOps browser sign-in,
   account list, token cache), azure-identity (only EnvironmentCredential: a service principal)
 
@@ -52,7 +53,9 @@ TMDL `definition/`. A live-connected .pbix (no model inside) gets its published 
 Fabric (pbix_model.live_connection → fabric.fetch_connected_model; sign-in, Contributor on the
 model). `extract` exits 2
 when there is none. The model is read from the `.bim` / TMDL on every run; a
-`documentation.tsv` is only used with `--tabular-editor-tsv` (ExtractionOptions.tabular_editor_tsv).
+`documentation.tsv` is written on every run (TE2 ExportProperties format, DAX as in the model);
+`--tabular-editor-tsv` (ExtractionOptions.tabular_editor_tsv) only changes who writes it: Tabular
+Editor, with FormatDax'ed DAX, and then the dataset is read from that file.
 Real test reports are local only (never commit; this PC's list: `CLAUDE.local.md`; on another
 machine, list its reports in `Input/regression.json`, see "Refactoring safety net").
 Tabular Editor 2 is usually installed at `C:\Program Files (x86)\Tabular Editor\`
@@ -102,7 +105,8 @@ src/pbixtractor/
   pipeline.py       The orchestration, no globals: run_extraction(ExtractionOptions,
                     progress(step, fraction), on_log(level, msg)) → ExtractionResult(status
                     success|warnings|error, message, files {workbook, data_workbook, json,
-                    lineage, graph[, tsv, log]}, logs, documentation, report_json, seconds).
+                    lineage, graph, tsv[, model, log]}, logs, documentation, report_json,
+                    seconds). tsv = <out>/documentation.tsv on every run (write failure → warning).
                     Steps: model → TE analysis (BPA, deps, live stats) → dataset →
                     ReportExtractor → build_documentation → graph → workbooks → JSON + lineage.
                     One run at a time (_RUN_LOCK: shared logger/TE/Excel); any captured log
@@ -567,7 +571,12 @@ src/pbixtractor/
                     measures, hierarchies+levels, partitions incl. Direct Lake entity, relationships
                     with cardinality/direction/active, shared expressions, roles/RLS).
                     model_to_dataset() → DataFrame identical to TE's TSV (verified on a real model:
-                    all 459 objects match; only DAX whitespace differs). structurally_used_columns():
+                    all 459 objects match; only DAX whitespace differs; levels follow each
+                    hierarchy - the workbooks read that order). write_documentation_tsv(model,
+                    path) → documentation.tsv exactly like TE2 ExportProperties + SaveFile (header
+                    Object+properties, \n-joined, no trailing newline, \n/\r/tab escaped, empty
+                    cells, no quoting, UTF-8 no BOM; documentation_tsv_rows() = TE's order: all
+                    hierarchies, then all levels). structurally_used_columns():
                     relationship keys, sort-by and hierarchy-level columns. Hierarchy levels are
                     sorted by `ordinal` (the .bim array order is not the level order).
   tmdl.py           TMDL folder → TMSL dict (same shape as a .bim) → parse_model(), so
@@ -673,8 +682,8 @@ src/pbixtractor/
    column, sometimes level). documentation.resolve_hierarchy_columns() maps level → column
    from the model (level "Year" → column "Year Number").
 3. `run_extraction()` always reads the model with `read_model(model_path)`. The measures/columns
-   dataset comes from `model_to_dataset(model)`, or from `documentation.tsv` when
-   `USE_TABULAR_EDITOR` (columns: Object, Name, Description, SourceColumn, Expression,
+   dataset comes from `model_to_dataset(model)` (and is written as `documentation.tsv`), or from
+   Tabular Editor's `documentation.tsv` with `--tabular-editor-tsv` (columns: Object, Name, Description, SourceColumn, Expression,
    FormatString, DataType, DisplayFolder; Object names `Model.T.<Table>`, `.C.<Col>`, `.M.`,
    `.H.`, `.P.`, `Relationship.<guid>`). Relationships (sheet columns Type, Child, Direction,
    Parent, Child Column, Parent Column, Cardinality, Active) and the table list always come

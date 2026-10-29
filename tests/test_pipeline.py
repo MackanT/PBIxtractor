@@ -61,6 +61,8 @@ def test_run_extraction(sample):
     assert set(result.files) >= {"workbook", "data_workbook", "json", "lineage", "graph"}
     assert all(path.is_file() for path in result.files.values())
     assert result.files["workbook"].name == "Sample.xlsx"
+    assert result.files["tsv"] == sample / "out" / "documentation.tsv"
+    assert result.files["tsv"].read_text(encoding="utf-8").startswith("Object\tName\t")
     assert result.report_json["report"]["name"] == "Sample"
     assert result.report_json["quality"] is None  # BPA not run
     assert steps == sorted(steps) and steps[-1] == 1.0

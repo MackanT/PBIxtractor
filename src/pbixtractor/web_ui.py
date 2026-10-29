@@ -76,7 +76,7 @@ FILE_LABELS = {
     "json": ("JSON", "data_object"),
     "graph": ("Relationship graph", "hub"),
     "model": ("Model (.bim)", "schema"),  # generated from the model inside a .pbix
-    "tsv": ("Tabular Editor TSV", "description"),
+    "tsv": ("documentation.tsv", "description"),
     "log": ("Log file", "article"),
 }
 

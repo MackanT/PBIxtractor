@@ -551,3 +551,60 @@ def model_to_dataset(model: SemanticModel) -> pd.DataFrame:
     dataset = pd.DataFrame(rows, columns=DATASET_COLUMNS)
     # Match pd.read_csv on the TSV: empty cells are NaN
     return dataset.replace("", float("nan"))
+
+
+def _tsv_value(value) -> str:
+    """One TSV cell as Tabular Editor writes it: empty when missing, line breaks/tabs escaped."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    return str(value).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
+def documentation_tsv_rows(model: SemanticModel) -> pd.DataFrame:
+    """
+    model_to_dataset() in Tabular Editor's export order (all hierarchies, then all levels).
+
+    model_to_dataset() puts each hierarchy's levels right after it (the workbooks read that
+    order); Tabular Editor's script exports all hierarchies first and then all levels.
+
+    Args:
+        model: Model from read_model()
+
+    Returns:
+        DataFrame with DATASET_COLUMNS, rows in the documentation.tsv order
+    """
+    dataset = model_to_dataset(model)
+    start = len(model.tables) + len(model.all_columns)
+    hierarchies, levels = [], []
+    position = start
+    for hierarchy in model.all_hierarchies:
+        hierarchies.append(position)
+        levels.extend(range(position + 1, position + 1 + len(hierarchy.levels)))
+        position += 1 + len(hierarchy.levels)
+    order = [*range(start), *hierarchies, *levels, *range(position, len(dataset))]
+    return dataset.iloc[order].reset_index(drop=True)
+
+
+def write_documentation_tsv(model: SemanticModel, path: Path | str) -> Path:
+    """
+    Write documentation.tsv exactly as Tabular Editor 2's ExportProperties + SaveFile does.
+
+    Header Object + DATASET_COLUMNS' properties, tab-separated; rows joined by "\\n" with no
+    trailing newline; line breaks and tabs inside a value written as \\n, \\r and \\t; missing
+    values empty, nothing quoted; UTF-8 without a BOM. The DAX is as it is in the model (Tabular
+    Editor's export runs FormatDax, which calls daxformatter.com).
+
+    Args:
+        model: Model from read_model()
+        path: File to write
+
+    Returns:
+        The written path
+    """
+    path = Path(path)
+    dataset = documentation_tsv_rows(model)
+    lines = ["\t".join(DATASET_COLUMNS)]
+    for row in dataset.itertuples(index=False):
+        lines.append("\t".join(_tsv_value(value) for value in row))
+    path.write_bytes("\n".join(lines).encode("utf-8"))
+    return path
