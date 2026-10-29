@@ -21,6 +21,7 @@ import pandas as pd
 from .azure_auth import ApiError
 from .catalog import add_to_catalog
 from .constants import DESCRIPT_TAG
+from .dax_parser import model_dependencies
 from .documentation import Documentation, build_documentation
 from .excel_report import write_data_workbook, write_main_workbook
 from .json_report import documentation_to_dict, write_json_data
@@ -42,8 +43,6 @@ from .report_extractor import (
 from .semantic_model import model_source, model_to_dataset, parse_model, read_model
 from .service_stats import ServiceModel, read_service_statistics, service_model_for_report
 from .tabular_editor import (
-    drop_redundant_table_refs,
-    export_dependencies,
     export_documentation_tsv,
     find_tabular_editor,
     run_best_practice_analyzer,
@@ -67,7 +66,7 @@ class ExtractionOptions:
     output_dir: Path  # all output files go here
     name: str = ""  # base name of the output files (default: report file name)
     description_tag: str = DESCRIPT_TAG  # delimiter of descriptions embedded in DAX
-    tabular_editor_analysis: bool = True  # BPA, exact dependencies, live statistics
+    tabular_editor_analysis: bool = True  # BPA, live statistics
     tabular_editor_tsv: bool = False  # use TE's TSV export (formats DAX via daxformatter.com)
     write_log_file: bool = True  # save warnings to <output_dir>/logs/
     # Model mode: more reports on the same model, documented together with report_path (pages
@@ -172,18 +171,34 @@ def find_model_for_report(report_path: str | Path) -> Optional[Path]:
     return None
 
 
-def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, progress):
+def _dax_dependencies(model, progress):
     """
-    Optional, local Tabular Editor analysis: Best Practice Analyzer and exact DAX dependencies on
-    the model (source: .bim file or TMDL folder, both loaded by Tabular Editor 2), plus live
-    statistics if the report is open in Power BI Desktop.
+    Exact DAX dependencies from the Python analysis (dax_parser), on every run.
 
     Returns:
-        (bpa_violations, exact_dependencies, live_statistics); each None when unavailable
+        The dependencies, or None (text matching) if the analysis crashed - a bug, logged as
+        a warning, never a failed run
     """
-    bpa_violations = exact_dependencies = live_statistics = None
+    progress("Exact DAX dependencies", 0.15)
+    try:
+        return model_dependencies(model)
+    except Exception as e:  # a bug in the analysis must not fail the run
+        logger.warning(f"DAX dependency analysis failed, using DAX text matching: {e!r}")
+        return None
+
+
+def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, progress):
+    """
+    Optional, local Tabular Editor analysis: Best Practice Analyzer on the model (source: .bim
+    file or TMDL folder, both loaded by Tabular Editor 2), plus live statistics if the report is
+    open in Power BI Desktop.
+
+    Returns:
+        (bpa_violations, live_statistics); each None when unavailable
+    """
+    bpa_violations = live_statistics = None
     if not options.tabular_editor_analysis:
-        return bpa_violations, exact_dependencies, live_statistics
+        return bpa_violations, live_statistics
 
     tabular_editor = find_tabular_editor()
     if tabular_editor is None:
@@ -191,7 +206,7 @@ def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, pr
             "Tabular Editor analysis skipped: Tabular Editor 2 not found. Add its folder to "
             "Input/TabularEditorLocations.txt or disable the Tabular Editor analysis."
         )
-        return bpa_violations, exact_dependencies, live_statistics
+        return bpa_violations, live_statistics
 
     progress("Best Practice Analyzer", 0.2)
     try:
@@ -203,14 +218,6 @@ def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, pr
             )
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
         logger.warning(f"Best Practice Analyzer failed: {e}")
-
-    progress("Exact DAX dependencies", 0.35)
-    try:
-        exact_dependencies = drop_redundant_table_refs(
-            export_dependencies(tabular_editor, source)
-        )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"Exact dependency export failed, using DAX text matching: {e}")
 
     progress("Live statistics (Power BI Desktop)", 0.45)
     try:
@@ -227,7 +234,7 @@ def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, pr
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
         logger.warning(f"Reading live statistics from Power BI Desktop failed: {e}")
 
-    return bpa_violations, exact_dependencies, live_statistics
+    return bpa_violations, live_statistics
 
 
 def _service_statistics(model, options: ExtractionOptions, progress):
@@ -343,9 +350,8 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
     except (OSError, ValueError) as e:
         return ExtractionResult("error", f"Could not read the model {options.model_path}: {e}")
 
-    bpa_violations, exact_dependencies, live_statistics = _tabular_editor_analysis(
-        model, source, options, progress
-    )
+    exact_dependencies = _dax_dependencies(model, progress)
+    bpa_violations, live_statistics = _tabular_editor_analysis(model, source, options, progress)
     service_statistics = _service_statistics(model, options, progress)
     if service_statistics is not None:
         # The model as published wins: a downloaded report is never open in Desktop by its

@@ -20,8 +20,8 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
 - pydantic for row models (the jsonpath-ng dependency was removed 2026-09-30: nothing used it)
 - Optional: Tabular Editor 2 CLI (Windows-only, ≥2.29), called via `subprocess`:
   - Tabular Editor analysis (default on; `--no-tabular-editor`): Best Practice Analyzer (a `-S`
-    script calling the Analyzer, not `-A`), exact DAX dependencies (`-S` script using
-    `DependsOn`) and live statistics — all local/offline.
+    script calling the Analyzer, not `-A`) and live statistics — all local/offline. Exact DAX
+    dependencies come from dax_parser.py (Python) on every run since 2026-10-29.
   - TSV export (default off; `--tabular-editor-tsv`): old `documentation.tsv` export; runs FormatDax, which
     sends DAX to daxformatter.com.
 - sqlglot (native SQL in partitions), azure-identity (Fabric / DevOps sign-in)
@@ -94,7 +94,9 @@ src/pbixtractor/
                     progress(step, fraction), on_log(level, msg)) → ExtractionResult(status
                     success|warnings|error, message, files {workbook, data_workbook, json,
                     lineage, graph[, tsv, log]}, logs, documentation, report_json, seconds).
-                    Steps: model → TE analysis (BPA, deps, live stats) → dataset →
+                    Steps: model → exact DAX dependencies (dax_parser.model_dependencies,
+                    always; a crash = a bug → warning + None = text matching) → TE analysis
+                    (BPA, live stats) → dataset →
                     ReportExtractor → build_documentation → graph → workbooks → JSON + lineage.
                     One run at a time (_RUN_LOCK: shared logger/TE/Excel); any captured log
                     record → "warnings" (+ logs/log_data_<date>_<time>.txt, never overwritten).
@@ -220,8 +222,23 @@ src/pbixtractor/
                     ReportDefinition (ReportExtractor.report) for page/bookmark details.
                     Also parse_tsv_object_name,
                     button_target_and_label, field_description.
-  dax.py            find_functions/find_measures/find_columns, text_dependencies() (fallback
-                    when no exact deps), highlight_dax() → rich-text segments.
+  dax.py            find_functions/find_measures/find_columns, text_dependencies() (only
+                    used when the dax_parser analysis crashed: exact deps None), highlight_dax()
+                    → rich-text segments.
+  dax_parser.py     tokenize(dax) → [Token(kind, text, position)], lossless ("".join(texts) ==
+                    input; the formatter relies on it), never raises: whitespace, comment (//,
+                    --, /* */; unclosed → end), string ("" escape), quoted_name ('' escape),
+                    bracket_name (]] escape), number, identifier (dotted function names such as
+                    PERCENTILE.INC are one token), operator, punctuation, unknown; Token.name
+                    unquotes. model_dependencies(model) → tabular_editor.Dependency rows like
+                    TE's DependsOn: sources measures (+ dynamic format string), calculated
+                    columns, calculated tables, RLS TablePermission (name = role), calculation
+                    items; case-insensitive: T[X] → column, else measure of T (unknown T:
+                    nothing); [X] → any measure, else (calc column / RLS row context) a column of
+                    its own table, else nothing; bare table name (not before "(" or "[") →
+                    Table, unless a VAR of that name is in scope (to the end of its RETURN
+                    block); "RETURN [X]" is no qualified ref. Comments/strings never count.
+                    Targets once per source; drop_redundant_table_refs applied.
   excel_report.py   create_formats(), write_main_workbook(), write_data_workbook(); shared
                     helpers per sheet type (_write_relations, _write_objects, _write_page_sheet,
                     _write_pages_sheet, _write_dependencies_sheet). _Workbook/_Worksheet: text
@@ -429,7 +446,9 @@ src/pbixtractor/
                     data/BPARules.json (Microsoft, MIT, see BPARules.LICENSE). Do NOT use the
                     "-A" console output: it is truncated unpredictably (112 of 125 findings).
                     export_dependencies() runs a C# script (DependsOn) →
-                    Dependency rows (measures, calc columns/tables, RLS TablePermission);
+                    Dependency rows (measures, calc columns/tables, RLS TablePermission); no
+                    longer used by the pipeline (dax_parser instead), kept for the comparison
+                    tool (python-analysis ticket 07);
                     drop_redundant_table_refs() removes 'T' when T[col] is also referenced.
                     export_documentation_tsv() = the old TabularScript.cs TSV export.
   live_model.py     find_local_instances() (psutil: msmdsrv listening port + parent
@@ -518,9 +537,10 @@ src/pbixtractor/
    `.H.`, `.P.`, `Relationship.<guid>`). Relationships (sheet columns Type, Child, Direction,
    Parent, Child Column, Parent Column, Cardinality, Active) and the table list always come
    from the model. Unused detection first drops `structurally_used_columns()`, then (with
-   exact dependencies) everything any DAX references by (table, name); without Tabular Editor
-   it falls back to DAX text matching of measures and calculated columns (misses unqualified
-   refs, matches text in comments). Measures stay "unused" unless a visual, filter or other DAX
+   exact dependencies, from dax_parser.model_dependencies() on every run) everything any DAX
+   references by (table, name); only if that analysis crashes it falls back to DAX text
+   matching of measures and calculated columns (misses unqualified refs, matches text in
+   comments). Measures stay "unused" unless a visual, filter or other DAX
    uses them — listed separately as "Measures not used in this report".
    The TSV path garbles format strings starting with `"` (CSV quoting) — the .bim path doesn't.
 4. Writes `<name>.xlsx` (Common + one tab per report page, also empty pages + Pages + model

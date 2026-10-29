@@ -66,6 +66,24 @@ def test_run_extraction(sample):
     assert steps == sorted(steps) and steps[-1] == 1.0
     if result.status == "warnings":
         assert result.logs and "log" in result.files
+    # Exact dependencies from the Python DAX analysis, also without Tabular Editor
+    assert result.report_json["dependencies_exact"] is True
+    assert result.documentation.depends_on("Sales", "Dynamic") == ["Sales[Total Amount]"]
+    assert result.documentation.depends_on("Sales", "Is Big") == ["Sales[Amount]"]
+
+
+def test_a_crash_in_the_dax_analysis_falls_back_to_text_matching(sample, monkeypatch):
+    def broken(model):
+        raise ValueError("bug")
+
+    monkeypatch.setattr("pbixtractor.pipeline.model_dependencies", broken)
+    result = run_extraction(ExtractionOptions(
+        report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+        output_dir=sample / "out", tabular_editor_analysis=False, write_log_file=False,
+    ))
+    assert result.status == "warnings", result.message
+    assert "DAX dependency analysis failed" in result.logs
+    assert result.report_json["dependencies_exact"] is False
 
 
 def _detail_report(folder):
