@@ -242,7 +242,8 @@ def test_workbooks_end_to_end(tmp_path):
     with zipfile.ZipFile(output / "Sample.xlsx") as main:
         main_strings = main.read("xl/sharedStrings.xml").decode()
     assert "Model quality" in main_strings  # the column on the common/model sheets
-    assert "Rules not checked" in main_strings and "DAX rule (ticket 04)" in main_strings
+    assert "Rules not checked" in main_strings and "needs statistics" in main_strings
+    assert "DAX rule (ticket 04)" not in main_strings
     assert "Depends On" in main_strings and "Dependants" not in main_strings
     assert "Calculated Column" in main_strings  # calculated columns are listed with their DAX
     assert "(no visuals, buttons or page filters on this page)" in main_strings

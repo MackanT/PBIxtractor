@@ -19,7 +19,7 @@ from typing import Callable, Optional
 import pandas as pd
 
 from .azure_auth import ApiError
-from .bpa import BpaFindings, run_bpa
+from .bpa import run_bpa
 from .catalog import add_to_catalog
 from .constants import DESCRIPT_TAG
 from .dax_parser import model_dependencies
@@ -203,7 +203,8 @@ def _live_statistics(model, options: ExtractionOptions, progress):
 
     tabular_editor = find_tabular_editor()
     if tabular_editor is None:
-        logger.warning(
+        # A note in the run log, not a warning: the normal case on Linux and without Desktop
+        logger.info(
             "Live statistics from Power BI Desktop skipped: Tabular Editor 2 not found. Add its "
             "folder to Input/TabularEditorLocations.txt or disable the Tabular Editor analysis."
         )
@@ -227,26 +228,26 @@ def _live_statistics(model, options: ExtractionOptions, progress):
     return live_statistics
 
 
-def _best_practice_analyzer(model, statistics, progress) -> Optional[BpaFindings]:
+def _best_practice_analyzer(model, statistics, progress) -> tuple[Optional[list], list]:
     """
     The Python Best Practice Analyzer (bpa.py) on every run, with or without Tabular Editor.
 
     Returns:
-        The findings (with .not_checked), or None when the analysis itself crashed (a bug:
-        logged as a warning, never a failed run)
+        (violations, [(rule ID, reason)] for the rules not checked); violations is None when
+        the analysis itself crashed (a bug: logged as a warning, never a failed run)
     """
     progress("Best Practice Analyzer", 0.48)
     try:
         violations, not_checked = run_bpa(model, statistics)
     except Exception as e:  # a bug in the engine must not fail the run
         logger.warning(f"Best Practice Analyzer failed: {e!r}")
-        return None
+        return None, []
     if not_checked:
         logger.debug(
             f"{len(not_checked)} Best Practice Analyzer rule(s) not checked: "
             + "; ".join(f"{rule} ({reason})" for rule, reason in not_checked)
         )
-    return BpaFindings(violations, not_checked)
+    return violations, not_checked
 
 
 def _service_statistics(model, options: ExtractionOptions, progress):
@@ -288,11 +289,19 @@ def run_extraction(
         on_log: Called with (level name, message) for every log record of this run
 
     Returns:
-        ExtractionResult; status "warnings" when anything was logged (see result.logs)
+        ExtractionResult; status "warnings" when a warning or error was logged (see result.logs,
+            which also holds INFO notes)
     """
     progress = progress or (lambda step, fraction: None)
     started = time.monotonic()
-    with _RUN_LOCK, capture_logs(callback=on_log) as capture:
+    levels: list[str] = []
+
+    def forward(level: str, message: str) -> None:
+        levels.append(level)
+        if on_log is not None:
+            on_log(level, message)
+
+    with _RUN_LOCK, capture_logs(callback=forward) as capture:
         try:
             result = _run(options, progress)
         except ReportReadError as e:  # expected and explained, e.g. an encrypted .pbix
@@ -303,7 +312,8 @@ def run_extraction(
             result = ExtractionResult("error", f"Extraction failed: {e}")
         result.logs = capture.get_logs()
 
-    if result.ok and result.logs:
+    # INFO notes stay in result.logs only; a warning or worse makes the run "warnings"
+    if result.ok and any(level not in ("DEBUG", "INFO") for level in levels):
         result.status = "warnings"
         if options.write_log_file:
             log_dir = options.output_dir / "logs"
@@ -383,7 +393,7 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
                 (measure.table, measure.name), measure.data_type
             )
 
-    bpa_violations = _best_practice_analyzer(model, live_statistics, progress)
+    bpa_violations, bpa_not_checked = _best_practice_analyzer(model, live_statistics, progress)
 
     if options.tabular_editor_tsv:
         progress("Tabular Editor TSV export", 0.5)
@@ -395,7 +405,8 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         files["tsv"] = tsv_path
     else:
         dataset = model_to_dataset(model)
-        # Always left in the output folder, as the old program did (DAX as in the model)
+        # Always left in the output folder, as the old program did (measures and calculated
+        # columns with formatted DAX)
         try:
             files["tsv"] = write_documentation_tsv(model, out / "documentation.tsv")
         except OSError as e:
@@ -429,7 +440,7 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         bpa_violations=bpa_violations,
         live_statistics=live_statistics,
         report=report_definition,
-        bpa_not_checked=bpa_violations.not_checked if bpa_violations is not None else None,
+        bpa_not_checked=bpa_not_checked,
     )
 
     # 4. Output

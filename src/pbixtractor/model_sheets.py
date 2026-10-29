@@ -365,11 +365,9 @@ def add_bpa_sheets(
         violations: Findings from bpa.run_bpa()
         header_format: xlsxwriter format for header cells
         sheet_name: Callable returning a valid, unique sheet name
-        not_checked: [(rule ID, reason)]; None: taken from violations.not_checked when the
-            violations are a bpa.BpaFindings
+        not_checked: [(rule ID, reason)] from bpa.run_bpa() (Documentation.bpa_not_checked)
     """
-    if not_checked is None:
-        not_checked = getattr(violations, "not_checked", [])
+    not_checked = not_checked or []
     summary = workbook.add_worksheet(sheet_name("model quality summary"))
     summary_rows = bpa_summary_rows(violations)
     _write_table(

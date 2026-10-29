@@ -70,7 +70,7 @@ def test_run_extraction(sample):
         q["rule"] == "[Error Prevention] Relationship columns should be of the same data type"
         for q in quality
     )
-    assert result.documentation.bpa_not_checked  # the DAX rules (ticket 04)
+    assert result.documentation.bpa_not_checked  # the rules needing statistics
     assert steps == sorted(steps) and steps[-1] == 1.0
     if result.status == "warnings":
         assert result.logs and "log" in result.files

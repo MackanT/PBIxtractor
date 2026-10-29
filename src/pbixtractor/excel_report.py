@@ -524,7 +524,13 @@ def write_main_workbook(
         bpa=quality,
     )
     if documentation.bpa_violations is not None:
-        add_bpa_sheets(workbook, documentation.bpa_violations, formats["bi"], sheet_name)
+        add_bpa_sheets(
+            workbook,
+            documentation.bpa_violations,
+            formats["bi"],
+            sheet_name,
+            not_checked=documentation.bpa_not_checked,
+        )
 
     workbook.close()
 
@@ -581,7 +587,12 @@ def write_data_workbook(
         workbook, documentation.model, formats["bi"], stats=documentation.live_statistics
     )
     if documentation.bpa_violations is not None:
-        add_bpa_sheets(workbook, documentation.bpa_violations, formats["bi"])
+        add_bpa_sheets(
+            workbook,
+            documentation.bpa_violations,
+            formats["bi"],
+            not_checked=documentation.bpa_not_checked,
+        )
 
     workbook.close()
 

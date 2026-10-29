@@ -8,24 +8,28 @@ column read them unchanged.
 
     violations, not_checked = run_bpa(model, statistics)
 
-A rule without a check here (the DAX rules: ticket 04), or one that needs statistics the run does
-not have, is returned in not_checked with the reason - "not checked" is never "passed".
+Every rule of the bundled file has a check here. The DAX rules use the Python DAX tokenizer and
+dax_parser.model_dependencies (Tabular Editor's DependsOn / ReferencedBy); their regexes run on the
+expression text as in Tabular Editor. A rule without a check (one from another rules file), or one
+that needs statistics the run does not have, is returned in not_checked with the reason - "not
+checked" is never "passed".
 """
 
 import json
 import logging
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from .dax_parser import model_dependencies, model_index, reference_occurrences
 from .live_model import LiveStatistics
-from .semantic_model import DATA_TYPES, Column, Relationship, SemanticModel, Table
+from .semantic_model import DATA_TYPES, Column, Measure, Relationship, SemanticModel, Table
 from .tabular_editor import DEFAULT_BPA_RULES, SEVERITIES, BpaViolation
 
 __all__ = [
-    "BpaFindings",
     "BpaRule",
     "BpaViolation",
     "DEFAULT_BPA_RULES",
@@ -39,12 +43,10 @@ logger = logging.getLogger("pbixtractor")
 IGNORE_ANNOTATION = "BestPracticeAnalyzer_IgnoreRules"
 
 # Reasons for a rule in not_checked
-DAX_RULE = "DAX rule (ticket 04)"
 NEEDS_STATISTICS = "needs statistics"
 NOT_OFFLINE = "not supported offline"
 
-# Rules that inspect DAX (Expression, Tokenize, DependsOn, ReferencedBy or a regex on DAX):
-# ported in ticket 04
+# Rules that inspect DAX (Expression, Tokenize, DependsOn, ReferencedBy or a regex on DAX)
 DAX_RULES = {
     "REDUCE_USAGE_OF_CALCULATED_COLUMNS_THAT_USE_THE_RELATED_FUNCTION",
     "LIMIT_ROW_LEVEL_SECURITY_(RLS)_LOGIC",
@@ -125,19 +127,6 @@ def rule_by_id(rule_id: str, rules_path: Path = DEFAULT_BPA_RULES) -> Optional[B
     return next((rule for rule in load_rules(rules_path) if rule.id == rule_id), None)
 
 
-class BpaFindings(list):
-    """
-    BPA violations (a plain list of BpaViolation) that also carry the rules not checked.
-
-    The workbook writers receive only the violations; the model quality summary sheet reads
-    not_checked from here so "missing" never reads as "passed".
-    """
-
-    def __init__(self, violations=(), not_checked: Optional[list[tuple[str, str]]] = None):
-        super().__init__(violations)
-        self.not_checked: list[tuple[str, str]] = list(not_checked or [])
-
-
 # ============================================================================
 # Objects in the model, per rule scope
 # ============================================================================
@@ -153,6 +142,15 @@ class BpaObject:
     item: Any  # the semantic_model object (or the model)
     annotations: dict[str, str] = field(default_factory=dict)
     table: Optional[Table] = None  # the table it belongs to (columns, measures, ...)
+
+
+@dataclass
+class TablePermission:
+    """One role's RLS filter on one table (Tabular Editor's TablePermission)."""
+
+    role: str
+    table: str
+    expression: str
 
 
 def dax_object_name(table: str, name: str) -> str:
@@ -231,6 +229,14 @@ def iter_objects(model: SemanticModel) -> Iterator[BpaObject]:
         yield BpaObject("Perspective", "Perspective", perspective, perspective)
     for role in model.roles:
         yield BpaObject("ModelRole", "Role", role.name, role, role.annotations)
+    for role in model.roles:
+        for table_name, dax in role.table_filters.items():
+            # Named like Tabular Editor's TablePermission.Name (the table): a best guess
+            permission = TablePermission(role.name, table_name, dax)
+            table = next((t for t in model.tables if t.name == table_name), None)
+            yield BpaObject(
+                "TablePermission", "Table Permission", table_name, permission, {}, table
+            )
     for source in model.data_sources:
         if source.type.lower() == "structured":
             yield BpaObject("StructuredDataSource", "Structured Data Source", source.name, source)
@@ -297,6 +303,44 @@ class _Context:
         for role in model.roles:
             for table, dax in role.table_filters.items():
                 self.rls.setdefault(table, []).append(dax)
+
+        self._dependencies = None
+        self._index = None
+
+    # DAX (ticket 04): Tabular Editor's DependsOn / ReferencedBy from dax_parser
+
+    @property
+    def index(self):
+        """The model's case-insensitive name lookup (dax_parser.model_index)."""
+        if self._index is None:
+            self._index = model_index(self.model)
+        return self._index
+
+    @property
+    def referenced_by(self) -> dict[tuple[str, str, str], set[tuple[str, str, str]]]:
+        """(target type, table, name) -> {(source type, table, name)}: ReferencedBy."""
+        if self._dependencies is None:
+            self._dependencies = {}
+            for dep in model_dependencies(self.model):
+                target = (dep.target_type, dep.target_table, dep.target_name)
+                source = (dep.source_type, dep.source_table, dep.source_name)
+                self._dependencies.setdefault(target, set()).add(source)
+        return self._dependencies
+
+    def referenced(self, object_type: str, table: str, name: str) -> bool:
+        """ReferencedBy.Count > 0."""
+        return bool(self.referenced_by.get((object_type, table, name)))
+
+    def measures_referencing(self, object_type: str, table: str, name: str) -> list[Measure]:
+        """ReferencedBy.AllMeasures: measures referencing the object, directly or indirectly."""
+        seen: set[tuple[str, str, str]] = set()
+        todo = [(object_type, table, name)]
+        while todo:
+            for source in self.referenced_by.get(todo.pop(), ()):
+                if source not in seen and source[0] in ("Measure", "Column", "Table"):
+                    seen.add(source)
+                    todo.append(source)
+        return [m for m in self.model.all_measures if ("Measure", m.table, m.name) in seen]
 
     def hidden(self, column: Column) -> bool:
         """IsHidden or Table.IsHidden."""
@@ -909,6 +953,301 @@ def _integer_format(ctx, obj):
     return "$" not in text and "%" not in text and text not in ("#,0", "#,0.0")
 
 
+# --- DAX -----------------------------------------------------------------------------------
+# Regexes run on the expression text, comments and strings included, as Tabular Editor's
+# RegEx.IsMatch(Expression, ...) does; references (DependsOn / ReferencedBy) come from
+# dax_parser and never count code in comments or strings. Names Tabular Editor pastes into a
+# regex are escaped here (Tabular Editor pastes them as they are).
+
+
+def _expression(obj: BpaObject) -> str:
+    """Expression: the DAX of a measure, calculated column/table, calculation item or RLS."""
+    if obj.scope == "CalculatedTable":
+        return next(
+            (p.expression for p in obj.item.partitions if p.source_type == "calculated"), ""
+        )
+    return getattr(obj.item, "expression", "") or ""
+
+
+def _matches(pattern: str, text: str) -> bool:
+    return re.search(pattern, text or "") is not None
+
+
+def _own_table(obj: BpaObject) -> Optional[str]:
+    """The table an unqualified [X] may mean as a column (the object's own table)."""
+    return obj.table.name if obj.table is not None else None
+
+
+@check("REDUCE_USAGE_OF_CALCULATED_COLUMNS_THAT_USE_THE_RELATED_FUNCTION")
+def _calculated_related(ctx, obj):
+    # RegEx.IsMatch(Expression,"(?i)RELATED\s*\(")
+    return _matches(r"(?i)RELATED\s*\(", _expression(obj))
+
+
+_RLS_STRING_FUNCTIONS = ("RIGHT", "LEFT", "UPPER", "LOWER", "FIND")
+
+
+@check("LIMIT_ROW_LEVEL_SECURITY_(RLS)_LOGIC")
+def _rls_logic(ctx, obj):
+    # RowLevelSecurity.Any(RegEx.IsMatch(it.Replace(" ",""),"(?i)RIGHT\s*\(")) or ... LEFT,
+    # UPPER, LOWER, FIND alike
+    return any(
+        _matches(rf"(?i){function}\s*\(", dax.replace(" ", ""))
+        for dax in ctx.rls.get(obj.item.name, [])
+        for function in _RLS_STRING_FUNCTIONS
+    )
+
+
+_TIME_INTELLIGENCE = (
+    "CLOSINGBALANCEMONTH", "CLOSINGBALANCEQUARTER", "CLOSINGBALANCEYEAR", "DATEADD",
+    "DATESBETWEEN", "DATESINPERIOD", "DATESMTD", "DATESQTD", "DATESYTD", "ENDOFMONTH",
+    "ENDOFQUARTER", "ENDOFYEAR", "FIRSTDATE", "FIRSTNONBLANK", "FIRSTNONBLANKVALUE", "LASTDATE",
+    "LASTNONBLANK", "LASTNONBLANKVALUE", "NEXTDAY", "NEXTMONTH", "NEXTQUARTER", "NEXTYEAR",
+    "OPENINGBALANCEMONTH", "OPENINGBALANCEQUARTER", "OPENINGBALANCEYEAR", "PARALLELPERIOD",
+    "PREVIOUSDAY", "PREVIOUSMONTH", "PREVIOUSQUARTER", "PREVIOUSYEAR", "SAMEPERIODLASTYEAR",
+    "STARTOFMONTH", "STARTOFQUARTER", "STARTOFYEAR", "TOTALMTD", "TOTALQTD", "TOTALYTD",
+)  # fmt: skip
+_TIME_INTELLIGENCE_RE = re.compile("(?:" + "|".join(_TIME_INTELLIGENCE) + r")\s*\(")
+
+
+@check("MEASURES_USING_TIME_INTELLIGENCE_AND_MODEL_IS_USING_DIRECT_QUERY")
+def _time_intelligence_direct_query(ctx, obj):
+    # Model.Tables.Any(ObjectTypeName == "Table (DirectQuery)") and
+    # ( RegEx.IsMatch(Expression,"CLOSINGBALANCEMONTH\s*\(") or ... "TOTALYTD\s*\(" )
+    # (case-sensitive: the rule has no (?i))
+    return any(ctx.is_direct_query(table) for table in ctx.model.tables) and bool(
+        _TIME_INTELLIGENCE_RE.search(_expression(obj))
+    )
+
+
+@check("CHECK_IF_DYNAMIC_ROW_LEVEL_SECURITY_(RLS)_IS_NECESSARY")
+def _dynamic_rls(ctx, obj):
+    # RegEx.IsMatch(Expression,"(?i)USERNAME\(") or RegEx.IsMatch(Expression,
+    # "(?i)USERPRINCIPALNAME\(")
+    dax = _expression(obj)
+    return _matches(r"(?i)USERNAME\(", dax) or _matches(r"(?i)USERPRINCIPALNAME\(", dax)
+
+
+@check("DAX_COLUMNS_FULLY_QUALIFIED")
+def _columns_fully_qualified(ctx, obj):
+    # DependsOn.Any(Key.ObjectType = "Column" and Value.Any(not FullyQualified))
+    # (an unqualified [X] is a column when it is no measure and a column of the object's table)
+    return any(
+        ref.type == "Column" and not ref.qualified
+        for ref in reference_occurrences(_expression(obj), ctx.index, _own_table(obj))
+    )
+
+
+@check("DAX_MEASURES_UNQUALIFIED")
+def _measures_unqualified(ctx, obj):
+    # DependsOn.Any(Key.ObjectType = "Measure" and Value.Any(FullyQualified))
+    return any(
+        ref.type == "Measure" and ref.qualified
+        for ref in reference_occurrences(_expression(obj), ctx.index, _own_table(obj))
+    )
+
+
+def _squeezed(text: str) -> str:
+    """Expression.Replace(" ","").Replace("\n","").Replace("\r","").Replace("\t","")."""
+    for ch in " \n\r\t":
+        text = text.replace(ch, "")
+    return text
+
+
+@check("AVOID_DUPLICATE_MEASURES")
+def _duplicate_measures(ctx, obj):
+    # Model.AllMeasures.Any(Expression.Replace(" ","").Replace("\n","").Replace("\r","")
+    # .Replace("\t","") = outerIt.Expression.Replace(...) and it <> outerIt)
+    own = _squeezed(obj.item.expression)
+    return any(
+        _squeezed(m.expression) == own for m in ctx.model.all_measures if m is not obj.item
+    )
+
+
+@check("USE_THE_TREATAS_FUNCTION_INSTEAD_OF_INTERSECT")
+def _intersect(ctx, obj):
+    # RegEx.IsMatch(Expression,"(?i)INTERSECT\s*\(")
+    return _matches(r"(?i)INTERSECT\s*\(", _expression(obj))
+
+
+@check("USE_THE_DIVIDE_FUNCTION_FOR_DIVISION")
+def _division(ctx, obj):
+    # RegEx.IsMatch(Expression,"\]\s*\/(?!\/)(?!\*)") or RegEx.IsMatch(Expression,
+    # "\)\s*\/(?!\/)(?!\*)")
+    dax = _expression(obj)
+    return _matches(r"\]\s*\/(?!\/)(?!\*)", dax) or _matches(r"\)\s*\/(?!\/)(?!\*)", dax)
+
+
+@check("AVOID_USING_THE_IFERROR_FUNCTION")
+def _iferror(ctx, obj):
+    # RegEx.IsMatch(Expression,"(?i)IFERROR\s*\(")
+    return _matches(r"(?i)IFERROR\s*\(", _expression(obj))
+
+
+def _dax_object_name(name: str) -> str:
+    """A measure's DaxObjectName: [Name] with ] as ]]."""
+    return "[" + name.replace("]", "]]") + "]"
+
+
+@check("MEASURES_SHOULD_NOT_BE_DIRECT_REFERENCES_OF_OTHER_MEASURES")
+def _direct_measure_reference(ctx, obj):
+    # Model.AllMeasures.Any(DaxObjectName == current.Expression)
+    return any(_dax_object_name(m.name) == obj.item.expression for m in ctx.model.all_measures)
+
+
+# Python's re allows (?i) only at the start; the rules repeat it later, which in .NET only
+# re-applies the flag already set
+_FILTER_COLUMN_VALUES = (
+    r"(?i)CALCULATE\s*\(\s*[^,]+,\s*FILTER\s*\(\s*\'*[A-Za-z0-9 _]+'*\s*,\s*\'*[A-Za-z0-9 _]+\'*"
+    r"\[[A-Za-z0-9 _]+\]",
+    r"(?i)CALCULATETABLE\s*\([^,]*,\s*FILTER\s*\(\s*\'*[A-Za-z0-9 _]+\'*,\s*\'*[A-Za-z0-9 _]+\'*"
+    r"\[[A-Za-z0-9 _]+\]",
+)
+
+
+@check("FILTER_COLUMN_VALUES")
+def _filter_column_values(ctx, obj):
+    # RegEx.IsMatch(Expression,"(?i)CALCULATE\s*\(\s*[^,]+,\s*(?i)FILTER\s*\(\s*\'*[A-Za-z0-9 _]+
+    # '*\s*,\s*\'*[A-Za-z0-9 _]+\'*\[[A-Za-z0-9 _]+\]") or RegEx.IsMatch(Expression,
+    # "(?i)CALCULATETABLE\s*\([^,]*,\s*(?i)FILTER\s*\(\s*\'*[A-Za-z0-9 _]+\'*,\s*\'*
+    # [A-Za-z0-9 _]+\'*\[[A-Za-z0-9 _]+\]")
+    dax = _expression(obj)
+    return any(_matches(pattern, dax) for pattern in _FILTER_COLUMN_VALUES)
+
+
+_FILTER_MEASURE_VALUES = (
+    r"(?i)CALCULATE\s*\(\s*[^,]+,\s*FILTER\s*\(\s*\'*[A-Za-z0-9 _]+\'*\s*,\s*\[[^\]]+\]",
+    r"(?i)CALCULATETABLE\s*\([^,]*,\s*FILTER\s*\(\s*\'*[A-Za-z0-9 _]+\'*,\s*\[",
+)
+
+
+@check("FILTER_MEASURE_VALUES_BY_COLUMNS")
+def _filter_measure_values(ctx, obj):
+    # RegEx.IsMatch(Expression,"(?i)CALCULATE\s*\(\s*[^,]+,\s*(?i)FILTER\s*\(\s*\'*
+    # [A-Za-z0-9 _]+\'*\s*,\s*\[[^\]]+\]") or RegEx.IsMatch(Expression,
+    # "(?i)CALCULATETABLE\s*\([^,]*,\s*(?i)FILTER\s*\(\s*\'*[A-Za-z0-9 _]+\'*,\s*\[")
+    dax = _expression(obj)
+    return any(_matches(pattern, dax) for pattern in _FILTER_MEASURE_VALUES)
+
+
+@check("INACTIVE_RELATIONSHIPS_THAT_ARE_NEVER_ACTIVATED")
+def _inactive_never_activated(ctx, obj):
+    # IsActive == false and not ( Model.AllMeasures.Any(RegEx.IsMatch(Expression,
+    # "(?i)USERELATIONSHIP\s*\(\s*\'*" + current.FromTable.Name + "\'*\[" +
+    # current.FromColumn.Name + "\]\s*,\s*\'*" + current.ToTable.Name + "\'*\[" +
+    # current.ToColumn.Name + "\]")) or Model.AllCalculationItems.Any(the same) )
+    rel = obj.item
+    if rel.is_active:
+        return False
+    pattern = re.compile(
+        r"(?i)USERELATIONSHIP\s*\(\s*\'*" + re.escape(rel.from_table) + r"\'*\["
+        + re.escape(rel.from_column) + r"\]\s*,\s*\'*" + re.escape(rel.to_table) + r"\'*\["
+        + re.escape(rel.to_column) + r"\]"
+    )
+    items = [item for table in ctx.model.tables for item in table.calculation_items]
+    return not any(pattern.search(m.expression or "") for m in ctx.model.all_measures + items)
+
+
+@check("AVOID_USING_'1-(X/Y)'_SYNTAX")
+def _one_minus_ratio(ctx, obj):
+    # RegEx.IsMatch(Expression,"[0-9]+\s*[-+]\s*[\(]*\s*(?i)SUM\s*\(\s*\'*[A-Za-z0-9 _]+\'*\s*
+    # \[[A-Za-z0-9 _]+\]\s*\)\s*\/") or RegEx.IsMatch(Expression,"[0-9]+\s*[-+]\s*(?i)DIVIDE\s*\(")
+    # ((?i) moved to the front: nothing before it has letters)
+    dax = _expression(obj)
+    return _matches(
+        r"(?i)[0-9]+\s*[-+]\s*[\(]*\s*SUM\s*\(\s*\'*[A-Za-z0-9 _]+\'*\s*\[[A-Za-z0-9 _]+\]"
+        r"\s*\)\s*\/",
+        dax,
+    ) or _matches(r"(?i)[0-9]+\s*[-+]\s*DIVIDE\s*\(", dax)
+
+
+@check("EVALUATEANDLOG_SHOULD_NOT_BE_USED_IN_PRODUCTION_MODELS")
+def _evaluateandlog(ctx, obj):
+    # RegEx.IsMatch(Expression,"(?i)EVALUATEANDLOG\s*\(")
+    return _matches(r"(?i)EVALUATEANDLOG\s*\(", _expression(obj))
+
+
+@check("EXPRESSION_RELIANT_OBJECTS_MUST_HAVE_AN_EXPRESSION")
+def _no_expression(ctx, obj):
+    # string.IsNullOrWhiteSpace(Expression)
+    return not _expression(obj).strip()
+
+
+@check("AVOID_THE_USERELATIONSHIP_FUNCTION_AND_RLS_AGAINST_THE_SAME_TABLE")
+def _userelationship_and_rls(ctx, obj):
+    # Model.AllMeasures.Any(RegEx.IsMatch(Expression,"(?i)USERELATIONSHIP\s*\(\s*.+?(?=])\]\s*,
+    # \s*'*" + current.Name + "'*\[")) and RowLevelSecurity.Any(it <> null)
+    name = obj.item.name
+    if not ctx.rls.get(name):
+        return False
+    pattern = re.compile(
+        r"(?i)USERELATIONSHIP\s*\(\s*.+?(?=])\]\s*,\s*'*" + re.escape(name) + r"'*\["
+    )
+    return any(pattern.search(m.expression or "") for m in ctx.model.all_measures)
+
+
+@check("UNNECESSARY_COLUMNS")
+def _unnecessary_columns(ctx, obj):
+    # (IsHidden or Table.IsHidden) and ReferencedBy.Count = 0 and (not UsedInRelationships.Any())
+    # and (not UsedInSortBy.Any()) and (not UsedInHierarchies.Any())
+    # and (not Table.RowLevelSecurity.Any(it <> null and
+    #     it.IndexOf("[" + current.Name + "]", "OrdinalIgnoreCase") >= 0))
+    # and (not Model.Roles.Any(RowLevelSecurity.Any(it <> null and (
+    #     it.IndexOf(current.Table.Name + "[" + current.Name + "]", "OrdinalIgnoreCase") >= 0 or
+    #     it.IndexOf("'" + current.Table.Name + "'[" + current.Name + "]", ...) >= 0))))
+    # and not (ObjectLevelSecurity.Any(it.ToString() == "None"))
+    # and not (Table.ObjectLevelSecurity.Any(it.ToString() == "None"))
+    # (object-level security is not read from the model: taken as not set)
+    column = obj.item
+    key = (column.table, column.name)
+    if not ctx.hidden(column) or ctx.referenced("Column", *key):
+        return False
+    if ctx.column_rels.get(key) or key in ctx.sort_targets or key in ctx.hierarchy_columns:
+        return False
+    name = column.name.lower()
+    if any(f"[{name}]" in dax.lower() for dax in ctx.rls.get(column.table, [])):
+        return False
+    qualified = (
+        f"{column.table}[{column.name}]".lower(),
+        f"'{column.table}'[{column.name}]".lower(),
+    )
+    return not any(
+        text in dax.lower() for filters in ctx.rls.values() for dax in filters for text in qualified
+    )
+
+
+@check("UNNECESSARY_MEASURES")
+def _unnecessary_measures(ctx, obj):
+    # (Table.IsHidden or IsHidden) and ReferencedBy.Count = 0
+    measure = obj.item
+    hidden = measure.is_hidden or (obj.table is not None and obj.table.is_hidden)
+    return hidden and not ctx.referenced("Measure", measure.table, measure.name)
+
+
+_AGGREGATIONS = (
+    "COUNT", "COUNTBLANK", "SUM", "AVERAGE", "VALUES", "DISTINCT", "DISTINCTCOUNT", "MIN", "MAX",
+    "COUNTA", "AVERAGEA", "MAXA", "MINA",
+)  # fmt: skip
+
+
+@check("HIDE_FACT_TABLE_COLUMNS")
+def _hide_fact_table_columns(ctx, obj):
+    # ( ReferencedBy.AllMeasures.Any(RegEx.IsMatch(Expression,"(?i)COUNT\s*\(\s*\'*" +
+    #   outerit.Table.Name + "\'*\[" + outerit.Name + "\]\s*\)")) or ... COUNTBLANK, SUM,
+    #   AVERAGE, VALUES, DISTINCT, DISTINCTCOUNT, MIN, MAX, COUNTA, AVERAGEA, MAXA, MINA alike )
+    # and IsHidden == false and (DataType == "Int64" || DataType == "Decimal" ||
+    # DataType == "Double")
+    column = obj.item
+    if column.is_hidden or _te_type(column) not in ("Int64", "Decimal", "Double"):
+        return False
+    pattern = re.compile(
+        r"(?i)(?:" + "|".join(_AGGREGATIONS) + r")\s*\(\s*\'*" + re.escape(column.table)
+        + r"\'*\[" + re.escape(column.name) + r"\]\s*\)"
+    )
+    measures = ctx.measures_referencing("Column", column.table, column.name)
+    return any(pattern.search(m.expression or "") for m in measures)
+
+
 # ============================================================================
 # Engine
 # ============================================================================
@@ -961,7 +1300,7 @@ def run_bpa(
             continue
         function = CHECKS.get(rule.id)
         if function is None:
-            not_checked.append((rule.id, DAX_RULE if rule.id in DAX_RULES else NOT_OFFLINE))
+            not_checked.append((rule.id, NOT_OFFLINE))
             continue
         requires = REQUIRES.get(rule.id)
         if requires is not None and not requires(ctx):

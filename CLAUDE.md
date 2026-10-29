@@ -20,8 +20,10 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
 - pydantic for row models (the jsonpath-ng dependency was removed 2026-09-30: nothing used it)
 - Optional: Tabular Editor 2 CLI (Windows-only, ≥2.29), called via `subprocess`:
   - Tabular Editor analysis (default on; `--no-tabular-editor`): only live statistics from an
-    open Power BI Desktop now (until ticket 08). The Best Practice Analyzer is bpa.py (Python) and
-    exact DAX dependencies are dax_parser.py (Python), both on every run since 2026-10-29;
+    open Power BI Desktop now (until ticket 08). The Best Practice Analyzer is bpa.py (Python: all
+    71 rules of data/BPARules.json, the DAX ones included) and exact DAX dependencies are
+    dax_parser.py (Python), both on every run since 2026-10-29; without Tabular Editor a run only
+    logs an INFO note (still "success");
     run_best_practice_analyzer() (TE's Analyzer via `-S`, not `-A`) is kept for ticket 07's
     comparison tool only.
   - TSV export (default off; `--tabular-editor-tsv`): TE writes `documentation.tsv` itself (and the
@@ -114,13 +116,15 @@ src/pbixtractor/
                     Steps: model → exact DAX dependencies (dax_parser.model_dependencies,
                     always; a crash = a bug → warning + None = text matching) → live stats
                     (Tabular Editor + Desktop, until ticket 08; skipped with
-                    tabular_editor_analysis=False) → service / .pbix statistics → Python BPA
+                    tabular_editor_analysis=False; TE not found → INFO note, not a warning) → service / .pbix statistics → Python BPA
                     (bpa.run_bpa on every run, with or without TE, using those statistics →
-                    bpa.BpaFindings = violations + .not_checked; a crash → warning + None) →
+                    (violations, not_checked) → build_documentation(bpa_violations=,
+                    bpa_not_checked=); a crash → warning + (None, [])) →
                     dataset →
                     ReportExtractor → build_documentation → graph → workbooks → JSON + lineage.
-                    One run at a time (_RUN_LOCK: shared logger/TE/Excel); any captured log
-                    record → "warnings" (+ logs/log_data_<date>_<time>.txt, never overwritten).
+                    One run at a time (_RUN_LOCK: shared logger/TE/Excel); any captured WARNING
+                    or worse → "warnings" (+ logs/log_data_<date>_<time>.txt, never
+                    overwritten); INFO notes only go into result.logs.
                     ReportReadError (encrypted/unreadable report) → error without traceback.
                     report_name(), find_model_for_report(), model_name().
   report_extractor.py CONFIG = config.load_config() (RuntimeError on failure; importing never
@@ -671,7 +675,8 @@ src/pbixtractor/
                     High/Medium/Low/other, then rule name), bpa_cell(cells, table, name=None);
                     matched case-insensitively by ObjectType (Measure, *Column → 'Table'[Name];
                     *Table → name; others ignored) via parse_bpa_object_name() ('' and ]] escapes).
-                    add_bpa_sheets(not_checked=None → violations.not_checked): after the rule
+                    add_bpa_sheets(not_checked=[(rule ID, reason)], a plain list; excel_report
+                    passes Documentation.bpa_not_checked): after the rule
                     table on "model quality summary" (both workbooks) a "Rules not checked"
                     block lists each rule not checked (severity, category, name, "Not checked",
                     reason; not_checked_rows()), so "missing" never reads as "passed".
@@ -685,9 +690,16 @@ src/pbixtractor/
                     Calculation Group Table (name), Column / Calculated Column / Calculated Table
                     Column and Measure ('Table'[Name], ' doubled, ] as ]]), Hierarchy, Level,
                     Partition ("Partition (M - Import)", name), Calculation Item, Relationship
-                    (te_name), Perspective, Role, Provider/Structured Data Source, Shared
-                    Expression. 50 non-DAX rules checked; not_checked reasons: "DAX rule (ticket
-                    04)" (DAX_RULES, 21 rules using Expression/DependsOn/ReferencedBy/DAX regex),
+                    (te_name), Perspective, Role, Table Permission (RLS filter; name = the table:
+                    a guess at TE's TablePermission.Name), Provider/Structured Data Source, Shared
+                    Expression. All 71 rules have a check. The 21 DAX_RULES: regexes run on the
+                    expression text like TE's RegEx.IsMatch (comments and strings included, same
+                    (?i) flags; names TE pastes into a regex are re.escape'd); DependsOn /
+                    ReferencedBy (and ReferencedBy.AllMeasures, transitive) come from
+                    dax_parser.model_dependencies; FullyQualified from
+                    dax_parser.reference_occurrences (an unqualified [X] that is no measure =
+                    a column of the object's own table); object-level security is not read
+                    (UNNECESSARY_COLUMNS takes it as unset). not_checked reasons:
                     "needs statistics" (row counts/cardinality from LiveStatistics, else
                     Vertipaq_* / LongLengthRowCount / DateTimeWithHourMinSec annotations; RI
                     violations only via annotation), "not supported offline" (a rule without a

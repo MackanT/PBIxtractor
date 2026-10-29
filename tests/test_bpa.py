@@ -9,10 +9,8 @@ import pytest
 
 from pbixtractor import bpa
 from pbixtractor.bpa import (
-    DAX_RULE,
     DAX_RULES,
     NEEDS_STATISTICS,
-    BpaFindings,
     load_rules,
     rule_by_id,
     run_bpa,
@@ -297,12 +295,170 @@ CASES = [
 STATISTICS = {"rows": (ROWS, FEW_ROWS), "cardinality": (CARDINALITY, LOW_CARDINALITY)}
 
 
-def test_every_non_dax_rule_has_a_check_and_a_test():
+# ============================================================================
+# The DAX rules
+# ============================================================================
+
+
+def measure(name, expression, **extra):
+    return {"name": name, "expression": expression, "formatString": "#,0", **extra}
+
+
+def role(table_name, dax, name="R"):
+    return {"name": name, "tablePermissions": [{"name": table_name, "filterExpression": dax}]}
+
+
+def with_measures(*measures, columns=None, **model):
+    """Table T (columns A and B unless given) with the measures."""
+    return db([table("T", columns or [col("A"), col("B")], list(measures))], **model)
+
+
+def m1_and(expression):
+    """T[M1] = SUM ( T[A] ) and T[M2] = expression."""
+    return with_measures(measure("M1", "SUM ( T[A] )"), measure("M2", expression))
+
+
+DIRECT_QUERY = [{"name": "T", "mode": "directQuery", "source": {"type": "m", "expression": "x"}}]
+USE_REL = "CALCULATE ( 1, USERELATIONSHIP ( Fact[Key], Dim[Key] ) )"
+INACTIVE = "'Fact'[Key] --> 'Dim'[Key]"
+
+
+def calc_group(item_expression):
+    return db([{
+        "name": "Group",
+        "columns": [col("Name", "string")],
+        "calculationGroup": {
+            "calculationItems": [{"name": "Half", "expression": item_expression}]
+        },
+    }])
+
+
+# Each DAX rule: (rule ID, a model where it fires, the object, a model where it does not).
+# Regexes run on the text, as in Tabular Editor; references never count code in comments or
+# strings, and an unqualified [X] counts when model_dependencies resolves it.
+DAX_CASES = [
+    ("REDUCE_USAGE_OF_CALCULATED_COLUMNS_THAT_USE_THE_RELATED_FUNCTION",
+     db([table("T", [col("A"), calc("C", expression="related ( D[X] )")])]), "'T'[C]",
+     db([table("T", [col("A"), calc("C", expression="T[A] * 2")])])),
+    ("LIMIT_ROW_LEVEL_SECURITY_(RLS)_LOGIC",
+     with_measures(roles=[role("T", 'UPPER ( T[A] ) = "X"')]), "T",
+     with_measures(roles=[role("T", "T[A] = 1")])),
+    ("MEASURES_USING_TIME_INTELLIGENCE_AND_MODEL_IS_USING_DIRECT_QUERY",
+     db([table("T", [col("A")], [measure("M", "TOTALYTD ( SUM ( T[A] ), T[A] )")],
+               partitions=DIRECT_QUERY)]), "'T'[M]",
+     db([table("T", [col("A")], [measure("M", "TOTALYTD ( SUM ( T[A] ), T[A] )")])])),
+    ("CHECK_IF_DYNAMIC_ROW_LEVEL_SECURITY_(RLS)_IS_NECESSARY",
+     with_measures(roles=[role("T", "T[A] = userprincipalname()")]), "T",
+     with_measures(roles=[role("T", "T[A] = 1")])),
+    ("DAX_COLUMNS_FULLY_QUALIFIED",
+     with_measures(measure("M", "SUMX ( T, [A] )")), "'T'[M]",
+     with_measures(measure("M", "SUMX ( T, T[A] ) // or [A]"))),  # a comment never counts
+    ("DAX_MEASURES_UNQUALIFIED",
+     m1_and("T[M1] + 1"), "'T'[M2]",
+     m1_and('[M1] + LEN ( "T[M1]" )')),  # nor does a string
+    ("AVOID_DUPLICATE_MEASURES",
+     with_measures(measure("M1", "SUM(T[A])"), measure("M2", "SUM ( T[A] )")), "'T'[M1]",
+     with_measures(measure("M1", "SUM ( T[A] )"), measure("M2", "SUM ( T[B] )"))),
+    ("USE_THE_TREATAS_FUNCTION_INSTEAD_OF_INTERSECT",
+     m1_and("COUNTROWS ( INTERSECT ( VALUES ( T[A] ), VALUES ( T[B] ) ) )"), "'T'[M2]",
+     m1_and("CALCULATE ( [M1], TREATAS ( VALUES ( T[A] ), T[B] ) )")),
+    ("USE_THE_DIVIDE_FUNCTION_FOR_DIVISION",
+     m1_and("[M1] / 2"), "'T'[M2]",
+     m1_and("DIVIDE ( [M1], 2 ) // half")),
+    ("AVOID_USING_THE_IFERROR_FUNCTION",
+     m1_and("IFERROR ( [M1], 0 )"), "'T'[M2]",
+     m1_and("COALESCE ( [M1], 0 )")),
+    ("MEASURES_SHOULD_NOT_BE_DIRECT_REFERENCES_OF_OTHER_MEASURES",
+     m1_and("[M1]"), "'T'[M2]",
+     m1_and("[M1] + 1")),
+    ("FILTER_COLUMN_VALUES",
+     m1_and("CALCULATE ( [M1], FILTER ( T, T[A] = 1 ) )"), "'T'[M2]",
+     m1_and("CALCULATE ( [M1], T[A] = 1 )")),
+    ("FILTER_MEASURE_VALUES_BY_COLUMNS",
+     m1_and("CALCULATE ( [M1], FILTER ( T, [M1] > 1 ) )"), "'T'[M2]",
+     m1_and("CALCULATE ( [M1], FILTER ( T, T[A] > 1 ) )")),
+    ("INACTIVE_RELATIONSHIPS_THAT_ARE_NEVER_ACTIVATED",
+     fact_dim({"isActive": False}), INACTIVE,
+     db([table("Fact", [col("Key")], [measure("M", USE_REL)]), table("Dim", [col("Key")])],
+        [rel("Fact", "Key", "Dim", "Key", isActive=False)])),
+    ("AVOID_USING_'1-(X/Y)'_SYNTAX",
+     m1_and("1 - SUM ( T[A] ) / SUM ( T[B] )"), "'T'[M2]",
+     m1_and("DIVIDE ( SUM ( T[B] ) - SUM ( T[A] ), SUM ( T[B] ) )")),
+    ("EVALUATEANDLOG_SHOULD_NOT_BE_USED_IN_PRODUCTION_MODELS",
+     m1_and("EVALUATEANDLOG ( [M1] )"), "'T'[M2]",
+     m1_and("[M1] + 0")),
+    ("EXPRESSION_RELIANT_OBJECTS_MUST_HAVE_AN_EXPRESSION",
+     m1_and("  "), "'T'[M2]",
+     m1_and("[M1] + 0")),
+    ("AVOID_THE_USERELATIONSHIP_FUNCTION_AND_RLS_AGAINST_THE_SAME_TABLE",
+     db([table("Fact", [col("Key")], [measure("M", USE_REL)]), table("Dim", [col("Key")])],
+        [rel("Fact", "Key", "Dim", "Key", isActive=False)], roles=[role("Dim", "Dim[Key] > 0")]),
+     "Dim",
+     db([table("Fact", [col("Key")], [measure("M", USE_REL)]), table("Dim", [col("Key")])],
+        [rel("Fact", "Key", "Dim", "Key", isActive=False)], roles=[role("Fact", "Fact[Key] > 0")])),
+    ("UNNECESSARY_COLUMNS",
+     with_measures(measure("M", "1 // T[A]"), columns=[col("A", isHidden=True)]), "'T'[A]",
+     db([table("T", [col("A", isHidden=True), calc("C", expression="[A] * 2")])])),  # unqualified
+    ("UNNECESSARY_MEASURES",
+     with_measures(measure("H", "1", isHidden=True), measure("M", 'LEN ( "[H]" )')), "'T'[H]",
+     with_measures(measure("H", "1", isHidden=True), measure("M", "[H] + 1"))),
+    ("HIDE_FACT_TABLE_COLUMNS",
+     with_measures(measure("M", "sum ( 'T'[A] )")), "'T'[A]",
+     with_measures(measure("M", "1 // SUM ( T[A] )"))),
+]
+
+
+def test_every_rule_has_a_check_and_a_test():
     rule_ids = {rule.id for rule in load_rules()}
-    assert len(rule_ids) == 71
+    assert len(rule_ids) == 71 and len(DAX_RULES) == 21
     assert DAX_RULES <= rule_ids
-    assert set(bpa.CHECKS) == rule_ids - DAX_RULES
-    assert {case[0] for case in CASES} == set(bpa.CHECKS)
+    assert set(bpa.CHECKS) == rule_ids
+    assert {case[0] for case in CASES} == rule_ids - DAX_RULES
+    assert {case[0] for case in DAX_CASES} == DAX_RULES
+
+
+@pytest.mark.parametrize(
+    "rule_id, firing, object_name, passing", DAX_CASES, ids=[c[0] for c in DAX_CASES]
+)
+def test_dax_rule_fires_and_does_not(rule_id, firing, object_name, passing):
+    assert fires(rule_id, firing, object_name)
+    assert not fires(rule_id, passing, object_name)
+
+
+def test_dax_rules_on_calculation_items_and_table_permissions():
+    found = findings(
+        calc_group("SELECTEDMEASURE () / 2"), rule_id="USE_THE_DIVIDE_FUNCTION_FOR_DIVISION"
+    )
+    assert [(v.object_type, v.object_name) for v in found] == [("Calculation Item", "Half")]
+    found = findings(
+        with_measures(roles=[role("T", "[A] = USERNAME()")]),
+        rule_id="DAX_COLUMNS_FULLY_QUALIFIED",
+    )
+    assert [(v.object_type, v.object_name) for v in found] == [("Table Permission", "T")]
+
+
+def test_hide_fact_table_columns_follows_measures_and_types():
+    # Hidden or not numeric: no finding
+    assert not fires(
+        "HIDE_FACT_TABLE_COLUMNS",
+        with_measures(measure("M", "SUM ( T[A] )"), columns=[col("A", "string")]),
+        "'T'[A]",
+    )
+    # Names with regex characters are matched literally
+    database = db([table("T (x)", [col("A.b")], [measure("M", "SUM ( 'T (x)'[A.b] )")])])
+    assert fires("HIDE_FACT_TABLE_COLUMNS", database, "'T (x)'[A.b]")
+
+
+def test_unnecessary_columns_kept_by_rls_and_relationships():
+    hidden = [col("A", isHidden=True)]
+    assert not fires(
+        "UNNECESSARY_COLUMNS", with_measures(columns=hidden, roles=[role("T", "[a] > 0")]), "'T'[A]"
+    )
+    assert not fires(
+        "UNNECESSARY_COLUMNS",
+        fact_dim(fact_column=col("Key", isHidden=True)),
+        "'Fact'[Key]",
+    )
 
 
 @pytest.mark.parametrize(
@@ -430,11 +586,21 @@ def test_a_raising_check_goes_to_not_checked_with_a_warning(monkeypatch, caplog)
     assert violations  # the other rules ran
 
 
-def test_dax_rules_are_listed_as_not_checked():
+def test_only_rules_needing_statistics_are_not_checked():
     _, not_checked = run_bpa(parse_model(BIM))
     reasons = dict(not_checked)
-    assert {rule for rule, reason in not_checked if reason == DAX_RULE} == DAX_RULES
+    assert set(reasons.values()) == {NEEDS_STATISTICS}
     assert reasons["LARGE_TABLES_SHOULD_BE_PARTITIONED"] == NEEDS_STATISTICS
+    assert not DAX_RULES & set(reasons)
+    assert not any("ticket 04" in reason for reason in reasons.values())
+
+
+def test_a_rule_without_a_check_is_not_checked(tmp_path):
+    rules_file = tmp_path / "rules.json"
+    rules_file.write_text(json.dumps([{"ID": "CUSTOM_X", "Name": "X", "Scope": "Model",
+                                       "Expression": "1=1"}]), encoding="utf-8")
+    _, not_checked = run_bpa(parse_model(BIM), rules_path=rules_file)
+    assert not_checked == [("CUSTOM_X", bpa.NOT_OFFLINE)]
 
 
 def test_statistics_present_and_absent():
@@ -495,6 +661,12 @@ def test_sample_model_matches_tabular_editor():
             "[Naming Conventions] Partition name should match table name for single partition "
             "tables") not in found
     assert all(v.category and v.severity for v in violations)
+    # The DAX rules, checked by hand against the rule expressions
+    assert ("Measure", "'Sales'[Dynamic]",
+            "[DAX Expressions] Measures should not be direct references of other measures") in found
+    assert ("Relationship", "'Sales'[Amount] <--> 'Dates'[Year Number]",
+            "[DAX Expressions] Inactive relationships that are never activated") in found
+    assert ("Column", "'Sales'[Amount]", "[Formatting] Hide fact table columns") in found
 
 
 # ============================================================================
@@ -600,11 +772,11 @@ def test_tmdl_carries_annotations_and_bpa_properties():
 
 
 def test_not_checked_rows_name_the_rule_and_reason():
-    rows = not_checked_rows([("UNNECESSARY_MEASURES", DAX_RULE), ("CUSTOM_X", "why")])
-    rule = rule_by_id("UNNECESSARY_MEASURES")
-    assert rows[0] == [rule.severity, rule.category, rule.name, "Not checked", DAX_RULE]
+    rows = not_checked_rows([("LARGE_TABLES_SHOULD_BE_PARTITIONED", NEEDS_STATISTICS),
+                             ("CUSTOM_X", "why")])
+    rule = rule_by_id("LARGE_TABLES_SHOULD_BE_PARTITIONED")
+    assert rows[0] == [rule.severity, rule.category, rule.name, "Not checked", NEEDS_STATISTICS]
     assert rows[1] == ["", "", "CUSTOM_X", "Not checked", "why"]
-    assert BpaFindings([], [("A", "b")]).not_checked == [("A", "b")]
 
 
 def test_pipeline_without_tabular_editor_has_a_bpa_result(tmp_path):
@@ -622,7 +794,8 @@ def test_pipeline_without_tabular_editor_has_a_bpa_result(tmp_path):
     assert result.ok, result.message
     documentation = result.documentation
     assert documentation.bpa_violations
-    assert ("UNNECESSARY_MEASURES", DAX_RULE) in documentation.bpa_not_checked
+    assert {reason for _, reason in documentation.bpa_not_checked} == {NEEDS_STATISTICS}
+    assert any(v.category == "DAX Expressions" for v in documentation.bpa_violations)
     assert result.report_json["quality"]
 
     with zipfile.ZipFile(result.files["workbook"]) as book:
@@ -631,6 +804,59 @@ def test_pipeline_without_tabular_editor_has_a_bpa_result(tmp_path):
     assert 'name="model quality summary"' in workbook
     assert "Model quality" in strings  # the column
     assert "[Formatting] Hide foreign keys" in strings
-    assert "Rules not checked" in strings and DAX_RULE in strings
+    assert "Rules not checked" in strings and NEEDS_STATISTICS in strings
+    assert "ticket 04" not in strings
     with zipfile.ZipFile(result.files["data_workbook"]) as book:
         assert "Rules not checked" in book.read("xl/sharedStrings.xml").decode()
+
+
+def test_a_run_without_tabular_editor_is_a_success(tmp_path, monkeypatch):
+    monkeypatch.setattr("pbixtractor.pipeline.find_tabular_editor", lambda *a, **k: None)
+    write_sample_pbix(tmp_path / "Sample.pbix")
+    (tmp_path / "Sample.bim").write_text(json.dumps(BIM), encoding="utf-8")
+
+    def run(tabular_editor_analysis):
+        return run_extraction(
+            ExtractionOptions(
+                report_path=tmp_path / "Sample.pbix",
+                model_path=tmp_path / "Sample.bim",
+                output_dir=tmp_path / "out",
+                tabular_editor_analysis=tabular_editor_analysis,
+                write_log_file=False,
+            )
+        )
+
+    result = run(True)
+    assert result.ok, result.message
+    assert "INFO: Live statistics from Power BI Desktop skipped" in result.logs
+    # The sample report warns about itself (an unbound field, a broken button) - nothing more
+    warnings = [line for line in result.logs.splitlines() if not line.startswith("INFO:")]
+    assert warnings == run(False).logs.splitlines()
+    assert not any("Tabular Editor" in line for line in warnings)
+    documentation = result.documentation
+    assert documentation.bpa_violations
+    assert {reason for _, reason in documentation.bpa_not_checked} == {NEEDS_STATISTICS}
+
+
+def test_info_notes_alone_keep_a_run_a_success(tmp_path, monkeypatch):
+    from pbixtractor import pipeline
+
+    def run(options, progress):
+        pipeline.logger.info("Live statistics from Power BI Desktop skipped")
+        return pipeline.ExtractionResult("success", "done")
+
+    monkeypatch.setattr(pipeline, "_run", run)
+    options = ExtractionOptions(
+        report_path=tmp_path / "R.pbix", model_path=tmp_path / "R.bim", output_dir=tmp_path / "out"
+    )
+    result = run_extraction(options)
+    assert result.status == "success"
+    assert "INFO: Live statistics" in result.logs and "log" not in result.files
+
+    def warn(options, progress):
+        pipeline.logger.warning("Something is off")
+        return pipeline.ExtractionResult("success", "done")
+
+    monkeypatch.setattr(pipeline, "_run", warn)
+    result = run_extraction(options)
+    assert result.status == "warnings" and result.files["log"].is_file()

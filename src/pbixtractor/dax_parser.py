@@ -12,7 +12,7 @@ bare table names to the table; code inside comments and strings is never a refer
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from .semantic_model import SemanticModel, Table
 from .tabular_editor import Dependency, drop_redundant_table_refs
@@ -135,33 +135,54 @@ class _ModelIndex:
         return None
 
 
-def _references(
-    dax: str, index: _ModelIndex, own_table: Optional[str] = None
-) -> list[tuple[str, str, str]]:
+class Reference(NamedTuple):
+    """One reference in a DAX expression, as written there."""
+
+    type: str  # Measure | Column | Table
+    table: str
+    name: str
+    qualified: bool  # written as Table[Name] (always True for a table reference)
+
+
+def code_tokens(dax: str) -> list[Token]:
+    """The tokens of an expression without whitespace and comments (Tabular Editor's Tokenize)."""
+    return [t for t in tokenize(dax) if t.kind not in TRIVIA]
+
+
+def model_index(model: SemanticModel) -> "_ModelIndex":
+    """The model's name lookup, for reference_occurrences() on many expressions."""
+    return _ModelIndex(model)
+
+
+def reference_occurrences(
+    dax: str, index: "_ModelIndex", own_table: Optional[str] = None
+) -> list[Reference]:
     """
-    Objects one DAX expression references, as (type, table, name), in order, no duplicates.
+    Every reference one DAX expression makes, in order, one per occurrence (with repeats).
+
+    Code inside comments and strings is never a reference.
 
     Args:
         dax: The expression
-        index: The model's lookup
-        own_table: Table whose columns an unqualified [X] may mean (row context of a
-            calculated column or RLS filter); None for measures and calculated tables
+        index: The model's lookup (model_index())
+        own_table: Table whose columns an unqualified [X] may mean (row context); None: an
+            unqualified [X] is only ever a measure
 
     Returns:
-        (target type, target table, target name) tuples
+        References with whether each one was written fully qualified
     """
-    tokens = [t for t in tokenize(dax) if t.kind not in TRIVIA]
+    tokens = code_tokens(dax)
     gap = [False] * len(tokens)  # whitespace/comment before token i
     position = 0
     for i, token in enumerate(tokens):
         gap[i] = token.position > position
         position = token.position + len(token.text)
 
-    found: list[tuple[str, str, str]] = []
+    found: list[Reference] = []
 
-    def add(reference):
-        if reference and reference not in found:
-            found.append(reference)
+    def add(reference, qualified: bool):
+        if reference:
+            found.append(Reference(*reference, qualified))
 
     blocks: list[_VarBlock] = []
     depth = 0
@@ -216,26 +237,48 @@ def _references(
                     or (upper not in _KEYWORDS and table.lower() in index.tables and not shadowed)
                 )
                 if qualifies:
-                    add(index.qualified(table, following.name))
+                    add(index.qualified(table, following.name), True)
                     i += 2
                     continue
             previous = tokens[i - 1] if i > 0 else None
             after_dot = previous is not None and previous.text == "." and previous.kind == PUNCTUATION
             if table.lower() in index.tables and not shadowed and not after_dot:
                 canonical = index.tables[table.lower()].name
-                add(("Table", canonical, canonical))
+                add(("Table", canonical, canonical), True)
             i += 1
             continue
 
         if kind == BRACKET_NAME:
             name = token.name.lower()
             if name in index.measures:
-                table, measure = index.measures[name]
-                add(("Measure", table, measure))
+                add(("Measure", *index.measures[name]), False)
             elif own_table is not None and name in index.columns.get(own_table.lower(), {}):
                 add(("Column", index.tables[own_table.lower()].name,
-                     index.columns[own_table.lower()][name]))  # fmt: skip
+                     index.columns[own_table.lower()][name]), False)  # fmt: skip
         i += 1
+    return found
+
+
+def _references(
+    dax: str, index: _ModelIndex, own_table: Optional[str] = None
+) -> list[tuple[str, str, str]]:
+    """
+    Objects one DAX expression references, as (type, table, name), in order, no duplicates.
+
+    Args:
+        dax: The expression
+        index: The model's lookup
+        own_table: Table whose columns an unqualified [X] may mean (row context of a
+            calculated column or RLS filter); None for measures and calculated tables
+
+    Returns:
+        (target type, target table, target name) tuples
+    """
+    found: list[tuple[str, str, str]] = []
+    for reference in reference_occurrences(dax, index, own_table):
+        target = (reference.type, reference.table, reference.name)
+        if target not in found:
+            found.append(target)
     return found
 
 
