@@ -160,6 +160,8 @@ class Documentation:
     unused_measures: list[tuple[str, str]]
     exact_dependencies: Optional[list[Dependency]] = None
     bpa_violations: Optional[list[BpaViolation]] = None
+    # BPA rules not checked: [(rule ID, reason)], e.g. DAX rules or rules needing statistics
+    bpa_not_checked: list[tuple[str, str]] = field(default_factory=list)
     live_statistics: Optional[LiveStatistics] = None
     page_info: list[PageInfo] = field(default_factory=list)
     bookmarks: list[BookmarkInfo] = field(default_factory=list)
@@ -889,6 +891,7 @@ def build_documentation(
     bpa_violations: Optional[list[BpaViolation]] = None,
     live_statistics: Optional[LiveStatistics] = None,
     report: Optional[ReportDefinition] = None,
+    bpa_not_checked: Optional[list[tuple[str, str]]] = None,
 ) -> Documentation:
     """
     Combine report extraction, model and analysis results.
@@ -907,6 +910,7 @@ def build_documentation(
         bpa_violations: Best Practice Analyzer findings (None: not run)
         live_statistics: Statistics from Power BI Desktop (None: not available)
         report: Report definition for page info, bookmarks and interactivity (optional)
+        bpa_not_checked: BPA rules not checked, [(rule ID, reason)] (bpa.run_bpa)
 
     Returns:
         Documentation
@@ -932,6 +936,7 @@ def build_documentation(
         unused_measures=unused_measures,
         exact_dependencies=exact_dependencies,
         bpa_violations=bpa_violations,
+        bpa_not_checked=list(bpa_not_checked or getattr(bpa_violations, "not_checked", [])),
         live_statistics=live_statistics,
         page_info=build_page_info(report, pages, filter_strings) if report else [],
         bookmarks=build_bookmarks(report, report_info, pages, logger) if report else [],

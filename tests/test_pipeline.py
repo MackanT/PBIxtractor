@@ -64,7 +64,13 @@ def test_run_extraction(sample):
     assert result.files["tsv"] == sample / "out" / "documentation.tsv"
     assert result.files["tsv"].read_text(encoding="utf-8").startswith("Object\tName\t")
     assert result.report_json["report"]["name"] == "Sample"
-    assert result.report_json["quality"] is None  # BPA not run
+    # The Python BPA runs on every run, also without Tabular Editor
+    quality = result.report_json["quality"]
+    assert quality and any(
+        q["rule"] == "[Error Prevention] Relationship columns should be of the same data type"
+        for q in quality
+    )
+    assert result.documentation.bpa_not_checked  # the DAX rules (ticket 04)
     assert steps == sorted(steps) and steps[-1] == 1.0
     if result.status == "warnings":
         assert result.logs and "log" in result.files

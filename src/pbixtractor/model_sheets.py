@@ -5,6 +5,7 @@ from typing import Optional
 
 from xlsxwriter.workbook import Workbook
 
+from .bpa import rule_by_id
 from .live_model import LiveStatistics
 from .semantic_model import DATA_TYPES, SemanticModel
 from .tabular_editor import BpaViolation
@@ -102,7 +103,7 @@ def bpa_by_object(violations: list[BpaViolation]) -> dict[tuple, str]:
     severity first (then by rule name), each as "<severity>: <rule>".
 
     Args:
-        violations: Findings from tabular_editor.run_best_practice_analyzer()
+        violations: Findings from bpa.run_bpa()
 
     Returns:
         Key -> cell text; keys ("field", table, name) for measures/columns (table None when
@@ -325,27 +326,67 @@ def bpa_summary_rows(violations: list[BpaViolation]) -> list[list]:
     ]
 
 
+NOT_CHECKED_TITLE = "Rules not checked"
+
+
+def not_checked_rows(not_checked: list[tuple[str, str]]) -> list[list]:
+    """
+    One row per rule the BPA did not check: severity, category, rule name, "Not checked" and
+    the reason (in the summary's columns, so the rule table and these rows line up).
+
+    Args:
+        not_checked: [(rule ID, reason)] from bpa.run_bpa()
+    """
+    rows = []
+    for rule_id, reason in not_checked:
+        rule = rule_by_id(rule_id)
+        if rule is None:
+            rows.append(["", "", rule_id, "Not checked", reason])
+        else:
+            rows.append([rule.severity, rule.category, rule.name, "Not checked", reason])
+    return rows
+
+
 def add_bpa_sheets(
     workbook: Workbook,
     violations: list[BpaViolation],
     header_format,
     sheet_name=lambda name: name,
+    not_checked: Optional[list[tuple[str, str]]] = None,
 ) -> None:
     """
     Add Best Practice Analyzer results: a per-rule summary and the full list of findings.
 
+    The summary lists the rules that were not checked (with the reason) after the rule table,
+    so a missing rule never reads as "passed".
+
     Args:
         workbook: xlsxwriter workbook
-        violations: Findings from tabular_editor.run_best_practice_analyzer()
+        violations: Findings from bpa.run_bpa()
         header_format: xlsxwriter format for header cells
         sheet_name: Callable returning a valid, unique sheet name
+        not_checked: [(rule ID, reason)]; None: taken from violations.not_checked when the
+            violations are a bpa.BpaFindings
     """
+    if not_checked is None:
+        not_checked = getattr(violations, "not_checked", [])
+    summary = workbook.add_worksheet(sheet_name("model quality summary"))
+    summary_rows = bpa_summary_rows(violations)
     _write_table(
-        workbook.add_worksheet(sheet_name("model quality summary")),
+        summary,
         header_format,
         [("Severity", 10), ("Category", 18), ("Rule", 70), ("Findings", 10), ("Description", 90)],
-        bpa_summary_rows(violations),
+        summary_rows,
     )
+    if not_checked:
+        start = max(len(summary_rows), 1) + 2  # a blank row after the rule table
+        summary.write(start, 0, NOT_CHECKED_TITLE, header_format)
+        for col, title in enumerate(("Category", "Rule", "Findings", "Reason"), start=1):
+            summary.write(start, col, title, header_format)
+        for row_num, row in enumerate(not_checked_rows(not_checked), start=start + 1):
+            for col, value in enumerate(row):
+                if value not in ("", None):
+                    summary.write(row_num, col, value)
     _write_table(
         workbook.add_worksheet(sheet_name("model quality")),
         header_format,

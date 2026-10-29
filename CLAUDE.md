@@ -19,9 +19,11 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
 - pandas, xlsxwriter (rich-text cells), networkx + matplotlib (relationship PNG)
 - pydantic for row models (the jsonpath-ng dependency was removed 2026-09-30: nothing used it)
 - Optional: Tabular Editor 2 CLI (Windows-only, ≥2.29), called via `subprocess`:
-  - Tabular Editor analysis (default on; `--no-tabular-editor`): Best Practice Analyzer (a `-S`
-    script calling the Analyzer, not `-A`) and live statistics — all local/offline. Exact DAX
-    dependencies come from dax_parser.py (Python) on every run since 2026-10-29.
+  - Tabular Editor analysis (default on; `--no-tabular-editor`): only live statistics from an
+    open Power BI Desktop now (until ticket 08). The Best Practice Analyzer is bpa.py (Python) and
+    exact DAX dependencies are dax_parser.py (Python), both on every run since 2026-10-29;
+    run_best_practice_analyzer() (TE's Analyzer via `-S`, not `-A`) is kept for ticket 07's
+    comparison tool only.
   - TSV export (default off; `--tabular-editor-tsv`): TE writes `documentation.tsv` itself (and the
     dataset is read from it); runs FormatDax, which sends DAX to daxformatter.com. Without it the
     same file is written offline by semantic_model.write_documentation_tsv() (DAX unformatted).
@@ -108,8 +110,12 @@ src/pbixtractor/
                     lineage, graph, tsv[, model, log]}, logs, documentation, report_json,
                     seconds). tsv = <out>/documentation.tsv on every run (write failure → warning).
                     Steps: model → exact DAX dependencies (dax_parser.model_dependencies,
-                    always; a crash = a bug → warning + None = text matching) → TE analysis
-                    (BPA, live stats) → dataset →
+                    always; a crash = a bug → warning + None = text matching) → live stats
+                    (Tabular Editor + Desktop, until ticket 08; skipped with
+                    tabular_editor_analysis=False) → service / .pbix statistics → Python BPA
+                    (bpa.run_bpa on every run, with or without TE, using those statistics →
+                    bpa.BpaFindings = violations + .not_checked; a crash → warning + None) →
+                    dataset →
                     ReportExtractor → build_documentation → graph → workbooks → JSON + lineage.
                     One run at a time (_RUN_LOCK: shared logger/TE/Excel); any captured log
                     record → "warnings" (+ logs/log_data_<date>_<time>.txt, never overwritten).
@@ -587,6 +593,16 @@ src/pbixtractor/
                     (tables, columns,
                     measures, hierarchies+levels, partitions incl. Direct Lake entity, relationships
                     with cardinality/direction/active, shared expressions, roles/RLS).
+                    For the BPA also: annotations (dict) on model/tables/columns/measures/
+                    hierarchies/partitions/relationships/roles/expressions, Column
+                    is_available_in_mdx / alternate_of, Level/Partition/Role description,
+                    Partition.data_source, Role.members, Table.calculation_group (an empty
+                    group too) + is_calculated, SemanticModel model_name, data_sources
+                    (DataSource name/type), perspective_tables, default_powerbi_datasource_version,
+                    variation_columns (variation defaultColumn targets). tmdl.py fills the same
+                    (annotation nodes, alternateOf, variation, member, perspectiveTable,
+                    dataSource); pbix_model.py already carried annotations/isAvailableInMdx (no
+                    perspective tables, alternateOf or data source version from a .pbix yet).
                     model_to_dataset() → DataFrame identical to TE's TSV (verified on a real model:
                     all 459 objects match; only DAX whitespace differs; levels follow each
                     hierarchy - the workbooks read that order). write_documentation_tsv(model,
@@ -630,6 +646,32 @@ src/pbixtractor/
                     High/Medium/Low/other, then rule name), bpa_cell(cells, table, name=None);
                     matched case-insensitively by ObjectType (Measure, *Column → 'Table'[Name];
                     *Table → name; others ignored) via parse_bpa_object_name() ('' and ]] escapes).
+                    add_bpa_sheets(not_checked=None → violations.not_checked): after the rule
+                    table on "model quality summary" (both workbooks) a "Rules not checked"
+                    block lists each rule not checked (severity, category, name, "Not checked",
+                    reason; not_checked_rows()), so "missing" never reads as "passed".
+  bpa.py            Python Best Practice Analyzer (D16: the only BPA a run uses). run_bpa(model,
+                    statistics=None, rules_path=DEFAULT_BPA_RULES) → (violations [BpaViolation
+                    from tabular_editor, most severe first], not_checked [(rule ID, reason)]).
+                    Rule metadata from data/BPARules.json (load_rules / rule_by_id, BpaRule);
+                    each check is a hand port of the rule's Expression (quoted in a comment),
+                    registered by rule ID in CHECKS via @check(id, requires=...). Objects per TE
+                    scope (iter_objects → BpaObject): Model ("Model"), Table / Calculated Table /
+                    Calculation Group Table (name), Column / Calculated Column / Calculated Table
+                    Column and Measure ('Table'[Name], ' doubled, ] as ]]), Hierarchy, Level,
+                    Partition ("Partition (M - Import)", name), Calculation Item, Relationship
+                    (te_name), Perspective, Role, Provider/Structured Data Source, Shared
+                    Expression. 50 non-DAX rules checked; not_checked reasons: "DAX rule (ticket
+                    04)" (DAX_RULES, 21 rules using Expression/DependsOn/ReferencedBy/DAX regex),
+                    "needs statistics" (row counts/cardinality from LiveStatistics, else
+                    Vertipaq_* / LongLengthRowCount / DateTimeWithHourMinSec annotations; RI
+                    violations only via annotation), "not supported offline" (a rule without a
+                    check, e.g. from another rules file), "error: ..." (a check raised: warning,
+                    never a failed run). Rules above the model's compatibility level are skipped
+                    silently (as TE). BestPracticeAnalyzer_IgnoreRules annotations ({"RuleIDs":
+                    [...]}) on an object or the model (= every object) suppress findings. KPIs
+                    are not modelled (their scope is never checked). TE scope names/ObjectType
+                    strings are assumed from TE2, not yet compared on Windows (ticket 07).
   readers.py        read_report(path): .pbix (legacy Report/Layout or PBIR Report/definition/),
                     .pbip, or <name>.Report folder → ReportDefinition → PageDefinition →
                     VisualDefinition (fields as FieldBinding(role, expr, query_ref,

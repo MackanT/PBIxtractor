@@ -55,6 +55,11 @@ def _text(value) -> str:
     return str(value)
 
 
+def _annotations(values) -> dict[str, str]:
+    """TMSL annotations [{"name", "value"}] -> {name: value} (multi-line values joined)."""
+    return {a.get("name", ""): _text(a.get("value")) for a in values or [] if isinstance(a, dict)}
+
+
 # ============================================================================
 # Model objects
 # ============================================================================
@@ -76,6 +81,9 @@ class Column:
     data_category: str = ""
     summarize_by: str = ""
     sort_by_column: str = ""
+    is_available_in_mdx: bool = True
+    alternate_of: bool = False  # the column is an aggregation of another (AlternateOf)
+    annotations: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,12 +97,14 @@ class Measure:
     display_folder: str = ""
     data_type: str = ""
     is_hidden: bool = False
+    annotations: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class Level:
     name: str
     column: str
+    description: str = ""
 
 
 @dataclass
@@ -104,6 +114,7 @@ class Hierarchy:
     levels: list[Level] = field(default_factory=list)
     description: str = ""
     is_hidden: bool = False
+    annotations: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -116,6 +127,9 @@ class Partition:
     entity_name: str = ""  # Direct Lake: source table/view
     schema_name: str = ""
     expression_source: str = ""  # Direct Lake: shared expression holding the connection
+    data_source: str = ""  # legacy (query) partitions: the data source's name
+    description: str = ""
+    annotations: dict[str, str] = field(default_factory=dict)
     # Other M queries of the model by name (shared expressions, other tables' queries), so
     # references to them can be followed; set by parse_model()
     queries: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
@@ -156,6 +170,7 @@ class Relationship:
     to_cardinality: str = "one"
     cross_filtering: str = "oneDirection"  # oneDirection | bothDirections | automatic
     is_active: bool = True
+    annotations: dict[str, str] = field(default_factory=dict)
 
     @property
     def direction_label(self) -> str:
@@ -185,10 +200,17 @@ class Table:
     hierarchies: list[Hierarchy] = field(default_factory=list)
     partitions: list[Partition] = field(default_factory=list)
     calculation_items: list[Measure] = field(default_factory=list)  # calculation groups
+    calculation_group: bool = False  # has a calculationGroup (also one without items)
+    annotations: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_calculation_group(self) -> bool:
-        return bool(self.calculation_items)
+        return self.calculation_group or bool(self.calculation_items)
+
+    @property
+    def is_calculated(self) -> bool:
+        """A calculated table: its data comes from a DAX (calculated) partition."""
+        return any(p.source_type == "calculated" for p in self.partitions)
 
 
 @dataclass
@@ -197,6 +219,7 @@ class SharedExpression:
     kind: str = ""
     expression: str = ""
     description: str = ""
+    annotations: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -204,6 +227,17 @@ class Role:
     name: str
     model_permission: str = ""
     table_filters: dict[str, str] = field(default_factory=dict)  # table -> RLS DAX filter
+    description: str = ""
+    members: list[str] = field(default_factory=list)
+    annotations: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class DataSource:
+    """A (legacy) data source object of the model: provider or structured."""
+
+    name: str
+    type: str = ""  # provider | structured
 
 
 @dataclass
@@ -217,6 +251,13 @@ class SemanticModel:
     expressions: list[SharedExpression] = field(default_factory=list)
     roles: list[Role] = field(default_factory=list)
     perspectives: list[str] = field(default_factory=list)
+    # The objects the Best Practice Analyzer looks at besides tables and relationships
+    model_name: str = "Model"  # the model object's own name (not the database's)
+    annotations: dict[str, str] = field(default_factory=dict)
+    data_sources: list[DataSource] = field(default_factory=list)
+    perspective_tables: dict[str, list[str]] = field(default_factory=dict)  # name -> tables
+    default_powerbi_datasource_version: str = ""  # e.g. powerBI_V3
+    variation_columns: set[tuple[str, str]] = field(default_factory=set)  # (table, column)
 
     @property
     def all_columns(self) -> list[Column]:
@@ -333,6 +374,7 @@ def parse_model(database: dict) -> SemanticModel:
             to_cardinality=rel.get("toCardinality", "one"),
             cross_filtering=rel.get("crossFilteringBehavior", "oneDirection"),
             is_active=rel.get("isActive", True),
+            annotations=_annotations(rel.get("annotations")),
         )
         for rel in model.get("relationships", [])
     ]
@@ -343,6 +385,7 @@ def parse_model(database: dict) -> SemanticModel:
             kind=expr.get("kind", ""),
             expression=_text(expr.get("expression")),
             description=_text(expr.get("description")),
+            annotations=_annotations(expr.get("annotations")),
         )
         for expr in model.get("expressions", [])
     ]
@@ -356,6 +399,12 @@ def parse_model(database: dict) -> SemanticModel:
                 for permission in role.get("tablePermissions", [])
                 if permission.get("filterExpression")
             },
+            description=_text(role.get("description")),
+            members=[
+                member.get("memberName", "") if isinstance(member, dict) else str(member)
+                for member in role.get("members", [])
+            ],
+            annotations=_annotations(role.get("annotations")),
         )
         for role in model.get("roles", [])
     ]
@@ -382,7 +431,33 @@ def parse_model(database: dict) -> SemanticModel:
         expressions=expressions,
         roles=roles,
         perspectives=[p.get("name", "") for p in model.get("perspectives", [])],
+        model_name=model.get("name") or "Model",
+        annotations=_annotations(model.get("annotations")),
+        data_sources=[
+            DataSource(name=source.get("name", ""), type=source.get("type", "provider"))
+            for source in model.get("dataSources", [])
+        ],
+        perspective_tables={
+            p.get("name", ""): [t.get("name", "") for t in p.get("tables", [])]
+            for p in model.get("perspectives", [])
+        },
+        default_powerbi_datasource_version=model.get("defaultPowerBIDataSourceVersion", ""),
+        variation_columns=_variation_columns(model),
     )
+
+
+def _variation_columns(model: dict) -> set[tuple[str, str]]:
+    """Columns a variation points to as its defaultColumn ({"table", "column"} or "T.C")."""
+    found = set()
+    for table in model.get("tables", []):
+        for column in table.get("columns", []):
+            for variation in column.get("variations", []):
+                default = variation.get("defaultColumn")
+                if isinstance(default, dict):
+                    found.add((default.get("table", ""), default.get("column", "")))
+                elif isinstance(default, (list, tuple)) and len(default) == 2:
+                    found.add(tuple(default))
+    return found
 
 
 def _parse_table(table: dict) -> Table:
@@ -404,6 +479,9 @@ def _parse_table(table: dict) -> Table:
             data_category=col.get("dataCategory", ""),
             summarize_by=col.get("summarizeBy", ""),
             sort_by_column=col.get("sortByColumn", ""),
+            is_available_in_mdx=col.get("isAvailableInMdx", True) is not False,
+            alternate_of=bool(col.get("alternateOf")),
+            annotations=_annotations(col.get("annotations")),
         )
         for col in table.get("columns", [])
         if col.get("type") != "rowNumber"
@@ -417,7 +495,11 @@ def _parse_table(table: dict) -> Table:
             name=hierarchy.get("name", ""),
             # Array order is not the hierarchy order: "ordinal" is (TMDL lists by ordinal)
             levels=[
-                Level(name=level.get("name", ""), column=level.get("column", ""))
+                Level(
+                    name=level.get("name", ""),
+                    column=level.get("column", ""),
+                    description=_text(level.get("description")),
+                )
                 for _, level in sorted(
                     enumerate(hierarchy.get("levels", [])),
                     key=lambda item: (item[1].get("ordinal", item[0]), item[0]),
@@ -425,6 +507,7 @@ def _parse_table(table: dict) -> Table:
             ],
             description=_text(hierarchy.get("description")),
             is_hidden=hierarchy.get("isHidden", False),
+            annotations=_annotations(hierarchy.get("annotations")),
         )
         for hierarchy in table.get("hierarchies", [])
     ]
@@ -442,6 +525,9 @@ def _parse_table(table: dict) -> Table:
                 entity_name=source.get("entityName", ""),
                 schema_name=source.get("schemaName", ""),
                 expression_source=source.get("expressionSource", ""),
+                data_source=source.get("dataSource", ""),
+                description=_text(partition.get("description")),
+                annotations=_annotations(partition.get("annotations")),
             )
         )
 
@@ -460,6 +546,8 @@ def _parse_table(table: dict) -> Table:
         hierarchies=hierarchies,
         partitions=partitions,
         calculation_items=calculation_items,
+        calculation_group="calculationGroup" in table,
+        annotations=_annotations(table.get("annotations")),
     )
 
 
@@ -476,6 +564,7 @@ def _parse_measure(table: str, measure: dict) -> Measure:
         display_folder=measure.get("displayFolder", ""),
         data_type=measure.get("dataType", ""),
         is_hidden=measure.get("isHidden", False),
+        annotations=_annotations(measure.get("annotations")),
     )
 
 

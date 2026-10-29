@@ -237,9 +237,12 @@ def test_workbooks_end_to_end(tmp_path):
     for sheet in ("Sample Common", "Sales", "Pages", "model tables", "model columns"):
         assert f'name="{sheet}"' in workbook
     assert 'name="Detail"' in workbook  # pages without visuals get a sheet too
-    assert "model quality" not in workbook  # BPA not run
+    # The Python BPA runs without Tabular Editor too
+    assert 'name="model quality summary"' in workbook and 'name="model quality"' in workbook
     with zipfile.ZipFile(output / "Sample.xlsx") as main:
         main_strings = main.read("xl/sharedStrings.xml").decode()
+    assert "Model quality" in main_strings  # the column on the common/model sheets
+    assert "Rules not checked" in main_strings and "DAX rule (ticket 04)" in main_strings
     assert "Depends On" in main_strings and "Dependants" not in main_strings
     assert "Calculated Column" in main_strings  # calculated columns are listed with their DAX
     assert "(no visuals, buttons or page filters on this page)" in main_strings

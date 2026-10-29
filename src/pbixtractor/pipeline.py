@@ -19,6 +19,7 @@ from typing import Callable, Optional
 import pandas as pd
 
 from .azure_auth import ApiError
+from .bpa import BpaFindings, run_bpa
 from .catalog import add_to_catalog
 from .constants import DESCRIPT_TAG
 from .dax_parser import model_dependencies
@@ -48,11 +49,7 @@ from .semantic_model import (
     write_documentation_tsv,
 )
 from .service_stats import ServiceModel, read_service_statistics, service_model_for_report
-from .tabular_editor import (
-    export_documentation_tsv,
-    find_tabular_editor,
-    run_best_practice_analyzer,
-)
+from .tabular_editor import export_documentation_tsv, find_tabular_editor
 from .utils import is_excel_open_with_file
 
 logger = get_logger("pbixtractor")
@@ -72,7 +69,7 @@ class ExtractionOptions:
     output_dir: Path  # all output files go here
     name: str = ""  # base name of the output files (default: report file name)
     description_tag: str = DESCRIPT_TAG  # delimiter of descriptions embedded in DAX
-    tabular_editor_analysis: bool = True  # BPA, live statistics
+    tabular_editor_analysis: bool = True  # live statistics from Desktop (the BPA always runs)
     tabular_editor_tsv: bool = False  # use TE's TSV export (formats DAX via daxformatter.com)
     write_log_file: bool = True  # save warnings to <output_dir>/logs/
     # Model mode: more reports on the same model, documented together with report_path (pages
@@ -193,39 +190,27 @@ def _dax_dependencies(model, progress):
         return None
 
 
-def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, progress):
+def _live_statistics(model, options: ExtractionOptions, progress):
     """
-    Optional, local Tabular Editor analysis: Best Practice Analyzer on the model (source: .bim
-    file or TMDL folder, both loaded by Tabular Editor 2), plus live statistics if the report is
-    open in Power BI Desktop.
+    Live statistics if the report is open in Power BI Desktop (read with Tabular Editor 2,
+    until ticket 08 removes Desktop detection).
 
     Returns:
-        (bpa_violations, live_statistics); each None when unavailable
+        LiveStatistics, or None when unavailable
     """
-    bpa_violations = live_statistics = None
     if not options.tabular_editor_analysis:
-        return bpa_violations, live_statistics
+        return None
 
     tabular_editor = find_tabular_editor()
     if tabular_editor is None:
         logger.warning(
-            "Tabular Editor analysis skipped: Tabular Editor 2 not found. Add its folder to "
-            "Input/TabularEditorLocations.txt or disable the Tabular Editor analysis."
+            "Live statistics from Power BI Desktop skipped: Tabular Editor 2 not found. Add its "
+            "folder to Input/TabularEditorLocations.txt or disable the Tabular Editor analysis."
         )
-        return bpa_violations, live_statistics
-
-    progress("Best Practice Analyzer", 0.2)
-    try:
-        bpa_violations, rule_errors = run_best_practice_analyzer(tabular_editor, source)
-        if rule_errors:
-            logger.warning(
-                f"{len(rule_errors)} Best Practice Analyzer rule(s) could not be evaluated: "
-                + "; ".join(error[:150] for error in rule_errors[:5])
-            )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"Best Practice Analyzer failed: {e}")
+        return None
 
     progress("Live statistics (Power BI Desktop)", 0.45)
+    live_statistics = None
     try:
         live_statistics, live_note = collect_live_statistics(
             tabular_editor, options.report_path, {table.name for table in model.tables}
@@ -239,8 +224,29 @@ def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, pr
             )
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
         logger.warning(f"Reading live statistics from Power BI Desktop failed: {e}")
+    return live_statistics
 
-    return bpa_violations, live_statistics
+
+def _best_practice_analyzer(model, statistics, progress) -> Optional[BpaFindings]:
+    """
+    The Python Best Practice Analyzer (bpa.py) on every run, with or without Tabular Editor.
+
+    Returns:
+        The findings (with .not_checked), or None when the analysis itself crashed (a bug:
+        logged as a warning, never a failed run)
+    """
+    progress("Best Practice Analyzer", 0.48)
+    try:
+        violations, not_checked = run_bpa(model, statistics)
+    except Exception as e:  # a bug in the engine must not fail the run
+        logger.warning(f"Best Practice Analyzer failed: {e!r}")
+        return None
+    if not_checked:
+        logger.debug(
+            f"{len(not_checked)} Best Practice Analyzer rule(s) not checked: "
+            + "; ".join(f"{rule} ({reason})" for rule, reason in not_checked)
+        )
+    return BpaFindings(violations, not_checked)
 
 
 def _service_statistics(model, options: ExtractionOptions, progress):
@@ -357,7 +363,7 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         return ExtractionResult("error", f"Could not read the model {options.model_path}: {e}")
 
     exact_dependencies = _dax_dependencies(model, progress)
-    bpa_violations, live_statistics = _tabular_editor_analysis(model, source, options, progress)
+    live_statistics = _live_statistics(model, options, progress)
     service_statistics = _service_statistics(model, options, progress)
     if service_statistics is not None:
         # The model as published wins: a downloaded report is never open in Desktop by its
@@ -376,6 +382,8 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
             measure.data_type = live_statistics.measure_types.get(
                 (measure.table, measure.name), measure.data_type
             )
+
+    bpa_violations = _best_practice_analyzer(model, live_statistics, progress)
 
     if options.tabular_editor_tsv:
         progress("Tabular Editor TSV export", 0.5)
@@ -421,6 +429,7 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         bpa_violations=bpa_violations,
         live_statistics=live_statistics,
         report=report_definition,
+        bpa_not_checked=bpa_violations.not_checked if bpa_violations is not None else None,
     )
 
     # 4. Output
