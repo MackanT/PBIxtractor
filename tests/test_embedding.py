@@ -183,3 +183,50 @@ def test_the_file_routes_follow_the_hosts_access_check(host, tmp_path):
     web_config.configure(embedded=True, access=broken)  # fails closed
     with pytest.raises(HTTPException):
         web_ui._serve_catalog_file("catalog.html")
+
+
+def test_embedded_there_is_no_rules_page_and_no_link_to_it(host):
+    async def scenario(user):
+        await user.open("/")
+        await user.should_see("Create documentation")
+        routes = {getattr(r, "path", "") for r in app.routes}
+        assert "/rules" not in routes and "/pbx/rules" not in routes
+        markers = {marker for e in user.client.elements.values() for marker in e._markers}
+        assert "nav_rules" not in markers  # also not hidden
+        assert not any(
+            "/rules" in str(getattr(e, "props", {}).get("href", "")) for e in user.client.elements.values()
+        )
+        await user.open("/rules")  # the host's page (its catch-all), not a rules page
+        await user.should_see(marker="host_header")
+        await user.should_not_see("Model quality rules")
+
+    _simulate(host, scenario)
+
+
+def test_register_bpa_rules_reaches_every_runs_options(host, monkeypatch):
+    rules_file = host / "host_rules.yaml"
+    seen = []
+
+    def fake_run(options, progress=None, on_log=None):
+        seen.append(options)
+        return web_ui.ExtractionResult("error", "stopped by the test")
+
+    monkeypatch.setattr(web_ui, "run_extraction", fake_run)
+    report_bytes = (host / "Sample.pbix").read_bytes()
+    model_bytes = (host / "Sample.bim").read_bytes()
+    out = host / "out"
+
+    async def run() -> None:
+        async with user_simulation(_host_root) as user:
+            web_ui.register(prefix="/pbx", output_root=out, storage_prefix="pbx.", bpa_rules=rules_file)
+            assert web_config.CONFIG.bpa_rules == rules_file
+            await user.open("/")
+            upload = _element(user, "upload")
+            await upload.handle_uploads([ui.upload.SmallFileUpload("Dropped.bim", "", model_bytes)])
+            await upload.handle_uploads([ui.upload.SmallFileUpload("Dropped.pbix", "", report_bytes)])
+            await _wait_for(lambda: _any(user, "model").value == str(out / "_uploads" / "Dropped.bim"))
+            user.find("Create documentation").click()
+            await _wait_for(lambda: bool(seen))
+
+    asyncio.run(run())
+    assert seen[0].bpa_rules == rules_file

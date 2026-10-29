@@ -10,6 +10,7 @@ which sets these; everything the web UI puts in shared places goes through here:
   the server's disk, take server paths, save the Tabular Editor folder, look for Power BI Desktop
   or open a folder. A hosted app must leave it off: those would act on the server, not the user's
   PC (uploads, Fabric and Azure DevOps still work).
+- `bpa_rules`: the custom model quality rules file the runs use (embedded: the host's choice)
 """
 
 from collections.abc import MutableMapping
@@ -30,6 +31,9 @@ class WebConfig:
     # Host's sign-in/role check for the file routes (lineage files, catalog), called per
     # request; None = no check (stand-alone: a local app behind the loopback host check)
     access: Optional[Callable[[], bool]] = None
+    # Custom model quality rules file every run from the page uses (ExtractionOptions.bpa_rules);
+    # None = the server account's ~/.pbixtractor/bpa_rules.yaml (stand-alone: the rules page's)
+    bpa_rules: Optional[Path] = None
 
 
 CONFIG = WebConfig()

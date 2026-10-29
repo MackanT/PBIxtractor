@@ -32,7 +32,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from nicegui import app, background_tasks, events, run, ui
 
-from . import __version__, azure_auth, batch, fabric, web_config, web_sources
+from . import __version__, azure_auth, batch, fabric, web_config, web_rules, web_sources
 from .azure_auth import ApiError
 from .data import DATA_DIR
 from .live_model import find_local_instances
@@ -148,6 +148,13 @@ def register_routes() -> None:
     app.add_api_route(url("/catalog/{path:path}"), _serve_catalog_file, methods=["GET"])
 
 
+def register_app_pages() -> None:
+    """The stand-alone app's pages besides the root (index): /rules. Never embedded: the rules
+    page edits this PC's rule file (D22). Called by start() only (NiceGUI's test teardown
+    unloads the module of every page function, so tests register their own wrapper)."""
+    ui.page("/rules", title="Model quality rules - PBIxtractor")(rules_index)
+
+
 def register(
     prefix: str = "/pbixtractor",
     *,
@@ -155,6 +162,7 @@ def register(
     storage_prefix: str = "pbixtractor.",
     local_machine: bool = False,
     access: Optional[Callable[[], bool]] = None,
+    bpa_rules: Optional[Path] = None,
 ) -> None:
     """
     Embed PBIxtractor in another NiceGUI app: call once at startup (before ui.run), then call
@@ -172,6 +180,9 @@ def register(
         access: The host's sign-in/role check, called for every request to the file routes
             (they are plain HTTP routes, outside the host's page login); False → 403. Show
             the page itself only to the same users.
+        bpa_rules: The custom model quality rules file (bpa_custom.py) of every run started
+            from the page; None = the server account's ~/.pbixtractor/bpa_rules.yaml. There
+            is no rules page embedded: the host manages the file.
     """
     web_config.configure(
         prefix=prefix.rstrip("/"),
@@ -180,6 +191,7 @@ def register(
         local_machine=local_machine,
         embedded=True,
         access=access,
+        bpa_rules=Path(bpa_rules) if bpa_rules else None,
     )
     # A browser sign-in would open on the server: only a service principal from the
     # environment signs in (else Fabric/DevOps calls fail with an error naming its variables)
@@ -716,11 +728,14 @@ def _catalog_ready() -> bool:
     return _CATALOG["dir"] is not None and (Path(_CATALOG["dir"]) / "catalog.html").is_file()
 
 
-def _build_shell():
+def _build_shell(active: str = "/"):
     """Stand-alone app shell: header + slim icon rail (one continuous brand band).
 
     The menu button toggles the rail between icons and icons + labels; it never hides it.
     Returns the rail's refresh function (the Catalog entry appears once a catalog exists).
+
+    Args:
+        active: The app page shown ("/" documentation, "/rules" model quality rules)
     """
     remembered = stored_choices()
     dark = ui.dark_mode(bool(remembered.get("dark_mode", False)))  # light is the default
@@ -757,21 +772,32 @@ def _build_shell():
 
     @ui.refreshable
     def nav() -> None:
-        entries = [("description", "Document a report", None, "nav_document")]
+        # (icon, label, app page or None, generated page (new tab) or None, marker)
+        entries = [
+            ("description", "Document a report", "/", None, "nav_document"),
+            ("rule", "Model quality rules", "/rules", None, "nav_rules"),
+        ]
         if _catalog_ready():
-            entries.append(("menu_book", "Catalog", "/catalog/catalog.html", "nav_catalog"))
+            entries.append(("menu_book", "Catalog", None, "/catalog/catalog.html", "nav_catalog"))
             if (Path(_CATALOG["dir"]) / "lineage.html").is_file():
-                entries.append(("hub", "Lineage across models", "/catalog/lineage.html", "nav_cross_lineage"))
-        for icon, label, page, marker in entries:
+                entries.append(
+                    ("hub", "Lineage across models", None, "/catalog/lineage.html", "nav_cross_lineage")
+                )
+        for icon, label, app_page, page, marker in entries:
+            current = app_page == active
+            if page:
+                on_click = lambda p=page: ui.navigate.to(_themed(p), new_tab=True)  # noqa: E731
+            elif not current:
+                on_click = lambda p=app_page: ui.navigate.to(p)  # noqa: E731
+            else:
+                on_click = None
             button = ui.button(
-                label if rail["expanded"] else "",
-                icon=icon,
-                on_click=(lambda p=page: ui.navigate.to(_themed(p), new_tab=True)) if page else None,
+                label if rail["expanded"] else "", icon=icon, on_click=on_click
             ).props(f'flat color=white aria-label="{label}"')
             button.classes(
                 ("rail-btn-x" if rail["expanded"] else "rail-btn")
                 + " nav-btn"
-                + ("" if page else " nav-active")
+                + (" nav-active" if current else "")
             ).mark(marker)
             if not rail["expanded"]:
                 button.tooltip(label + (" (opens in a new tab)" if page else ""))
@@ -797,6 +823,42 @@ def index() -> None:
     apply_theme()
     refresh_nav = _build_shell()
     build_page(on_catalog_change=refresh_nav)
+
+
+def rules_index() -> None:
+    """The stand-alone app's "Model quality rules" page (/rules): theme, shell and the page."""
+    apply_theme()
+    _build_shell(active="/rules")
+    web_rules.build_rules_page()
+
+
+def _remember_for_rules(result: ExtractionResult, options: ExtractionOptions) -> None:
+    """Keep a successful run's model for the rules page's "Test" (web_rules)."""
+    documentation = result.documentation
+    if not result.ok or documentation is None:
+        return
+    web_rules.remember_run(
+        options.name if options.extra_reports else model_name(options.model_path),
+        documentation.model,
+        documentation.live_statistics,
+        report=options.name,
+    )
+
+
+def _run_and_remember(options: ExtractionOptions, progress, on_log) -> ExtractionResult:
+    """run_extraction, then keep its model for "Test" (in the run's thread: also when the tab
+    that started it is gone)."""
+    result = run_extraction(options, progress, on_log)
+    _remember_for_rules(result, options)
+    return result
+
+
+def _remember_outcome_for_rules(outcome: batch.JobOutcome) -> None:
+    """Keep a successful batch model for "Test" (read again from its file when tested)."""
+    options = outcome.options
+    if outcome.ok and options is not None:
+        name = options.name if options.extra_reports else model_name(options.model_path)
+        web_rules.remember_model_file(name, options.model_path, report=options.name)
 
 
 def build_page(
@@ -1333,6 +1395,7 @@ def build_page(
             service_statistics=service_stats.value,
             write_log_file=log_file.value,
             description_tag=description_tag.value or ExtractionOptions.description_tag,
+            bpa_rules=web_config.CONFIG.bpa_rules,
         )
         if catalog_input.value and local:  # a server path: only remembered when chosen locally
             stored_choices()["catalog_dir"] = catalog_input.value
@@ -1367,7 +1430,10 @@ def build_page(
                 settings,
                 lambda step, fraction: events.put(("progress", step, fraction)),
                 lambda level, message: events.put(("log", level, message)),
-                lambda index, outcome: events.put(("outcome", index, outcome)),
+                lambda index, outcome: (
+                    _remember_outcome_for_rules(outcome),
+                    events.put(("outcome", index, outcome)),
+                ),
                 stop.is_set,
             )
         except Exception as error:  # UI boundary: never let a click end without any message
@@ -1490,6 +1556,7 @@ def build_page(
             service_statistics=service_stats.value,
             catalog_dir=Path(catalog_input.value) if add_catalog.value and catalog_input.value else None,
             service_model=service_model,
+            bpa_rules=web_config.CONFIG.bpa_rules,
         )
         remembered = stored_choices()
         remembered["catalog_enabled"] = add_catalog.value
@@ -1516,7 +1583,7 @@ def build_page(
         timer = ui.timer(0.2, drain)
         try:
             result: ExtractionResult = await run.io_bound(
-                run_extraction,
+                _run_and_remember,
                 options,
                 lambda step, fraction: events.put(("progress", step, fraction)),
                 lambda level, message: events.put(("log", level, message)),
@@ -1559,6 +1626,7 @@ def start(port: int = 8081, open_browser: bool = True, host: Optional[str] = Non
     """
     web_config.configure()  # stand-alone: no prefixes, this PC's own disk (local_machine)
     register_routes()
+    register_app_pages()
     add_host_check(port)
     if open_browser:
         connected = asyncio.Event()

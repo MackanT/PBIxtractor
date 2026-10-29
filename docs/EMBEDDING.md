@@ -31,8 +31,15 @@ web_ui.register(
     storage_prefix="pbixtractor.",  # its keys in app.storage.general
     local_machine=False,            # see "Server or user PC" below
     access=user_may_use_it,         # the host's sign-in/role check (see "Access control")
+    bpa_rules="/data/pbixtractor/bpa_rules.yaml",  # custom model quality rules (optional)
 )
 ```
+
+`bpa_rules` is the custom model quality rules file (PBIxtractor's YAML format, see the README's
+"Custom model quality rules") that every run started from the embedded page uses, next to the
+built-in rules. Leave it out to use `~/.pbixtractor/bpa_rules.yaml` of the account the server
+runs as (when it exists). Embedded there is no "Model quality rules" page (stand-alone it edits
+the user's own file): the host manages the file.
 
 ## 3. Show the page inside the host's layout
 

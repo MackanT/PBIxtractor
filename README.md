@@ -73,6 +73,14 @@ page shows the lineage viewer inline, the Best Practice Analyzer findings, unuse
 bookmarks, row-level security roles (flagged, so protected reports are shared with care) and
 download links for all output files. Everything runs locally.
 
+The rail's **Model quality rules** page lists the built-in Best Practice Analyzer rules (search
+them, switch any off) and your own custom rules: add, edit or delete one with a form (scope,
+severity, conditions on name, description, DAX, ...). "Test" runs the rule in the form on the
+model of the last documentation run in the app, without saving it. Every change is saved at
+once to `~/.pbixtractor/bpa_rules.yaml`, the same file every run on this PC uses (see "Custom
+model quality rules" below). If that file has rules that cannot be read, the page lists them
+and asks before a save rewrites the file without them.
+
 Fabric and Azure DevOps use one sign-in account, shown at the top of both panels ("Signed in as
 <user> · <tenant>"). Choose another one from the list (one entry per tenant of each user you
 signed in with), or remove any entry with the icon next to it in the list. "Add account" opens

@@ -137,12 +137,14 @@ src/pbixtractor/
                     ReportExtractor (readers.read_report → ReportContext + PageExtractor);
                     extract_reports(paths) for model mode.
   web_config.py     How the web UI is hosted: WebConfig(prefix, output_root, storage_prefix,
-                    local_machine, embedded) in web_config.CONFIG (read it via the module - configure()
+                    local_machine, embedded, access, bpa_rules) in web_config.CONFIG (read it via the module - configure()
                     replaces it); url(), output_root(), stored_choices() (app.storage.general behind
                     a key prefix). Stand-alone = defaults; web_ui.register() sets the embedded ones.
+                    bpa_rules = the custom rules file every run from the page passes as
+                    ExtractionOptions.bpa_rules (None: the server account's user file).
   web_ui.py         NiceGUI app, stand-alone and embeddable (docs/EMBEDDING.md):
                     register(prefix="/pbixtractor", output_root, storage_prefix="pbixtractor.",
-                    local_machine=False) for a host app, then build_page() inside the host's page
+                    local_machine=False, access, bpa_rules=None) for a host app, then build_page() inside the host's page
                     (no header/rail/theme/host check of ours; routes under the prefix; a catalog
                     link on the page). local_machine=False hides everything acting on the server's
                     machine: path inputs + PathPicker, Tabular Editor folder, Desktop detection,
@@ -205,6 +207,30 @@ src/pbixtractor/
                     run.io_bound (psutil takes seconds), debounced 0.5 s while typing a path.
                     Catalog option (switch + folder, default output/_catalog, remembered via
                     stored_choices()); header link "Catalog" → /catalog/.
+                    Rules page (stand-alone only; start() → register_app_pages() adds
+                    ui.page("/rules") = rules_index() (not register_routes: NiceGUI's test
+                    teardown unloads every page function's module, so tests register a wrapper) = theme + _build_shell(active="/rules") +
+                    web_rules.build_rules_page(); rail entry "Model quality rules" (icon rule,
+                    marker nav_rules); embedded: no route, no entry). Every run passes
+                    web_config.CONFIG.bpa_rules (single: ExtractionOptions, batch: BatchSettings).
+                    After each successful run (in its thread: _run_and_remember; batch: per
+                    outcome) web_rules remembers the model for "Test".
+  web_rules.py      The "Model quality rules" page (build_rules_page): error banner when
+                    load_rule_file reports problems (the first save asks "This removes the rules
+                    that could not be read"), the 71 built-ins with a search and a switch "On"
+                    each (off = id under disabled, saved at once), custom rules with Add / edit /
+                    delete (confirmed) and a form dialog (id, name, category, severity,
+                    description, scope; condition rows + optional any group: property choices =
+                    bpa_custom.PROPERTIES for the scope, ops = OPS, value hidden for ops without
+                    one, comma list for `in`). Save = validate_rule + unique id (form_errors),
+                    then bpa_custom.save_rule_file(USER_RULES_PATH). "Test" = evaluate_rule on the
+                    form's unsaved rule in run.io_bound against the last run (remember_run(name,
+                    model, statistics) / remember_model_file(name, path): batch outcomes carry no
+                    model, so it is read again from its file - service statistics are then
+                    missing); disabled with "Run a documentation first" before any run; shows
+                    "N findings on <model>" + the first 50 objects. Bound selects must not
+                    refresh their own container in on_change (a rebuilt bound select fires it
+                    again: endless loop) - visibility is toggled instead.
   theme.py          Visual style ("field-station", shared with the data-platform web UI that
                     PBIxtractor will be embedded in): colour tokens (sap accent, copper = the one
                     primary action/attention, rust/lichen/glacier status, bone/bark grounds),
