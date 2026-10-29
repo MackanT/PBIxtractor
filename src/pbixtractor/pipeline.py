@@ -40,7 +40,13 @@ from .report_extractor import (
     visual_type_list,
     with_report,
 )
-from .semantic_model import model_source, model_to_dataset, parse_model, read_model
+from .semantic_model import (
+    model_source,
+    model_to_dataset,
+    parse_model,
+    read_model,
+    write_documentation_tsv,
+)
 from .service_stats import ServiceModel, read_service_statistics, service_model_for_report
 from .tabular_editor import (
     export_documentation_tsv,
@@ -381,6 +387,11 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         files["tsv"] = tsv_path
     else:
         dataset = model_to_dataset(model)
+        # Always left in the output folder, as the old program did (DAX as in the model)
+        try:
+            files["tsv"] = write_documentation_tsv(model, out / "documentation.tsv")
+        except OSError as e:
+            logger.warning(f"Could not write {out / 'documentation.tsv'}: {e}")
 
     # 2. Report(s)
     if options.extra_reports:
