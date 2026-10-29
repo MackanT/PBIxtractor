@@ -47,6 +47,115 @@ def _share(part: int, whole: int) -> Optional[float]:
 # Public name for other sheet writers
 write_table = _write_table
 
+MODEL_QUALITY_HEADER = "Model quality"
+_SEVERITY_ORDER = {"High": 0, "Medium": 1, "Low": 2}
+
+
+def parse_bpa_object_name(object_name: str) -> tuple[Optional[str], str]:
+    """
+    Split a BPA ObjectName into (table, name).
+
+    Tabular Editor gives columns and measures as 'Table'[Name] (quotes doubled in the table
+    name, "]" escaped as "]]"; the table may be unquoted or missing) and tables as 'Table' or
+    Table.
+
+    Returns:
+        (table, name) for 'Table'[Name] / [Name] (table None), (None, table) for a table
+    """
+    text = object_name.strip()
+    table = None
+    if text.startswith("'"):
+        i, chars = 1, []
+        while i < len(text):
+            if text[i] == "'":
+                if text[i + 1 : i + 2] == "'":
+                    chars.append("'")
+                    i += 2
+                    continue
+                break
+            chars.append(text[i])
+            i += 1
+        table, text = "".join(chars), text[i + 1 :].strip()
+        if not text:
+            return None, table
+    elif "[" in text:
+        bracket = text.index("[")
+        table, text = text[:bracket].strip() or None, text[bracket:]
+    if text.startswith("[") and text.endswith("]"):
+        return table, text[1:-1].replace("]]", "]")
+    return None, object_name.strip()
+
+
+def _bpa_kind(object_type: str) -> Optional[str]:
+    """'field' for measures and columns, "table" for tables, None for anything else."""
+    kind = object_type.replace(" ", "").lower()
+    if kind == "measure" or kind.endswith("column"):
+        return "field"
+    if kind.endswith("table"):
+        return "table"
+    return None
+
+
+def bpa_by_object(violations: list[BpaViolation]) -> dict[tuple, str]:
+    """
+    The "Model quality" cell text per object: the rules it breaks, one per line, highest
+    severity first (then by rule name), each as "<severity>: <rule>".
+
+    Args:
+        violations: Findings from tabular_editor.run_best_practice_analyzer()
+
+    Returns:
+        Key -> cell text; keys ("field", table, name) for measures/columns (table None when
+        the BPA gave none) and ("table", None, name) for tables, all lower case (DAX names are
+        case-insensitive). Look objects up with bpa_cell(). Other object types are left out.
+    """
+    grouped: dict[tuple, list[BpaViolation]] = {}
+    for violation in violations:
+        kind = _bpa_kind(violation.object_type)
+        if kind is None:
+            continue
+        table, name = parse_bpa_object_name(violation.object_name)
+        if kind == "field" and table is None and violation.object_type.lower() != "measure":
+            continue  # a column needs its table
+        key = (kind, table.lower() if table is not None else None, name.lower())
+        if kind == "table":
+            key = ("table", None, (name if table is None else table).lower())
+        grouped.setdefault(key, []).append(violation)
+
+    cells = {}
+    for key, found in grouped.items():
+        found.sort(key=lambda v: (_SEVERITY_ORDER.get(v.severity, 3), v.rule.lower()))
+        lines = [f"{v.severity}: {v.rule}" if v.severity else v.rule for v in found]
+        cells[key] = "\n".join(dict.fromkeys(lines))
+    return cells
+
+
+def bpa_cell(cells: dict[tuple, str], table: str, name: Optional[str] = None) -> str:
+    """
+    The "Model quality" text of a measure/column (table + name) or a table (name None).
+
+    Args:
+        cells: From bpa_by_object()
+        table: Table name
+        name: Measure or column name; None for the table itself
+
+    Returns:
+        Cell text, "" when the object breaks no rule
+    """
+    if name is None:
+        return cells.get(("table", None, table.lower()), "")
+    return cells.get(("field", table.lower(), name.lower())) or cells.get(
+        ("field", None, name.lower()), ""
+    )
+
+
+def _add_quality_column(worksheet, cells, keys: list[tuple], column: int, cell_format) -> None:
+    """Write the "Model quality" cells of a sheet's rows (row 1 on), wrapped like DAX cells."""
+    for row_num, key in enumerate(keys, start=1):
+        text = bpa_cell(cells, *key)
+        if text:
+            worksheet.write(row_num, column, text, cell_format)
+
 
 def model_table_rows(model: SemanticModel, stats: Optional[LiveStatistics] = None) -> list[list]:
     """One row per table: storage mode, source, object counts and (live) rows/size."""
@@ -115,6 +224,7 @@ def add_model_sheets(
     header_format,
     sheet_name=lambda name: name,
     stats: Optional[LiveStatistics] = None,
+    bpa: Optional[dict[tuple, str]] = None,
 ) -> None:
     """
     Add sheets describing the semantic model to a workbook.
@@ -129,52 +239,58 @@ def add_model_sheets(
         sheet_name: Callable returning a valid, unique sheet name
         stats: Live statistics (rows, sizes, distinct values) if the report was open in
             Power BI Desktop; those columns stay empty otherwise
+        bpa: From bpa_by_object(): adds a last "Model quality" column to the tables and
+            columns sheets (None: no such column, e.g. the BPA did not run)
     """
     percent = workbook.add_format({"num_format": "0.0%"})
-    _write_table(
-        workbook.add_worksheet(sheet_name("model tables")),
-        header_format,
-        [
-            ("Table", 30),
-            ("Storage Mode", 14),
-            ("Connector", 18),
-            ("Source Objects", 40),
-            ("Hidden", 8),
-            ("Columns", 9),
-            ("Calculated Columns", 11),
-            ("Measures", 9),
-            ("Hierarchies", 11),
-            ("Rows", 12),
-            ("Size (MB)", 10),
-            ("% of Model", 10, percent),
-            ("Description", 60),
-        ],
-        model_table_rows(model, stats),
-    )
+    quality = [(MODEL_QUALITY_HEADER, 60)] if bpa is not None else []
+    wrap = workbook.add_format({"align": "top", "text_wrap": True}) if bpa is not None else None
+    tables_sheet = workbook.add_worksheet(sheet_name("model tables"))
+    table_headers = [
+        ("Table", 30),
+        ("Storage Mode", 14),
+        ("Connector", 18),
+        ("Source Objects", 40),
+        ("Hidden", 8),
+        ("Columns", 9),
+        ("Calculated Columns", 11),
+        ("Measures", 9),
+        ("Hierarchies", 11),
+        ("Rows", 12),
+        ("Size (MB)", 10),
+        ("% of Model", 10, percent),
+        ("Description", 60),
+        *quality,
+    ]
+    _write_table(tables_sheet, header_format, table_headers, model_table_rows(model, stats))
+    if bpa is not None:
+        keys = [(table.name,) for table in model.tables]
+        _add_quality_column(tables_sheet, bpa, keys, len(table_headers) - 1, wrap)
 
-    _write_table(
-        workbook.add_worksheet(sheet_name("model columns")),
-        header_format,
-        [
-            ("Table", 25),
-            ("Column", 30),
-            ("Data Type", 11),
-            ("Kind", 11),
-            ("Source Column", 25),
-            ("Hidden", 8),
-            ("Key", 6),
-            ("Data Category", 14),
-            ("Summarize By", 13),
-            ("Sort By", 20),
-            ("Format", 15),
-            ("Display Folder", 18),
-            ("Distinct Values", 12),
-            ("Size (KB)", 10),
-            ("% of Table", 10, percent),
-            ("Description", 60),
-        ],
-        model_column_rows(model, stats),
-    )
+    columns_sheet = workbook.add_worksheet(sheet_name("model columns"))
+    column_headers = [
+        ("Table", 25),
+        ("Column", 30),
+        ("Data Type", 11),
+        ("Kind", 11),
+        ("Source Column", 25),
+        ("Hidden", 8),
+        ("Key", 6),
+        ("Data Category", 14),
+        ("Summarize By", 13),
+        ("Sort By", 20),
+        ("Format", 15),
+        ("Display Folder", 18),
+        ("Distinct Values", 12),
+        ("Size (KB)", 10),
+        ("% of Table", 10, percent),
+        ("Description", 60),
+        *quality,
+    ]
+    _write_table(columns_sheet, header_format, column_headers, model_column_rows(model, stats))
+    if bpa is not None:
+        keys = [(column.table, column.name) for column in model.all_columns]
+        _add_quality_column(columns_sheet, bpa, keys, len(column_headers) - 1, wrap)
 
     if model.roles:
         role_rows = [
