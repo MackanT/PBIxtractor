@@ -7,8 +7,7 @@ which sets these; everything the web UI puts in shared places goes through here:
 - keys in app.storage.general get `storage_prefix` (the host has its own keys there)
 - output goes below `output_root`
 - `local_machine`: the browser runs on the same PC as the server. Only then may the page browse
-  the server's disk, take server paths, save the Tabular Editor folder, look for Power BI Desktop
-  or open a folder. A hosted app must leave it off: those would act on the server, not the user's
+  the server's disk, take server paths or open a folder. A hosted app must leave it off: those would act on the server, not the user's
   PC (uploads, Fabric and Azure DevOps still work).
 - `bpa_rules`: the custom model quality rules file the runs use (embedded: the host's choice)
 """

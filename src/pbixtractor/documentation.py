@@ -1,4 +1,4 @@
-"""Analysis stage: combine the report, the model and Tabular Editor results into one object.
+"""Analysis stage: combine the report, the model and its analysis into one object.
 
 Everything the writers need is computed here; nothing in this module writes files.
 
@@ -907,9 +907,9 @@ def build_documentation(
         visual_mapper: Visual type display names
         visual_types: Supported visual types
         logger: Logger
-        exact_dependencies: Tabular Editor dependencies (None: text matching)
+        exact_dependencies: dax_parser.model_dependencies() (None: text matching)
         bpa_violations: Best Practice Analyzer findings (None: not run)
-        live_statistics: Statistics from Power BI Desktop (None: not available)
+        live_statistics: Statistics from the .pbix or the Power BI service (None: none)
         report: Report definition for page info, bookmarks and interactivity (optional)
         bpa_not_checked: BPA rules not checked, [(rule ID, reason)] (bpa.run_bpa)
 

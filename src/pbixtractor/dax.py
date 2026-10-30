@@ -1,6 +1,6 @@
 """DAX text helpers: reference extraction (text matching) and syntax highlighting for Excel.
 
-Text matching is the fallback when Tabular Editor's exact dependencies are unavailable; it
+Text matching is the fallback when the DAX analysis (dax_parser) failed; it
 cannot resolve unqualified [Name] references and also matches text inside comments.
 """
 

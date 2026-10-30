@@ -592,7 +592,7 @@ def write_data_workbook(
 
 
 def _write_dependencies_sheet(worksheet, documentation: Documentation, formats: dict) -> None:
-    """One row per object -> dependency; exact when Tabular Editor was available."""
+    """One row per object -> dependency; exact unless the DAX analysis failed."""
     worksheet.set_column(0, 0, 50, formats["wrap"])
     worksheet.set_column(1, 1, 50, formats["wrap"])
     worksheet.set_column(2, 3, 16, formats["wrap"])
@@ -601,7 +601,7 @@ def _write_dependencies_sheet(worksheet, documentation: Documentation, formats: 
 
     rows = []
     if documentation.exact_dependencies is not None:
-        # Exact (Tabular Editor): measures, calculated columns/tables and RLS filters
+        # Exact (dax_parser): measures, calculated columns/tables and RLS filters
         rows = [
             (d.source_ref, d.target_ref, d.source_type, d.target_type)
             for d in documentation.exact_dependencies

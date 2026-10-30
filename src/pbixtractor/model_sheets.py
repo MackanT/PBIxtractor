@@ -241,8 +241,8 @@ def add_model_sheets(
         model: Model from semantic_model.read_model()
         header_format: xlsxwriter format for header cells
         sheet_name: Callable returning a valid, unique sheet name
-        stats: Live statistics (rows, sizes, distinct values) if the report was open in
-            Power BI Desktop; those columns stay empty otherwise
+        stats: Statistics (rows, sizes, distinct values) from the .pbix or the Power BI
+            service; those columns stay empty otherwise
         bpa: From bpa_by_object(): adds a last "Model quality" column to the tables and
             columns sheets (None: no such column, e.g. the BPA did not run)
     """

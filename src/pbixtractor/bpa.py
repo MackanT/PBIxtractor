@@ -1423,7 +1423,7 @@ def run_bpa(
 
     Args:
         model: Model from semantic_model.read_model()
-        statistics: Row counts / distinct values (from the .pbix, the service or Desktop) for
+        statistics: Row counts / distinct values (from the .pbix or the service) for
             the rules on cardinality and table size; None: those rules are "not checked"
         rules_path: Rules file (default: Microsoft's standard rules)
         custom: Custom rules (bpa_custom.load_rule_file().rules), checked after the built-ins
