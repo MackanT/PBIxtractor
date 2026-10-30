@@ -105,8 +105,8 @@ def test_differences_are_printed_and_written(tool, fake_te, tmp_path, capsys):
     assert types["Calculation Item"][1:] == ["Tabular Editor", "BPA", "", "'Calc'[Item]"]
     assert types["CalculationItem"][1] == "Tabular Editor"
     assert types["Measure"][1] == "both"
-    assert types["Calculated Column"][1] == "Python"  # Tabular Editor upper-cased it here
-    assert types["CALCULATED COLUMN"][1] == "Tabular Editor"
+    assert types["Relationship"][1] == "Python"  # Tabular Editor upper-cased it here
+    assert types["RELATIONSHIP"][1] == "Tabular Editor"
 
 
 def test_tabular_editor_not_found(tool, monkeypatch, tmp_path, capsys):

@@ -6,8 +6,9 @@
 
 The tokenizer is lossless and never raises on malformed DAX. model_dependencies() resolves
 references the way DAX does (case-insensitively): qualified T[X] to a column or measure of T,
-unqualified [X] to a measure (or, with a row context, a column of the object's own table),
-bare table names to the table; code inside comments and strings is never a reference.
+unqualified [X] in Tabular Editor's order (FormulaFixup: a column of the expression's own table,
+a measure of that table, then a measure in any table), bare table names to the table; code
+inside comments and strings is never a reference.
 """
 
 import re
@@ -134,6 +135,24 @@ class _ModelIndex:
             return "Measure", canonical, self.table_measures[key][name.lower()]
         return None
 
+    def unqualified(self, name: str, own_table: Optional[str]) -> Optional[tuple[str, str, str]]:
+        """
+        What an unqualified [X] means, in Tabular Editor's order (its FormulaFixup): a column of
+        the expression's own table, else a measure of that table, else a measure in any table
+        (the first table in model order that has one).
+        """
+        key = name.lower()
+        own = own_table.lower() if own_table is not None else None
+        if own is not None and own in self.tables:
+            canonical = self.tables[own].name
+            if key in self.columns[own]:
+                return "Column", canonical, self.columns[own][key]
+            if key in self.table_measures[own]:
+                return "Measure", canonical, self.table_measures[own][key]
+        if key in self.measures:
+            return ("Measure", *self.measures[key])
+        return None
+
 
 class Reference(NamedTuple):
     """One reference in a DAX expression, as written there."""
@@ -165,8 +184,9 @@ def reference_occurrences(
     Args:
         dax: The expression
         index: The model's lookup (model_index())
-        own_table: Table whose columns an unqualified [X] may mean (row context); None: an
-            unqualified [X] is only ever a measure
+        own_table: The expression's own table (of a measure, calculated column, table
+            permission or calculation item): an unqualified [X] is first its column, then its
+            measure, then any measure; None (a calculated table): only ever a measure
 
     Returns:
         References with whether each one was written fully qualified
@@ -249,12 +269,7 @@ def reference_occurrences(
             continue
 
         if kind == BRACKET_NAME:
-            name = token.name.lower()
-            if name in index.measures:
-                add(("Measure", *index.measures[name]), False)
-            elif own_table is not None and name in index.columns.get(own_table.lower(), {}):
-                add(("Column", index.tables[own_table.lower()].name,
-                     index.columns[own_table.lower()][name]), False)  # fmt: skip
+            add(index.unqualified(token.name, own_table), False)
         i += 1
     return found
 
@@ -268,8 +283,8 @@ def _references(
     Args:
         dax: The expression
         index: The model's lookup
-        own_table: Table whose columns an unqualified [X] may mean (row context of a
-            calculated column or RLS filter); None for measures and calculated tables
+        own_table: The expression's own table (see reference_occurrences); None for
+            calculated tables
 
     Returns:
         (target type, target table, target name) tuples
@@ -300,7 +315,8 @@ def model_dependencies(model: SemanticModel) -> list[Dependency]:
     sources: list[tuple[str, str, str, list[str], Optional[str]]] = []
     for measure in model.all_measures:
         sources.append(("Measure", measure.table, measure.name,
-                        [measure.expression, measure.format_string_expression], None))  # fmt: skip
+                        [measure.expression, measure.format_string_expression],
+                        measure.table))  # fmt: skip
     for column in model.all_columns:
         if column.kind == "calculated":
             sources.append(("Column", column.table, column.name, [column.expression], column.table))
@@ -314,7 +330,8 @@ def model_dependencies(model: SemanticModel) -> list[Dependency]:
     for table in model.tables:
         for item in table.calculation_items:
             sources.append(("CalculationItem", table.name, item.name,
-                            [item.expression, item.format_string_expression], None))  # fmt: skip
+                            [item.expression, item.format_string_expression],
+                            table.name))  # fmt: skip
 
     dependencies: list[Dependency] = []
     for source_type, source_table, source_name, expressions, own_table in sources:

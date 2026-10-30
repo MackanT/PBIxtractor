@@ -48,6 +48,12 @@ CROSS_FILTERING = {1: "oneDirection", 2: "bothDirections", 3: "automatic"}
 SECURITY_FILTERING = {1: "oneDirection", 2: "bothDirections", 3: "none"}
 MODEL_PERMISSIONS = {1: "none", 2: "read", 3: "readRefresh", 4: "refresh", 5: "administrator"}
 EXPRESSION_KINDS = {0: "m", 1: "dax"}
+ALTERNATE_OF_SUMMARIZATIONS = {0: "groupBy", 1: "sum", 2: "count", 3: "min", 4: "max"}
+POWERBI_DATASOURCE_VERSIONS = {0: "powerBI_V1", 1: "powerBI_V2", 3: "powerBI_V3"}
+# Model annotation set when the metadata cannot say which objects a perspective holds (no
+# PerspectiveTable table): the BPA then leaves PERSPECTIVES_WITH_NO_OBJECTS "not checked"
+# (bpa.py reads it)
+PERSPECTIVE_OBJECTS_UNKNOWN = "PBIxtractor_PerspectiveObjectsUnknown"
 # Annotation.ObjectType of the objects that carry annotations in a .bim (TOM ObjectType)
 OBJECT_TYPES = {"model": 1, "table": 3, "column": 4, "partition": 6, "relationship": 7,
                 "measure": 8, "hierarchy": 9, "role": 34, "expression": 41}
@@ -180,6 +186,14 @@ def _rows(db: sqlite3.Connection, table: str) -> list[dict]:
     return [dict(zip(names, row)) for row in cursor.fetchall()]
 
 
+def _has_table(db: sqlite3.Connection, table: str) -> bool:
+    """Does the metadata database have this TOM table (older versions lack some)?"""
+    found = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return found is not None
+
+
 def _set(target: dict, key: str, value) -> None:
     """Set a TMSL property only when it says something (like a .bim leaves defaults out)."""
     if value not in (None, "", 0, False):
@@ -218,6 +232,26 @@ def database_from_metadata(db: sqlite3.Connection, name: str = "Model") -> dict:
             target["annotations"] = found
         return target
 
+    # Aggregations: a column that is an alternate of a detail column (or of a table's rows)
+    alternate_of: dict[int, dict] = {}
+    all_table_names = {row["ID"]: row.get("Name") or "" for row in _rows(db, "Table")}
+    all_column_names = {
+        row["ID"]: (row.get("ExplicitName") or row.get("InferredName") or "", row.get("TableID"))
+        for row in _rows(db, "Column")
+    }
+    for row in _rows(db, "AlternateOf"):
+        entry: dict = {}
+        summarization = ALTERNATE_OF_SUMMARIZATIONS.get(row.get("Summarization"))
+        if summarization:
+            entry["summarization"] = summarization
+        base = all_column_names.get(row.get("BaseColumnID"))
+        if base is not None:
+            entry["baseColumn"] = base[0]
+            _set(entry, "baseTable", all_table_names.get(base[1]))
+        else:
+            _set(entry, "baseTable", all_table_names.get(row.get("BaseTableID")))
+        alternate_of[row.get("ColumnID")] = entry
+
     by_table: dict[int, dict] = {
         tid: {key: [] for key in ("columns", "measures", "hierarchies", "partitions")}
         for tid in tables
@@ -253,6 +287,8 @@ def database_from_metadata(db: sqlite3.Connection, name: str = "Model") -> dict:
             column["summarizeBy"] = summarize
         if row.get("SortByColumnID") in column_names:
             column["sortByColumn"] = column_names[row["SortByColumnID"]]
+        if cid in alternate_of:
+            column["alternateOf"] = alternate_of[cid]
         by_table[row["TableID"]]["columns"].append(annotate(column, "column", cid))
 
     for row in _rows(db, "Measure"):
@@ -398,16 +434,25 @@ def database_from_metadata(db: sqlite3.Connection, name: str = "Model") -> dict:
         _set(expression, "description", row.get("Description"))
         shared_expressions.append(annotate(expression, "expression", row["ID"]))
 
+    perspectives, objects_known = _perspectives(db, table_names, column_names)
+
     model = {"culture": model_row.get("Culture") or "", "tables": model_tables}
     default_mode = MODES.get(model_row.get("DefaultMode"))
     if default_mode and default_mode != "import":
         model["defaultMode"] = default_mode
+    version = POWERBI_DATASOURCE_VERSIONS.get(model_row.get("DefaultPowerBIDataSourceVersion"))
+    _set(model, "defaultPowerBIDataSourceVersion", version)
     annotate(model, "model", model_row.get("ID"))
+    if perspectives and not objects_known:
+        model["annotations"] = [
+            *model.get("annotations", []),
+            {"name": PERSPECTIVE_OBJECTS_UNKNOWN, "value": "true"},
+        ]
     for key, values in (
         ("relationships", relationships),
         ("roles", roles),
         ("expressions", shared_expressions),
-        ("perspectives", [{"name": r.get("Name") or ""} for r in _rows(db, "Perspective")]),
+        ("perspectives", perspectives),
     ):
         if values:
             model[key] = values
@@ -418,6 +463,43 @@ def database_from_metadata(db: sqlite3.Connection, name: str = "Model") -> dict:
     )
     level = DYNAMIC_FORMAT_LEVEL if dynamic_formats else COMPATIBILITY_LEVEL
     return {"name": name, "compatibilityLevel": level, "model": model}
+
+
+def _perspectives(
+    db: sqlite3.Connection, table_names: dict[int, str], column_names: dict[int, str]
+) -> tuple[list[dict], bool]:
+    """
+    The model's perspectives as TMSL, with their tables, columns, measures and hierarchies.
+
+    Returns:
+        (perspectives, whether the metadata says which objects they hold - False when it has
+        no PerspectiveTable table)
+    """
+    perspectives = {row["ID"]: {"name": row.get("Name") or ""} for row in _rows(db, "Perspective")}
+    if not _has_table(db, "PerspectiveTable"):
+        return list(perspectives.values()), False
+    measures = {row["ID"]: row.get("Name") or "" for row in _rows(db, "Measure")}
+    hierarchies = {row["ID"]: row.get("Name") or "" for row in _rows(db, "Hierarchy")}
+    tables: dict[int, dict] = {}
+    for row in _rows(db, "PerspectiveTable"):
+        perspective = perspectives.get(row.get("PerspectiveID"))
+        if perspective is None or row.get("TableID") not in table_names:
+            continue
+        table = {"name": table_names[row["TableID"]]}
+        if row.get("IncludeAll"):
+            table["includeAll"] = True
+        tables[row["ID"]] = table
+        perspective.setdefault("tables", []).append(table)
+    for kind, names, key, plural in (
+        ("PerspectiveColumn", column_names, "ColumnID", "columns"),
+        ("PerspectiveMeasure", measures, "MeasureID", "measures"),
+        ("PerspectiveHierarchy", hierarchies, "HierarchyID", "hierarchies"),
+    ):
+        for row in _rows(db, kind):
+            table = tables.get(row.get("PerspectiveTableID"))
+            if table is not None and row.get(key) in names:
+                table.setdefault(plural, []).append({"name": names[row[key]]})
+    return list(perspectives.values()), True
 
 
 def statistics_from_metadata(

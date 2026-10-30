@@ -79,22 +79,22 @@ def found(rule_data, the_model=None) -> list[str]:
 @pytest.mark.parametrize(
     "condition, expected",
     [
-        (cond("name", "equals", "TOTAL"), ["'Sales'[Total]"]),
-        (cond("name", "not_equals", "total"), ["'Sales'[twice]", "'Sales'[Ratio]"]),
-        (cond("expression", "contains", "divide"), ["'Sales'[Ratio]"]),
-        (cond("name", "matches", "^[a-z]"), ["'Sales'[Total]", "'Sales'[twice]", "'Sales'[Ratio]"]),
-        (cond("name", "matches", "^t"), ["'Sales'[Total]", "'Sales'[twice]"]),
-        (cond("display_folder", "is_empty"), ["'Sales'[twice]", "'Sales'[Ratio]"]),
-        (cond("display_folder", "not_empty"), ["'Sales'[Total]"]),
-        (cond("format_string", "in", ["0%", "#,0.00"]), ["'Sales'[Ratio]"]),
-        (cond("description", "contains", "sales"), ["'Sales'[Total]"]),
-        (cond("table", "equals", "sales"), ["'Sales'[Total]", "'Sales'[twice]", "'Sales'[Ratio]"]),
-        (cond("hidden", "equals", True), ["'Sales'[twice]"]),
-        (cond("hidden", "not_equals", "true"), ["'Sales'[Total]", "'Sales'[Ratio]"]),
-        (cond("dependants", "equals", 0), ["'Sales'[Ratio]"]),
-        (cond("dependants", "in", [2]), ["'Sales'[Total]"]),
-        (cond("dependants", "not_equals", 0), ["'Sales'[Total]", "'Sales'[twice]"]),
-        (cond("data_type", "is_empty"), ["'Sales'[Total]", "'Sales'[twice]", "'Sales'[Ratio]"]),
+        (cond("name", "equals", "TOTAL"), ["[Total]"]),
+        (cond("name", "not_equals", "total"), ["[twice]", "[Ratio]"]),
+        (cond("expression", "contains", "divide"), ["[Ratio]"]),
+        (cond("name", "matches", "^[a-z]"), ["[Total]", "[twice]", "[Ratio]"]),
+        (cond("name", "matches", "^t"), ["[Total]", "[twice]"]),
+        (cond("display_folder", "is_empty"), ["[twice]", "[Ratio]"]),
+        (cond("display_folder", "not_empty"), ["[Total]"]),
+        (cond("format_string", "in", ["0%", "#,0.00"]), ["[Ratio]"]),
+        (cond("description", "contains", "sales"), ["[Total]"]),
+        (cond("table", "equals", "sales"), ["[Total]", "[twice]", "[Ratio]"]),
+        (cond("hidden", "equals", True), ["[twice]"]),
+        (cond("hidden", "not_equals", "true"), ["[Total]", "[Ratio]"]),
+        (cond("dependants", "equals", 0), ["[Ratio]"]),
+        (cond("dependants", "in", [2]), ["[Total]"]),
+        (cond("dependants", "not_equals", 0), ["[Total]", "[twice]"]),
+        (cond("data_type", "is_empty"), ["[Total]", "[twice]", "[Ratio]"]),
     ],
 )
 def test_each_op_and_property_on_measures(condition, expected):
@@ -119,9 +119,9 @@ def test_all_conditions_and_one_of_any():
         conditions=[cond("hidden", "equals", False)],
         any_=[cond("name", "equals", "Ratio"), cond("display_folder", "not_empty")],
     )
-    assert found(data) == ["'Sales'[Total]", "'Sales'[Ratio]"]
+    assert found(data) == ["[Total]", "[Ratio]"]
     # any alone
-    assert found(rule(any_=[cond("name", "equals", "twice")])) == ["'Sales'[twice]"]
+    assert found(rule(any_=[cond("name", "equals", "twice")])) == ["[twice]"]
     # all must hold
     data = rule(conditions=[cond("hidden", "equals", False), cond("name", "equals", "twice")])
     assert found(data) == []
@@ -130,12 +130,12 @@ def test_all_conditions_and_one_of_any():
 @pytest.mark.parametrize(
     "scope, condition, object_type, object_name",
     [
-        ("Measure", cond("name", "equals", "Total"), "Measure", "'Sales'[Total]"),
+        ("Measure", cond("name", "equals", "Total"), "Measure", "[Total]"),
         ("Column", cond("name", "equals", "Amount"), "Column", "'Sales'[Amount]"),
-        ("Column", cond("name", "equals", "Big"), "Calculated Column", "'Sales'[Big]"),
-        ("CalculatedColumn", cond("name", "matches", "."), "Calculated Column", "'Sales'[Big]"),
-        ("Table", cond("hidden", "equals", True), "Table", "Dim"),
-        ("Table", cond("description", "equals", "fact"), "Table", "Sales"),
+        ("Column", cond("name", "equals", "Big"), "Column", "'Sales'[Big]"),
+        ("CalculatedColumn", cond("name", "matches", "."), "Column", "'Sales'[Big]"),
+        ("Table", cond("hidden", "equals", True), "Table (Import)", "'Dim'"),
+        ("Table", cond("description", "equals", "fact"), "Table (Import)", "'Sales'"),
         ("Relationship", cond("name", "contains", "'Dim'[Key]"), "Relationship",
          "'Sales'[Key] --> 'Dim'[Key]"),
         ("Model", cond("name", "equals", "Model"), "Model", "Model"),
@@ -261,7 +261,7 @@ def test_disabled_builtin_is_neither_a_finding_nor_not_checked():
 def test_custom_rules_run_next_to_the_builtins():
     custom = [rule_from_dict(GOOD)]
     violations, _ = run_bpa(model(), custom=custom)
-    assert any(v.rule == "Rule one" and v.object_name == "'Sales'[Total]" for v in violations)
+    assert any(v.rule == "Rule one" and v.object_name == "[Total]" for v in violations)
     assert any(v.rule != "Rule one" for v in violations)
 
 
@@ -271,7 +271,7 @@ def test_custom_id_in_an_ignore_annotation():
         {a["name"]: a["value"] for a in ignore("good")}
     )
     data = rule(id="GOOD", conditions=[cond("name", "matches", "^t")])
-    assert found(data, the_model) == ["'Sales'[twice]"]
+    assert found(data, the_model) == ["[twice]"]
     # on the model: every object
     the_model = model(annotations=ignore("GOOD"))
     assert found(data, the_model) == []
@@ -315,8 +315,8 @@ def test_save_and_load_round_trip(tmp_path):
 
 
 def test_evaluate_rule_tests_one_rule():
-    assert found(GOOD) == ["'Sales'[Total]"]
-    assert found(rule_from_dict(GOOD)) == ["'Sales'[Total]"]
+    assert found(GOOD) == ["[Total]"]
+    assert found(rule_from_dict(GOOD)) == ["[Total]"]
 
 
 # ============================================================================

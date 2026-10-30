@@ -32,6 +32,7 @@ from .bpa_custom import SCOPES as CUSTOM_SCOPES
 from .bpa_custom import CustomRule, breaks
 from .dax_parser import model_dependencies, model_index, reference_occurrences
 from .live_model import LiveStatistics
+from .pbix_model import PERSPECTIVE_OBJECTS_UNKNOWN  # .pbix: perspective objects unknown
 from .semantic_model import DATA_TYPES, Column, Measure, Relationship, SemanticModel, Table
 from .tabular_editor import DEFAULT_BPA_RULES, SEVERITIES, BpaViolation
 
@@ -52,6 +53,7 @@ IGNORE_ANNOTATION = "BestPracticeAnalyzer_IgnoreRules"
 # Reasons for a rule in not_checked
 NEEDS_STATISTICS = "needs statistics"
 NOT_OFFLINE = "not supported offline"
+NO_PERSPECTIVE_OBJECTS = "the .pbix metadata does not say which objects its perspectives hold"
 
 # Rules that inspect DAX (Expression, Tokenize, DependsOn, ReferencedBy or a regex on DAX)
 DAX_RULES = {
@@ -162,59 +164,105 @@ class TablePermission:
 
 def dax_object_name(table: str, name: str) -> str:
     """Tabular Editor's DaxObjectFullName: 'Table'[Name], with ' doubled and ] as ]]."""
-    return "'" + table.replace("'", "''") + "'[" + name.replace("]", "]]") + "]"
+    return dax_table_name(table) + "[" + name.replace("]", "]]") + "]"
 
 
-_PARTITION_SOURCES = {"m": "M", "query": "Legacy", "calculated": "Calculated", "entity": "Entity"}
-_PARTITION_MODES = {
+def dax_table_name(table: str) -> str:
+    """A table's DaxObjectFullName: 'Table', with ' doubled."""
+    return "'" + table.replace("'", "''") + "'"
+
+
+def dax_measure_name(name: str) -> str:
+    """A measure's DaxObjectFullName (and DaxObjectName): [Name] with ] as ]]."""
+    return "[" + name.replace("]", "]]") + "]"
+
+
+# TOM ModeType names (Tabular Editor prints the enum value)
+_MODES = {
     "": "Import",
     "import": "Import",
-    "directQuery": "DirectQuery",
+    "directquery": "DirectQuery",
     "dual": "Dual",
-    "directLake": "DirectLake",
-    "default": "Default",
+    "directlake": "DirectLake",
     "push": "Push",
+    "default": "Default",
 }
 _COLUMN_SCOPES = {
-    "data": ("DataColumn", "Column"),
-    "calculated": ("CalculatedColumn", "Calculated Column"),
-    "calculatedTableColumn": ("CalculatedTableColumn", "Calculated Table Column"),
+    "data": "DataColumn",
+    "calculated": "CalculatedColumn",
+    "calculatedTableColumn": "CalculatedTableColumn",
 }
 
 
-def _table_scope(table: Table) -> tuple[str, str]:
+def _mode_name(mode: str) -> str:
+    return _MODES.get((mode or "").lower(), mode)
+
+
+def partition_type_name(model: SemanticModel, partition) -> str:
+    """
+    Tabular Editor's type name of a partition: "Partition (M - <mode>)", "Partition (Legacy -
+    <mode>)", "Partition (DQ over AS)" (entity) or "Partition (Policy Range)"; the mode is the
+    partition's, or the model's defaultMode for "default".
+    """
+    if partition.source_type == "entity":
+        return "Partition (DQ over AS)"
+    if partition.source_type == "policyRange":
+        return "Partition (Policy Range)"
+    source = "M" if partition.source_type == "m" else "Legacy"
+    return f"Partition ({source} - {_mode_name(model.partition_mode(partition))})"
+
+
+def table_mode(model: SemanticModel, table: Table) -> str:
+    """
+    The mode in Tabular Editor's "Table (<mode>)": "DQ over AS" with an entity (Direct Lake)
+    partition, else the partitions' mode (defaultMode for "default") when they all agree,
+    "Hybrid" when they do not.
+    """
+    if any(p.source_type == "entity" for p in table.partitions):
+        return "DQ over AS"
+    modes = {_mode_name(model.partition_mode(p)) for p in table.partitions}
+    if not modes:
+        return _mode_name(model.default_mode or "import")
+    return modes.pop() if len(modes) == 1 else "Hybrid"
+
+
+def _table_scope(model: SemanticModel, table: Table) -> tuple[str, str]:
     if table.is_calculation_group:
         return "CalculationGroup", "Calculation Group Table"
     if table.is_calculated:
         return "CalculatedTable", "Calculated Table"
-    return "Table", "Table"
+    return "Table", f"Table ({table_mode(model, table)})"
 
 
 def iter_objects(model: SemanticModel) -> Iterator[BpaObject]:
-    """Every object of the model a rule can be scoped to, in model order."""
+    """
+    Every object of the model a rule can be scoped to, in model order, with Tabular Editor's
+    type names (GetTypeName) and object names (DaxObjectFullName where it has one).
+    """
     yield BpaObject("Model", "Model", model.model_name, model, model.annotations)
     for table in model.tables:
-        scope, type_name = _table_scope(table)
-        yield BpaObject(scope, type_name, table.name, table, table.annotations, table)
+        scope, type_name = _table_scope(model, table)
+        name = dax_table_name(table.name)
+        yield BpaObject(scope, type_name, name, table, table.annotations, table)
         for column in table.columns:
-            scope, type_name = _COLUMN_SCOPES.get(column.kind, ("DataColumn", "Column"))
+            scope = _COLUMN_SCOPES.get(column.kind, "DataColumn")
             name = dax_object_name(table.name, column.name)
-            yield BpaObject(scope, type_name, name, column, column.annotations, table)
+            yield BpaObject(scope, "Column", name, column, column.annotations, table)
         for measure in table.measures:
-            name = dax_object_name(table.name, measure.name)
+            name = dax_measure_name(measure.name)
             yield BpaObject("Measure", "Measure", name, measure, measure.annotations, table)
         for hierarchy in table.hierarchies:
+            # Tabular Editor does not escape "]" in a hierarchy's DaxObjectFullName
+            name = f"{dax_table_name(table.name)}[{hierarchy.name}]"
             yield BpaObject(
-                "Hierarchy", "Hierarchy", hierarchy.name, hierarchy, hierarchy.annotations, table
+                "Hierarchy", "Hierarchy", name, hierarchy, hierarchy.annotations, table
             )
             for level in hierarchy.levels:
                 yield BpaObject("Level", "Level", level.name, level, {}, table)
         for partition in table.partitions:
-            source = _PARTITION_SOURCES.get(partition.source_type, partition.source_type.title())
-            mode = _PARTITION_MODES.get(partition.mode, partition.mode)
             yield BpaObject(
                 "Partition",
-                f"Partition ({source} - {mode})",
+                partition_type_name(model, partition),
                 partition.name,
                 partition,
                 partition.annotations,
@@ -238,7 +286,7 @@ def iter_objects(model: SemanticModel) -> Iterator[BpaObject]:
         yield BpaObject("ModelRole", "Role", role.name, role, role.annotations)
     for role in model.roles:
         for table_name, dax in role.table_filters.items():
-            # Named like Tabular Editor's TablePermission.Name (the table): a best guess
+            # Tabular Editor's TablePermission.Name is its table's name
             permission = TablePermission(role.name, table_name, dax)
             table = next((t for t in model.tables if t.name == table_name), None)
             yield BpaObject(
@@ -285,7 +333,12 @@ def _both(rel: Relationship) -> bool:
 class _Context:
     """The model plus indexes the checks share (relationships per column/table, ...)."""
 
-    def __init__(self, model: SemanticModel, statistics: Optional[LiveStatistics]):
+    def __init__(
+        self,
+        model: SemanticModel,
+        statistics: Optional[LiveStatistics],
+        dependencies: Optional[list] = None,
+    ):
         self.model = model
         self.statistics = statistics
         self.tables = {table.name: table for table in model.tables}
@@ -311,8 +364,12 @@ class _Context:
             for table, dax in role.table_filters.items():
                 self.rls.setdefault(table, []).append(dax)
 
+        self._given_dependencies = dependencies  # the run's model_dependencies() (D29)
         self._dependencies = None
         self._index = None
+        self._table_types = {
+            table.name: _table_scope(model, table)[1] for table in model.tables
+        }
 
     # DAX (ticket 04): Tabular Editor's DependsOn / ReferencedBy from dax_parser
 
@@ -325,13 +382,23 @@ class _Context:
 
     @property
     def referenced_by(self) -> dict[tuple[str, str, str], set[tuple[str, str, str]]]:
-        """(target type, table, name) -> {(source type, table, name)}: ReferencedBy."""
+        """
+        (target type, table, name) -> {(source type, table, name)}: ReferencedBy.
+
+        Built from the dependencies run_bpa() was given, else from model_dependencies(); cached
+        only once complete, so a crash fails each rule that asks (its "not checked") instead of
+        leaving a half-built index for the next rule.
+        """
         if self._dependencies is None:
-            self._dependencies = {}
-            for dep in model_dependencies(self.model):
+            dependencies = self._given_dependencies
+            if dependencies is None:
+                dependencies = model_dependencies(self.model)
+            found: dict[tuple[str, str, str], set[tuple[str, str, str]]] = {}
+            for dep in dependencies:
                 target = (dep.target_type, dep.target_table, dep.target_name)
                 source = (dep.source_type, dep.source_table, dep.source_name)
-                self._dependencies.setdefault(target, set()).add(source)
+                found.setdefault(target, set()).add(source)
+            self._dependencies = found
         return self._dependencies
 
     def referenced(self, object_type: str, table: str, name: str) -> bool:
@@ -355,8 +422,8 @@ class _Context:
         return column.is_hidden or bool(table and table.is_hidden)
 
     def is_direct_query(self, table: Table) -> bool:
-        """Tabular Editor's "Table (DirectQuery)": a partition in DirectQuery mode."""
-        return any(self.model.partition_mode(p) == "directQuery" for p in table.partitions)
+        """ObjectTypeName == "Table (DirectQuery)": every partition in DirectQuery mode."""
+        return self._table_types.get(table.name) == "Table (DirectQuery)"
 
     # Statistics (D15): the run's LiveStatistics first, else the Vertipaq_* annotations
     # VertiPaq Analyzer may have stored in the model
@@ -365,17 +432,21 @@ class _Context:
         return any(name in obj.annotations for obj in iter_objects(self.model))
 
     def has_cardinality(self) -> bool:
+        """Does any column have a distinct count? (else the rules on it are "not checked")"""
         stats = self.statistics
         if stats and any(c.distinct_values is not None for c in stats.columns.values()):
             return True
         return self.has_annotation("Vertipaq_Cardinality")
 
-    def cardinality(self, column: Column) -> int:
+    def cardinality(self, column: Column) -> Optional[int]:
+        """The column's distinct count, or None when unknown (D26: the column is skipped)."""
         stats = self.statistics
         found = stats.columns.get((column.table, column.name)) if stats else None
         if found is not None and found.distinct_values is not None:
             return found.distinct_values
-        return _int(column.annotations.get("Vertipaq_Cardinality"))
+        if "Vertipaq_Cardinality" in column.annotations:
+            return _int(column.annotations["Vertipaq_Cardinality"])
+        return None
 
     def has_row_counts(self) -> bool:
         if self.statistics and self.statistics.table_rows:
@@ -395,17 +466,21 @@ class _Context:
 
 Check = Callable[[_Context, BpaObject], bool]
 CHECKS: dict[str, Check] = {}
-# Rule ID -> predicate(context): can the rule be evaluated? (else "needs statistics")
-REQUIRES: dict[str, Callable[[_Context], bool]] = {}
+# Rule ID -> (predicate(context): can the rule be evaluated?, the "not checked" reason if not)
+REQUIRES: dict[str, tuple[Callable[[_Context], bool], str]] = {}
 
 
-def check(rule_id: str, requires: Optional[Callable[[_Context], bool]] = None):
-    """Register a rule's check (and what it needs) under the rule's ID."""
+def check(
+    rule_id: str,
+    requires: Optional[Callable[[_Context], bool]] = None,
+    reason: str = NEEDS_STATISTICS,
+):
+    """Register a rule's check (and what it needs, with the reason when that is missing)."""
 
     def register(function: Check) -> Check:
         CHECKS[rule_id] = function
         if requires is not None:
-            REQUIRES[rule_id] = requires
+            REQUIRES[rule_id] = (requires, reason)
         return function
 
     return register
@@ -472,7 +547,9 @@ def _bidirectional_high_cardinality(ctx, obj):
     # and Convert.ToInt64(GetAnnotation("Vertipaq_Cardinality")) > 100000
     column = obj.item
     rels = ctx.column_rels.get((column.table, column.name), [])
-    return any(_both(rel) for rel in rels) and ctx.cardinality(column) > 100000
+    # A column without a distinct count is skipped (D26)
+    cardinality = ctx.cardinality(column)
+    return cardinality is not None and any(_both(rel) for rel in rels) and cardinality > 100000
 
 
 @check(
@@ -874,7 +951,11 @@ def _role_without_members(ctx, obj):
     return not obj.item.members
 
 
-@check("PERSPECTIVES_WITH_NO_OBJECTS")
+@check(
+    "PERSPECTIVES_WITH_NO_OBJECTS",
+    requires=lambda ctx: PERSPECTIVE_OBJECTS_UNKNOWN not in ctx.model.annotations,
+    reason=NO_PERSPECTIVE_OBJECTS,
+)
 def _empty_perspective(ctx, obj):
     # Model.Tables.Any(InPerspective[current.Name]) == false
     return not ctx.model.perspective_tables.get(obj.item)
@@ -981,7 +1062,9 @@ def _matches(pattern: str, text: str) -> bool:
 
 
 def _own_table(obj: BpaObject) -> Optional[str]:
-    """The table an unqualified [X] may mean as a column (the object's own table)."""
+    """The expression's own table for an unqualified [X] (D23); none for a calculated table."""
+    if obj.scope == "CalculatedTable":
+        return None
     return obj.table.name if obj.table is not None else None
 
 
@@ -1038,7 +1121,7 @@ def _dynamic_rls(ctx, obj):
 @check("DAX_COLUMNS_FULLY_QUALIFIED")
 def _columns_fully_qualified(ctx, obj):
     # DependsOn.Any(Key.ObjectType = "Column" and Value.Any(not FullyQualified))
-    # (an unqualified [X] is a column when it is no measure and a column of the object's table)
+    # (an unqualified [X] is a column of the object's own table first: D23)
     return any(
         ref.type == "Column" and not ref.qualified
         for ref in reference_occurrences(_expression(obj), ctx.index, _own_table(obj))
@@ -1091,15 +1174,10 @@ def _iferror(ctx, obj):
     return _matches(r"(?i)IFERROR\s*\(", _expression(obj))
 
 
-def _dax_object_name(name: str) -> str:
-    """A measure's DaxObjectName: [Name] with ] as ]]."""
-    return "[" + name.replace("]", "]]") + "]"
-
-
 @check("MEASURES_SHOULD_NOT_BE_DIRECT_REFERENCES_OF_OTHER_MEASURES")
 def _direct_measure_reference(ctx, obj):
     # Model.AllMeasures.Any(DaxObjectName == current.Expression)
-    return any(_dax_object_name(m.name) == obj.item.expression for m in ctx.model.all_measures)
+    return any(dax_measure_name(m.name) == obj.item.expression for m in ctx.model.all_measures)
 
 
 # Python's re allows (?i) only at the start; the rules repeat it later, which in .NET only
@@ -1313,6 +1391,7 @@ def run_bpa(
     rules_path: Path = DEFAULT_BPA_RULES,
     custom: Optional[list[CustomRule]] = None,
     disabled: tuple[str, ...] | list[str] = (),
+    dependencies: Optional[list] = None,
 ) -> tuple[list[BpaViolation], list[tuple[str, str]]]:
     """
     Check the model against the Best Practice Analyzer rules, in Python.
@@ -1329,11 +1408,13 @@ def run_bpa(
         rules_path: Rules file (default: Microsoft's standard rules)
         custom: Custom rules (bpa_custom.load_rule_file().rules), checked after the built-ins
         disabled: Built-in rule ids switched off: neither findings nor "not checked"
+        dependencies: The run's dax_parser.model_dependencies(model), so a run computes them
+            once; None: computed here when a rule needs them
 
     Returns:
         (violations most severe first, [(rule ID, reason)] for the rules not checked)
     """
-    ctx = _Context(model, statistics)
+    ctx = _Context(model, statistics, dependencies)
     objects = list(iter_objects(model))
     model_ignored = _ignored_rules(model.annotations)
     level = model.compatibility_level or 0
@@ -1342,8 +1423,8 @@ def run_bpa(
     violations: list[BpaViolation] = []
     not_checked: list[tuple[str, str]] = []
     for rule in load_rules(rules_path):
-        if rule.id.upper() in switched_off:
-            continue
+        if rule.id.upper() in switched_off or rule.id.upper() in model_ignored:
+            continue  # the model's ignore list drops a rule before anything is checked
         if level and rule.compatibility_level > level:
             logger.debug(f"BPA rule {rule.id} skipped: needs compatibility level "
                          f"{rule.compatibility_level}")
@@ -1352,11 +1433,9 @@ def run_bpa(
         if function is None:
             not_checked.append((rule.id, NOT_OFFLINE))
             continue
-        requires = REQUIRES.get(rule.id)
+        requires, reason = REQUIRES.get(rule.id, (None, ""))
         if requires is not None and not requires(ctx):
-            not_checked.append((rule.id, NEEDS_STATISTICS))
-            continue
-        if rule.id.upper() in model_ignored:
+            not_checked.append((rule.id, reason))
             continue
 
         found = []

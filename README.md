@@ -19,7 +19,8 @@ offline HTML lineage viewer, with:
 - 📈 **Relationship Diagrams** - NetworkX-powered visualization of table relationships
 - 🎯 **Filter Documentation** - Page-level and visual-level filter tracking
 - 🔗 **Dependency Tracking** - Shows which measures use which columns/tables
-- ⚡ **Tabular Editor Integration** - Leverages TE2 for deep semantic model analysis
+- ⚡ **Model Analysis in Python** - Best Practice Analyzer, exact DAX dependencies and DAX
+  formatting on every OS, offline (no Tabular Editor needed)
 
 ## Installation
 
@@ -182,8 +183,9 @@ print(result.status, result.files)  # "success" | "warnings" | "error", {"workbo
 
 - **Python 3.11+**
 - Optional: **Tabular Editor 2** ([download](https://github.com/TabularEditor/TabularEditor/releases))
-  for the Best Practice Analyzer, exact DAX dependencies and live statistics (Windows). Found in
-  Program Files automatically; otherwise set its folder in the web UI.
+  only for live statistics from a report open in Power BI Desktop (Windows). The Best Practice
+  Analyzer and the DAX dependencies run in Python without it. Found in Program Files
+  automatically; otherwise set its folder in the web UI.
 
 ## Project Structure
 
@@ -250,8 +252,9 @@ uv run --frozen ruff check src/ tests/
 
 - Bookmarks: cross-highlight selections and drill state are not listed.
 - Tooltip/drillthrough page detection is not yet tested on real reports.
-- Without Tabular Editor 2, DAX dependencies come from text matching (can miss unqualified
-  references and match text in comments).
+- DAX dependencies come from PBIxtractor's own DAX parser on every run (unqualified references
+  resolved as Tabular Editor does; comments and strings ignored). Text matching is only the
+  fallback should that analysis crash.
 - Tabular Editor 2 and Power BI Desktop detection are Windows-only.
 
 ## License

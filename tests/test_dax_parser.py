@@ -130,7 +130,7 @@ def test_qualified_and_unqualified_columns_and_measures():
             ("Total", "SUM ( Sales[Amount] )"),
             ("Ratio", "DIVIDE ( [total], 'sales'[QTY] )"),  # case-insensitive
             ("Via table", "Sales[Total] * 2"),  # a measure reached via T[M]
-            ("Row", "SUMX ( Sales, [Amount] )"),  # [Amount] is no measure: no dependency
+            ("Row", "SUMX ( Sales, [Amount] )"),  # the own table's column (D23)
         ]),
     ])  # fmt: skip
     assert _targets(model, "Sales", "Total") == [("Column", "Sales[Amount]")]
@@ -139,7 +139,27 @@ def test_qualified_and_unqualified_columns_and_measures():
         ("Column", "Sales[Qty]"),
     ]
     assert _targets(model, "Sales", "Via table") == [("Measure", "Sales[Total]")]
-    assert _targets(model, "Sales", "Row") == [("Table", "'Sales'")]
+    assert _targets(model, "Sales", "Row") == [("Column", "Sales[Amount]")]  # table: redundant
+
+
+def test_unqualified_names_resolve_in_tabular_editors_order():
+    """D23 (FormulaFixup): own-table column, then own-table measure, then any measure."""
+    model = _model([
+        _table("Other", ["Key"], [("Amount", "1"), ("Total", "2"), ("Shared", "3")]),
+        _table("Sales", SALES, [
+            ("Shared", "4"),
+            ("Column first", "SUMX ( Sales, [Amount] )"),  # a column, not Other[Amount]
+            ("Own measure", "[Shared] + 1"),  # Sales[Shared], not the first in model order
+            ("Any measure", "[Total] + 1"),  # no Sales[Total]: the first table that has one
+            ("Unknown", "[Nope]"),
+        ]),
+        _table("Calc", ["Amount"], calculated="ROW ( \"x\", [Amount] )"),  # no own table
+    ])  # fmt: skip
+    assert _targets(model, "Sales", "Column first") == [("Column", "Sales[Amount]")]
+    assert _targets(model, "Sales", "Own measure") == [("Measure", "Sales[Shared]")]
+    assert _targets(model, "Sales", "Any measure") == [("Measure", "Other[Total]")]
+    assert _targets(model, "Sales", "Unknown") == []
+    assert _targets(model, "Calc", "Calc") == [("Measure", "Other[Amount]")]
 
 
 def test_calculated_column_resolves_its_own_table_column():

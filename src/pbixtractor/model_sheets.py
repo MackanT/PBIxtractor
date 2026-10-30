@@ -56,9 +56,9 @@ def parse_bpa_object_name(object_name: str) -> tuple[Optional[str], str]:
     """
     Split a BPA ObjectName into (table, name).
 
-    Tabular Editor gives columns and measures as 'Table'[Name] (quotes doubled in the table
-    name, "]" escaped as "]]"; the table may be unquoted or missing) and tables as 'Table' or
-    Table.
+    Tabular Editor gives columns as 'Table'[Name] (quotes doubled in the table name, "]"
+    escaped as "]]"), measures as [Name] (no table: measure names are unique in a model) and
+    tables as 'Table'. Older shapes still work: 'Table'[Measure], Table[Name], a bare Table.
 
     Returns:
         (table, name) for 'Table'[Name] / [Name] (table None), (None, table) for a table
@@ -88,11 +88,15 @@ def parse_bpa_object_name(object_name: str) -> tuple[Optional[str], str]:
 
 
 def _bpa_kind(object_type: str) -> Optional[str]:
-    """'field' for measures and columns, "table" for tables, None for anything else."""
+    """
+    'field' for measures and columns, "table" for tables ("Table (<mode>)", "Calculated
+    Table", "Calculation Group Table", or plain "Table"), None for anything else (a "Table
+    Permission" is no table).
+    """
     kind = object_type.replace(" ", "").lower()
     if kind == "measure" or kind.endswith("column"):
         return "field"
-    if kind.endswith("table"):
+    if kind.endswith("table") or kind.startswith("table("):
         return "table"
     return None
 

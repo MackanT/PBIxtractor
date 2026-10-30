@@ -517,6 +517,28 @@ def test_parse_bpa_object_name(name, expected):
     assert parse_bpa_object_name(name) == expected
 
 
+def test_bpa_by_object_reads_tabular_editors_shapes():
+    """D24: measures as [M] (matched by name), tables as 'T' with their mode in the type."""
+    from pbixtractor.model_sheets import bpa_by_object, bpa_cell
+
+    cells = bpa_by_object([
+        _violation("Measure", "[Net]]Total]", "[Naming] Odd name", "Low"),
+        _violation("Table (Import)", "'O''Brien'", "[Model] Import rule", "High"),
+        _violation("Table (DQ over AS)", "'Dates'", "[Model] Lake rule", "Medium"),
+        _violation("Calculated Table", "'Calc'", "[Model] Calc rule", "Low"),
+        _violation("Calculation Group Table", "'Time'", "[Model] Group rule", "Low"),
+        _violation("Table Permission", "Sales", "[Security] Not a table", "Low"),
+        _violation("Column", "'Sales'[Amount]", "[Formatting] Column rule", "Low"),
+    ])  # fmt: skip
+    assert bpa_cell(cells, "O'Brien", "Net]Total") == "Low: [Naming] Odd name"
+    assert bpa_cell(cells, "O'Brien") == "High: [Model] Import rule"
+    assert bpa_cell(cells, "Dates") == "Medium: [Model] Lake rule"
+    assert bpa_cell(cells, "Calc") == "Low: [Model] Calc rule"
+    assert bpa_cell(cells, "Time") == "Low: [Model] Group rule"
+    assert bpa_cell(cells, "Sales") == ""  # a table permission is no table finding
+    assert bpa_cell(cells, "Sales", "Amount") == "Low: [Formatting] Column rule"
+
+
 def test_bpa_by_object_sorts_and_skips_other_types():
     from pbixtractor.model_sheets import bpa_by_object, bpa_cell
 

@@ -211,7 +211,7 @@ def _live_statistics(model, options: ExtractionOptions, progress):
         # A note in the run log, not a warning: the normal case on Linux and without Desktop
         logger.info(
             "Live statistics from Power BI Desktop skipped: Tabular Editor 2 not found. Add its "
-            "folder to Input/TabularEditorLocations.txt or disable the Tabular Editor analysis."
+            "folder to Input/TabularEditorLocations.txt or switch off live statistics."
         )
         return None
 
@@ -256,11 +256,16 @@ def _custom_rules(path: Optional[Path]) -> bpa_custom.RuleFile:
 
 
 def _best_practice_analyzer(
-    model, statistics, progress, rules_file: Optional[Path] = None
+    model, statistics, progress, rules_file: Optional[Path] = None, dependencies=None
 ) -> tuple[Optional[list], list]:
     """
     The Python Best Practice Analyzer (bpa.py) on every run, with or without Tabular Editor,
     plus the custom rules (bpa_custom.py) of rules_file / the user's rule file.
+
+    Args:
+        dependencies: The run's model_dependencies(), computed once per run and shared with
+            the documentation; None when that step crashed - the BPA then tries itself, and a
+            crash there only makes the rules that need them "not checked"
 
     Returns:
         (violations, [(rule ID, reason)] for the rules not checked); violations is None when
@@ -270,7 +275,11 @@ def _best_practice_analyzer(
     try:
         rules = _custom_rules(rules_file)
         violations, not_checked = run_bpa(
-            model, statistics, custom=rules.rules, disabled=rules.disabled
+            model,
+            statistics,
+            custom=rules.rules,
+            disabled=rules.disabled,
+            dependencies=dependencies,
         )
     except Exception as e:  # a bug in the engine must not fail the run
         logger.warning(f"Best Practice Analyzer failed: {e!r}")
@@ -327,10 +336,10 @@ def run_extraction(
     """
     progress = progress or (lambda step, fraction: None)
     started = time.monotonic()
-    levels: list[str] = []
+    records: list[tuple[str, str]] = []
 
     def forward(level: str, message: str) -> None:
-        levels.append(level)
+        records.append((level, message))
         if on_log is not None:
             on_log(level, message)
 
@@ -345,8 +354,11 @@ def run_extraction(
             result = ExtractionResult("error", f"Extraction failed: {e}")
         result.logs = capture.get_logs()
 
-    # INFO notes stay in result.logs only; a warning or worse makes the run "warnings"
-    if result.ok and any(level not in ("DEBUG", "INFO") for level in levels):
+    # INFO notes stay in result.logs only; a warning or worse makes the run "warnings", and
+    # only those go into the log file
+    warnings = [f"{level}: {message}" for level, message in records
+                if level not in ("DEBUG", "INFO")]  # fmt: skip
+    if result.ok and warnings:
         result.status = "warnings"
         if options.write_log_file:
             log_dir = options.output_dir / "logs"
@@ -358,7 +370,7 @@ def run_extraction(
             while log_file.exists():
                 log_file = log_dir / f"log_data_{stamp}_{counter}.txt"
                 counter += 1
-            log_file.write_text(result.logs, encoding="utf-8")
+            log_file.write_text("\n".join(warnings) + "\n", encoding="utf-8")
             result.files["log"] = log_file
     result.seconds = round(time.monotonic() - started, 1)
     progress("Done" if result.ok else "Failed", 1.0)
@@ -427,7 +439,7 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
             )
 
     bpa_violations, bpa_not_checked = _best_practice_analyzer(
-        model, live_statistics, progress, options.bpa_rules
+        model, live_statistics, progress, options.bpa_rules, exact_dependencies
     )
 
     if options.tabular_editor_tsv:

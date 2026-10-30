@@ -140,19 +140,19 @@ CASES = [
      db([table("T", [col("A", "dateTime",
                          annotations=[{"name": "DateTimeWithHourMinSec", "value": "0"}])])]),
      None),
-    ("LARGE_TABLES_SHOULD_BE_PARTITIONED", fact_dim(), "Fact", fact_dim(), "rows"),
+    ("LARGE_TABLES_SHOULD_BE_PARTITIONED", fact_dim(), "'Fact'", fact_dim(), "rows"),
     ("SNOWFLAKE_SCHEMA_ARCHITECTURE",
      db([table("A", [col("K")]), table("T", [col("K"), col("L")]), table("B", [col("L")])],
-        [rel("A", "K", "T", "K"), rel("T", "L", "B", "L")]), "T",
+        [rel("A", "K", "T", "K"), rel("T", "L", "B", "L")]), "'T'",
      db([table("A", [col("K")]), table("T", [col("K")])], [rel("A", "K", "T", "K")]), None),
     ("MODEL_SHOULD_HAVE_A_DATE_TABLE",
      db([table("T", [col("A")])]), "Model",
      db([table("D", [col("Date", "dateTime", isKey=True)], dataCategory="Time")]), None),
     ("DATE/CALENDAR_TABLES_SHOULD_BE_MARKED_AS_A_DATE_TABLE",
-     db([table("Calendar", [col("Date", "dateTime")])]), "Calendar",
+     db([table("Calendar", [col("Date", "dateTime")])]), "'Calendar'",
      db([table("Calendar", [col("Date", "dateTime", isKey=True)], dataCategory="Time")]), None),
     ("REMOVE_AUTO-DATE_TABLE",
-     db([calc_table("LocalDateTable_1", [col("Date", "dateTime")])]), "LocalDateTable_1",
+     db([calc_table("LocalDateTable_1", [col("Date", "dateTime")])]), "'LocalDateTable_1'",
      db([table("LocalDateTable_1", [col("Date", "dateTime")])]), None),
     ("AVOID_EXCESSIVE_BI-DIRECTIONAL_OR_MANY-TO-MANY_RELATIONSHIPS",
      fact_dim(BOTH), "Model", fact_dim(), None),
@@ -170,16 +170,16 @@ CASES = [
          {"name": "P", "source": {"type": "m", "expression": "let x = 1 in x"}}])]), None),
     ("AVOID_USING_MANY-TO-MANY_RELATIONSHIPS_ON_TABLES_USED_FOR_DYNAMIC_ROW_LEVEL_SECURITY",
      fact_dim(MANY, roles=[{"name": "R", "tablePermissions": [
-         {"name": "Fact", "filterExpression": "Fact[Key] = 1"}]}]), "Fact",
+         {"name": "Fact", "filterExpression": "Fact[Key] = 1"}]}]), "'Fact'",
      fact_dim(roles=[{"name": "R", "tablePermissions": [
          {"name": "Fact", "filterExpression": "Fact[Key] = 1"}]}]), None),
     ("UNPIVOT_PIVOTED_(MONTH)_DATA",
-     db([table("T", [col(m) for m in MONTHS])]), "T",
+     db([table("T", [col(m) for m in MONTHS])]), "'T'",
      db([table("T", [col(m) for m in MONTHS[:5]])]), None),
     ("MANY-TO-MANY_RELATIONSHIPS_SHOULD_BE_SINGLE-DIRECTION",
      fact_dim({**MANY, **BOTH}), "'Fact'[Key] <--> 'Dim'[Key]", fact_dim(MANY), None),
     ("REDUCE_USAGE_OF_CALCULATED_TABLES",
-     db([calc_table("C", [col("A")])]), "C", db([table("C", [col("A")])]), None),
+     db([calc_table("C", [col("A")])]), "'C'", db([table("C", [col("A")])]), None),
     ("REMOVE_REDUNDANT_COLUMNS_IN_RELATED_TABLES",
      db([table("Fact", [col("Key"), col("Name", "string")]),
          table("Dim", [col("Key"), col("Name", "string")])],
@@ -204,7 +204,7 @@ CASES = [
     ("RELATIONSHIP_COLUMNS_SAME_DATA_TYPE",
      fact_dim(dim_column=col("Key", "string")), "'Fact'[Key] --> 'Dim'[Key]", fact_dim(), None),
     ("AVOID_INVALID_NAME_CHARACTERS",
-     db([table("T", [col("A")], [{**MEASURE, "name": "To\x01tal"}])]), "'T'[To\x01tal]",
+     db([table("T", [col("A")], [{**MEASURE, "name": "To\x01tal"}])]), "[To\x01tal]",
      db([table("T", [col("A")], [MEASURE])]), None),
     ("AVOID_INVALID_DESCRIPTION_CHARACTERS",
      db([table("T", [col("A", description="bad\x07")])]), "'T'[A]",
@@ -229,27 +229,27 @@ CASES = [
      db([table("T", [col("A")])], roles=[{"name": "R", "members": [{"memberName": "a@b.c"}]}]),
      None),
     ("ENSURE_TABLES_HAVE_RELATIONSHIPS",
-     db([table("Fact", [col("Key")]), table("Dim", [col("Key")])]), "Fact", fact_dim(), None),
+     db([table("Fact", [col("Key")]), table("Dim", [col("Key")])]), "'Fact'", fact_dim(), None),
     ("OBJECTS_WITH_NO_DESCRIPTION",
-     db([table("T", [col("A")])]), "T",
+     db([table("T", [col("A")])]), "'T'",
      db([table("T", [col("A")], description="Sales")]), None),
     ("PERSPECTIVES_WITH_NO_OBJECTS",
      db([table("T", [col("A")])], perspectives=[{"name": "P"}]), "P",
      db([table("T", [col("A")])], perspectives=[{"name": "P", "tables": [{"name": "T"}]}]), None),
     ("CALCULATION_GROUPS_WITH_NO_CALCULATION_ITEMS",
-     db([table("G", [col("Name", "string")], calculationGroup={"calculationItems": []})]), "G",
+     db([table("G", [col("Name", "string")], calculationGroup={"calculationItems": []})]), "'G'",
      db([table("G", [col("Name", "string")], calculationGroup={
          "calculationItems": [{"name": "YTD", "expression": "SELECTEDMEASURE()"}]})]), None),
     ("PARTITION_NAME_SHOULD_MATCH_TABLE_NAME_FOR_SINGLE_PARTITION_TABLES",
      db([table("T", [col("A")], partitions=[
-         {"name": "T-1234", "source": {"type": "m", "expression": "x"}}])]), "T",
+         {"name": "T-1234", "source": {"type": "m", "expression": "x"}}])]), "'T'",
      db([table("T", [col("A")])]), None),
     ("SPECIAL_CHARS_IN_OBJECT_NAMES",
      db([table("A\tB", [col("A")])]), "A\tB", db([table("AB", [col("A")])]), None),
     ("TRIM_OBJECT_NAMES",
      db([table("T ", [col("A")])]), "T ", db([table("T", [col("A")])]), None),
     ("OBJECTS_SHOULD_NOT_START_OR_END_WITH_A_SPACE",
-     db([table("T", [col("A")], [{**MEASURE, "name": " Total"}])]), "'T'[ Total]",
+     db([table("T", [col("A")], [{**MEASURE, "name": " Total"}])]), "[ Total]",
      db([table("T", [col("A")], [MEASURE])]), None),
     ("FORMAT_FLAG_COLUMNS_AS_YES/NO_VALUE_STRINGS",
      db([table("T", [col("IsActive")])]), "'T'[IsActive]",
@@ -261,17 +261,17 @@ CASES = [
      db([table("T", [col("Month Start", "dateTime")])]), "'T'[Month Start]",
      db([table("T", [col("Month Start", "dateTime", formatString="MMMM yyyy")])]), None),
     ("PROVIDE_FORMAT_STRING_FOR_MEASURES",
-     db([table("T", [col("A")], [{"name": "M", "expression": "1"}])]), "'T'[M]",
+     db([table("T", [col("A")], [{"name": "M", "expression": "1"}])]), "[M]",
      db([table("T", [col("A")], [MEASURE])]), None),
     ("NUMERIC_COLUMN_SUMMARIZE_BY",
      db([table("T", [col("A")])]), "'T'[A]",
      db([table("T", [col("A", summarizeBy="none")])]), None),
     ("PERCENTAGE_FORMATTING",
-     db([table("T", [col("A")], [{**MEASURE, "formatString": "0%"}])]), "'T'[Total]",
+     db([table("T", [col("A")], [{**MEASURE, "formatString": "0%"}])]), "[Total]",
      db([table("T", [col("A")], [{**MEASURE, "formatString": "#,0.0%;-#,0.0%;#,0.0%"}])]),
      None),
     ("INTEGER_FORMATTING",
-     db([table("T", [col("A")], [{**MEASURE, "formatString": "0"}])]), "'T'[Total]",
+     db([table("T", [col("A")], [{**MEASURE, "formatString": "0"}])]), "[Total]",
      db([table("T", [col("A")], [MEASURE])]), None),
     ("RELATIONSHIP_COLUMNS_SHOULD_BE_OF_INTEGER_DATA_TYPE",
      fact_dim(fact_column=col("Key", "string"), dim_column=col("Key", "string")), "'Fact'[Key]",
@@ -284,7 +284,7 @@ CASES = [
     ("MARK_PRIMARY_KEYS",
      fact_dim(), "'Dim'[Key]", fact_dim(dim_column=col("Key", isKey=True)), None),
     ("FIRST_LETTER_OF_OBJECTS_MUST_BE_CAPITALIZED",
-     db([table("T", [col("A")], [{**MEASURE, "name": "total"}])]), "'T'[total]",
+     db([table("T", [col("A")], [{**MEASURE, "name": "total"}])]), "[total]",
      db([table("T", [col("A")], [MEASURE])]), None),
     ("MONTH_(AS_A_STRING)_MUST_BE_SORTED",
      db([table("T", [col("Month Name", "string")])]), "'T'[Month Name]",
@@ -341,66 +341,66 @@ DAX_CASES = [
      db([table("T", [col("A"), calc("C", expression="related ( D[X] )")])]), "'T'[C]",
      db([table("T", [col("A"), calc("C", expression="T[A] * 2")])])),
     ("LIMIT_ROW_LEVEL_SECURITY_(RLS)_LOGIC",
-     with_measures(roles=[role("T", 'UPPER ( T[A] ) = "X"')]), "T",
+     with_measures(roles=[role("T", 'UPPER ( T[A] ) = "X"')]), "'T'",
      with_measures(roles=[role("T", "T[A] = 1")])),
     ("MEASURES_USING_TIME_INTELLIGENCE_AND_MODEL_IS_USING_DIRECT_QUERY",
      db([table("T", [col("A")], [measure("M", "TOTALYTD ( SUM ( T[A] ), T[A] )")],
-               partitions=DIRECT_QUERY)]), "'T'[M]",
+               partitions=DIRECT_QUERY)]), "[M]",
      db([table("T", [col("A")], [measure("M", "TOTALYTD ( SUM ( T[A] ), T[A] )")])])),
     ("CHECK_IF_DYNAMIC_ROW_LEVEL_SECURITY_(RLS)_IS_NECESSARY",
      with_measures(roles=[role("T", "T[A] = userprincipalname()")]), "T",
      with_measures(roles=[role("T", "T[A] = 1")])),
     ("DAX_COLUMNS_FULLY_QUALIFIED",
-     with_measures(measure("M", "SUMX ( T, [A] )")), "'T'[M]",
+     with_measures(measure("M", "SUMX ( T, [A] )")), "[M]",
      with_measures(measure("M", "SUMX ( T, T[A] ) // or [A]"))),  # a comment never counts
     ("DAX_MEASURES_UNQUALIFIED",
-     m1_and("T[M1] + 1"), "'T'[M2]",
+     m1_and("T[M1] + 1"), "[M2]",
      m1_and('[M1] + LEN ( "T[M1]" )')),  # nor does a string
     ("AVOID_DUPLICATE_MEASURES",
-     with_measures(measure("M1", "SUM(T[A])"), measure("M2", "SUM ( T[A] )")), "'T'[M1]",
+     with_measures(measure("M1", "SUM(T[A])"), measure("M2", "SUM ( T[A] )")), "[M1]",
      with_measures(measure("M1", "SUM ( T[A] )"), measure("M2", "SUM ( T[B] )"))),
     ("USE_THE_TREATAS_FUNCTION_INSTEAD_OF_INTERSECT",
-     m1_and("COUNTROWS ( INTERSECT ( VALUES ( T[A] ), VALUES ( T[B] ) ) )"), "'T'[M2]",
+     m1_and("COUNTROWS ( INTERSECT ( VALUES ( T[A] ), VALUES ( T[B] ) ) )"), "[M2]",
      m1_and("CALCULATE ( [M1], TREATAS ( VALUES ( T[A] ), T[B] ) )")),
     ("USE_THE_DIVIDE_FUNCTION_FOR_DIVISION",
-     m1_and("[M1] / 2"), "'T'[M2]",
+     m1_and("[M1] / 2"), "[M2]",
      m1_and("DIVIDE ( [M1], 2 ) // half")),
     ("AVOID_USING_THE_IFERROR_FUNCTION",
-     m1_and("IFERROR ( [M1], 0 )"), "'T'[M2]",
+     m1_and("IFERROR ( [M1], 0 )"), "[M2]",
      m1_and("COALESCE ( [M1], 0 )")),
     ("MEASURES_SHOULD_NOT_BE_DIRECT_REFERENCES_OF_OTHER_MEASURES",
-     m1_and("[M1]"), "'T'[M2]",
+     m1_and("[M1]"), "[M2]",
      m1_and("[M1] + 1")),
     ("FILTER_COLUMN_VALUES",
-     m1_and("CALCULATE ( [M1], FILTER ( T, T[A] = 1 ) )"), "'T'[M2]",
+     m1_and("CALCULATE ( [M1], FILTER ( T, T[A] = 1 ) )"), "[M2]",
      m1_and("CALCULATE ( [M1], T[A] = 1 )")),
     ("FILTER_MEASURE_VALUES_BY_COLUMNS",
-     m1_and("CALCULATE ( [M1], FILTER ( T, [M1] > 1 ) )"), "'T'[M2]",
+     m1_and("CALCULATE ( [M1], FILTER ( T, [M1] > 1 ) )"), "[M2]",
      m1_and("CALCULATE ( [M1], FILTER ( T, T[A] > 1 ) )")),
     ("INACTIVE_RELATIONSHIPS_THAT_ARE_NEVER_ACTIVATED",
      fact_dim({"isActive": False}), INACTIVE,
      db([table("Fact", [col("Key")], [measure("M", USE_REL)]), table("Dim", [col("Key")])],
         [rel("Fact", "Key", "Dim", "Key", isActive=False)])),
     ("AVOID_USING_'1-(X/Y)'_SYNTAX",
-     m1_and("1 - SUM ( T[A] ) / SUM ( T[B] )"), "'T'[M2]",
+     m1_and("1 - SUM ( T[A] ) / SUM ( T[B] )"), "[M2]",
      m1_and("DIVIDE ( SUM ( T[B] ) - SUM ( T[A] ), SUM ( T[B] ) )")),
     ("EVALUATEANDLOG_SHOULD_NOT_BE_USED_IN_PRODUCTION_MODELS",
-     m1_and("EVALUATEANDLOG ( [M1] )"), "'T'[M2]",
+     m1_and("EVALUATEANDLOG ( [M1] )"), "[M2]",
      m1_and("[M1] + 0")),
     ("EXPRESSION_RELIANT_OBJECTS_MUST_HAVE_AN_EXPRESSION",
-     m1_and("  "), "'T'[M2]",
+     m1_and("  "), "[M2]",
      m1_and("[M1] + 0")),
     ("AVOID_THE_USERELATIONSHIP_FUNCTION_AND_RLS_AGAINST_THE_SAME_TABLE",
      db([table("Fact", [col("Key")], [measure("M", USE_REL)]), table("Dim", [col("Key")])],
         [rel("Fact", "Key", "Dim", "Key", isActive=False)], roles=[role("Dim", "Dim[Key] > 0")]),
-     "Dim",
+     "'Dim'",
      db([table("Fact", [col("Key")], [measure("M", USE_REL)]), table("Dim", [col("Key")])],
         [rel("Fact", "Key", "Dim", "Key", isActive=False)], roles=[role("Fact", "Fact[Key] > 0")])),
     ("UNNECESSARY_COLUMNS",
      with_measures(measure("M", "1 // T[A]"), columns=[col("A", isHidden=True)]), "'T'[A]",
      db([table("T", [col("A", isHidden=True), calc("C", expression="[A] * 2")])])),  # unqualified
     ("UNNECESSARY_MEASURES",
-     with_measures(measure("H", "1", isHidden=True), measure("M", 'LEN ( "[H]" )')), "'T'[H]",
+     with_measures(measure("H", "1", isHidden=True), measure("M", 'LEN ( "[H]" )')), "[H]",
      with_measures(measure("H", "1", isHidden=True), measure("M", "[H] + 1"))),
     ("HIDE_FACT_TABLE_COLUMNS",
      with_measures(measure("M", "sum ( 'T'[A] )")), "'T'[A]",
@@ -485,31 +485,90 @@ def test_findings_carry_the_rule_metadata_and_tabular_editor_names():
     assert [order[v.severity] for v in violations] == sorted(order[v.severity] for v in violations)
 
 
+def _types_and_names(database, rule_id):
+    return [(v.object_type, v.object_name) for v in findings(database, rule_id=rule_id)]
+
+
 def test_object_types_and_names():
+    """D24: Tabular Editor's GetTypeName and DaxObjectFullName, names with ' and ]."""
     database = db(
         [
-            table("O'Brien", [col("A]b", "double"), calc("C", "double")]),
+            table("O'Brien", [col("A]b", "double"), calc("C]", "double")],
+                  [{"name": "M]x", "expression": "1"}],
+                  hierarchies=[{"name": "H]y", "levels": [{"name": "L", "column": "A]b"}]}]),
             calc_table("Calc", [{"name": "X", "dataType": "double", "type": "calculatedTableColumn"}]),
         ]
-    )
-    found = {
-        (v.object_type, v.object_name)
-        for v in findings(database, rule_id="AVOID_FLOATING_POINT_DATA_TYPES")
-    }
-    assert found == {
+    )  # fmt: skip
+    assert set(_types_and_names(database, "AVOID_FLOATING_POINT_DATA_TYPES")) == {
         ("Column", "'O''Brien'[A]]b]"),
-        ("Calculated Column", "'O''Brien'[C]"),
-        ("Calculated Table Column", "'Calc'[X]"),
+        ("Column", "'O''Brien'[C]]]"),  # calculated: still "Column"
+        ("Column", "'Calc'[X]"),
     }
-    partitions = findings(
-        db([table("T", [col("A")], partitions=[
-            {"name": "P", "mode": "import", "source": {"type": "m", "expression": "Table.Sort("}}
-        ])]),
-        rule_id="MINIMIZE_POWER_QUERY_TRANSFORMATIONS",
+    assert ("Measure", "[M]]x]") in _types_and_names(database, "OBJECTS_WITH_NO_DESCRIPTION")
+    # A hierarchy's "]" is not escaped in Tabular Editor's name
+    hierarchy = next(o for o in bpa.iter_objects(parse_model(database)) if o.scope == "Hierarchy")
+    assert (hierarchy.object_type, hierarchy.object_name) == ("Hierarchy", "'O''Brien'[H]y]")
+    assert ("Table (Import)", "'O''Brien'") in _types_and_names(
+        database, "OBJECTS_WITH_NO_DESCRIPTION"
     )
-    assert [(v.object_type, v.object_name) for v in partitions] == [("Partition (M - Import)", "P")]
-    calculated = findings(db([calc_table("C")]), rule_id="REDUCE_USAGE_OF_CALCULATED_TABLES")
-    assert [(v.object_type, v.object_name) for v in calculated] == [("Calculated Table", "C")]
+    assert _types_and_names(db([calc_table("C")]), "REDUCE_USAGE_OF_CALCULATED_TABLES") == [
+        ("Calculated Table", "'C'")
+    ]
+    group = db([table("G", [col("Name", "string")], calculationGroup={"calculationItems": []})])
+    assert _types_and_names(group, "CALCULATION_GROUPS_WITH_NO_CALCULATION_ITEMS") == [
+        ("Calculation Group Table", "'G'")
+    ]
+
+
+def _m(name, mode=None, source=None):
+    partition = {"name": name, "source": source or {"type": "m", "expression": "Table.Sort("}}
+    if mode:
+        partition["mode"] = mode
+    return partition
+
+
+@pytest.mark.parametrize(
+    "partitions, default_mode, table_type, partition_types",
+    [
+        ([_m("P")], None, "Table (Import)", ["Partition (M - Import)"]),
+        ([_m("P", "directQuery")], None, "Table (DirectQuery)", ["Partition (M - DirectQuery)"]),
+        ([_m("P", "default")], "directQuery", "Table (DirectQuery)",
+         ["Partition (M - DirectQuery)"]),
+        ([_m("P", "dual")], None, "Table (Dual)", ["Partition (M - Dual)"]),
+        ([_m("P"), _m("Q", "directQuery")], None, "Table (Hybrid)",
+         ["Partition (M - Import)", "Partition (M - DirectQuery)"]),
+        ([_m("P", "import", {"type": "query", "query": "SELECT 1", "dataSource": "S"})], None,
+         "Table (Import)", ["Partition (Legacy - Import)"]),
+        ([_m("P", "directLake", {"type": "entity", "entityName": "t"})], None,
+         "Table (DQ over AS)", ["Partition (DQ over AS)"]),
+        ([_m("P", None, {"type": "policyRange"})], None, "Table (Import)",
+         ["Partition (Policy Range)"]),
+    ],
+)  # fmt: skip
+def test_table_and_partition_types_follow_the_partitions(
+    partitions, default_mode, table_type, partition_types
+):
+    extra = {"defaultMode": default_mode} if default_mode else {}
+    model = parse_model(db([table("T", [col("A")], partitions=partitions)], **extra))
+    objects = list(bpa.iter_objects(model))
+    assert [(o.object_type, o.object_name) for o in objects if o.scope == "Table"] == [
+        (table_type, "'T'")
+    ]
+    assert [o.object_type for o in objects if o.scope == "Partition"] == partition_types
+
+
+def test_other_object_names():
+    database = db(
+        [table("T", [col("A")])],
+        [rel("T", "A", "T", "A")],
+        roles=[{"name": "R", "tablePermissions": [{"name": "T", "filterExpression": "1"}]}],
+    )
+    objects = {o.scope: (o.object_type, o.object_name)
+               for o in bpa.iter_objects(parse_model(database))}  # fmt: skip
+    assert objects["Model"] == ("Model", "Model")
+    assert objects["TablePermission"] == ("Table Permission", "T")  # its table's name
+    assert objects["ModelRole"] == ("Role", "R")
+    assert objects["Relationship"][0] == "Relationship"
 
 
 def test_model_quality_column_reads_python_findings():
@@ -633,7 +692,7 @@ def test_vertipaq_annotations_stand_in_for_statistics():
     database = db(
         [table("Big", [col("A")], annotations=[{"name": "Vertipaq_RowCount", "value": "26000000"}])]
     )
-    assert fires("LARGE_TABLES_SHOULD_BE_PARTITIONED", database, "Big")
+    assert fires("LARGE_TABLES_SHOULD_BE_PARTITIONED", database, "'Big'")
 
 
 # ============================================================================
@@ -654,15 +713,15 @@ def test_sample_model_matches_tabular_editor():
     assert ("Column", "'Sales'[Date Key]", "[Formatting] Hide foreign keys") not in found  # hidden
     assert ("Role", "Nordics", "[Maintenance] Remove roles with no members") in found
     assert ("Model", "Model", "[Performance] Model should have a date table") in found
-    assert ("Table", "Sales",
+    assert ("Table (Import)", "'Sales'",
             "[Naming Conventions] Partition name should match table name for single partition "
             "tables") in found
-    assert ("Table", "Dates",
+    assert ("Table (DQ over AS)", "'Dates'",
             "[Naming Conventions] Partition name should match table name for single partition "
             "tables") not in found
     assert all(v.category and v.severity for v in violations)
     # The DAX rules, checked by hand against the rule expressions
-    assert ("Measure", "'Sales'[Dynamic]",
+    assert ("Measure", "[Dynamic]",
             "[DAX Expressions] Measures should not be direct references of other measures") in found
     assert ("Relationship", "'Sales'[Amount] <--> 'Dates'[Year Number]",
             "[DAX Expressions] Inactive relationships that are never activated") in found
@@ -762,7 +821,7 @@ def test_tmdl_carries_annotations_and_bpa_properties():
 
     rule = rule_by_id("OBJECTS_WITH_NO_DESCRIPTION").name
     violations, _ = run_bpa(model)
-    assert not any(v.rule == rule and v.object_name == "Sales" for v in violations)
+    assert not any(v.rule == rule and v.object_name == "'Sales'" for v in violations)
     assert not any(v.rule == rule_by_id("INTEGER_FORMATTING").name for v in violations)
 
 
@@ -860,3 +919,104 @@ def test_info_notes_alone_keep_a_run_a_success(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_run", warn)
     result = run_extraction(options)
     assert result.status == "warnings" and result.files["log"].is_file()
+
+
+# ============================================================================
+# Review fixes (ticket 09)
+# ============================================================================
+
+
+def _hidden_column_used_unqualified():
+    """T[Amount] is hidden and only used as [Amount] in a T measure (D23: a column)."""
+    return db([
+        table("Other", [col("Key")], [measure("Amount", "1")]),  # a same-named measure elsewhere
+        table("T", [col("Amount", isHidden=True)], [measure("Sum", "SUMX ( T, [Amount] )")]),
+    ])  # fmt: skip
+
+
+def test_an_unqualified_own_column_is_not_unnecessary():
+    database = _hidden_column_used_unqualified()
+    assert not fires("UNNECESSARY_COLUMNS", database, "'T'[Amount]")
+    # ... and it is a column reference, not an unqualified measure
+    assert fires("DAX_COLUMNS_FULLY_QUALIFIED", database, "[Sum]")
+
+
+def test_an_unqualified_own_column_is_not_unused():
+    """documentation.find_unused drops every exact dependency's target: this one is a column."""
+    from pbixtractor.dax_parser import model_dependencies
+
+    model = parse_model(_hidden_column_used_unqualified())
+    targets = {(d.target_type, d.target_table, d.target_name) for d in model_dependencies(model)}
+    assert ("Column", "T", "Amount") in targets
+    assert ("Measure", "Other", "Amount") not in targets
+
+
+def test_a_crashing_dependency_index_is_not_cached(monkeypatch, caplog):
+    calls = []
+
+    def broken(model):
+        calls.append(1)
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(bpa, "model_dependencies", broken)
+    database = db([table("T", [col("A", isHidden=True)], [measure("M", "1", isHidden=True)])])
+    with caplog.at_level(logging.WARNING, logger="pbixtractor"):
+        violations, not_checked = run_bpa(parse_model(database))
+    reasons = dict(not_checked)
+    for rule_id in ("UNNECESSARY_COLUMNS", "UNNECESSARY_MEASURES"):
+        assert reasons[rule_id].startswith("error")  # each rule that asks: "not checked"
+    assert len(calls) >= 2  # nothing half-built was cached after the first failure
+    assert violations  # the other rules ran
+
+
+def test_given_dependencies_are_used(monkeypatch):
+    """D29: run_bpa takes the run's dependencies instead of computing them again."""
+    from pbixtractor.dax_parser import model_dependencies
+
+    model = parse_model(db([table("T", [col("A")], [measure("M", "1", isHidden=True),
+                                                     measure("N", "[M]")])]))  # fmt: skip
+    dependencies = model_dependencies(model)
+    monkeypatch.setattr(bpa, "model_dependencies", lambda m: pytest.fail("computed again"))
+    violations, _ = run_bpa(model, dependencies=dependencies)
+    name = rule_by_id("UNNECESSARY_MEASURES").name
+    assert not any(v.rule == name for v in violations)  # [M] is referenced by N
+    violations, _ = run_bpa(model, dependencies=[])  # the given list wins
+    assert any(v.rule == name and v.object_name == "[M]" for v in violations)
+
+
+def test_columns_without_a_distinct_count_are_skipped():
+    """D26: only columns with a count are checked; "needs statistics" when none has one."""
+    rule_id = "AVOID_BI-DIRECTIONAL_RELATIONSHIPS_AGAINST_HIGH-CARDINALITY_COLUMNS"
+    database = fact_dim(BOTH)
+    partial = LiveStatistics(columns={
+        ("Fact", "Key"): ColumnStatistics("Fact", "Key", distinct_values=None),
+        ("Dim", "Key"): ColumnStatistics("Dim", "Key", distinct_values=200_000),
+    })  # fmt: skip
+    violations, not_checked = run_bpa(parse_model(database), partial)
+    assert rule_id not in dict(not_checked)
+    name = rule_by_id(rule_id).name
+    assert [v.object_name for v in violations if v.rule == name] == ["'Dim'[Key]"]
+
+    none = LiveStatistics(columns={
+        ("Fact", "Key"): ColumnStatistics("Fact", "Key", distinct_values=None),
+    })  # fmt: skip
+    _, not_checked = run_bpa(parse_model(database), none)
+    assert dict(not_checked)[rule_id] == NEEDS_STATISTICS
+
+
+def test_a_rule_the_model_ignores_is_never_not_checked():
+    database = fact_dim(annotations=ignore("LARGE_TABLES_SHOULD_BE_PARTITIONED"))
+    _, not_checked = run_bpa(parse_model(database))  # no statistics
+    reasons = dict(not_checked)
+    assert "LARGE_TABLES_SHOULD_BE_PARTITIONED" not in reasons
+    assert reasons["SPLIT_DATE_AND_TIME"] == NEEDS_STATISTICS  # others still listed
+
+
+def test_perspectives_with_unknown_objects_are_not_checked():
+    rule_id = "PERSPECTIVES_WITH_NO_OBJECTS"
+    database = db([table("T", [col("A")])], perspectives=[{"name": "P"}])
+    assert fires(rule_id, database, "P")
+    database["model"]["annotations"] = [{"name": bpa.PERSPECTIVE_OBJECTS_UNKNOWN, "value": "true"}]
+    violations, not_checked = run_bpa(parse_model(database))
+    assert dict(not_checked)[rule_id] == bpa.NO_PERSPECTIVE_OBJECTS
+    assert not any(v.rule == rule_by_id(rule_id).name for v in violations)

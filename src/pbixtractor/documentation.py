@@ -936,7 +936,7 @@ def build_documentation(
         unused_measures=unused_measures,
         exact_dependencies=exact_dependencies,
         bpa_violations=bpa_violations,
-        bpa_not_checked=list(bpa_not_checked or getattr(bpa_violations, "not_checked", [])),
+        bpa_not_checked=list(bpa_not_checked or []),
         live_statistics=live_statistics,
         page_info=build_page_info(report, pages, filter_strings) if report else [],
         bookmarks=build_bookmarks(report, report_info, pages, logger) if report else [],

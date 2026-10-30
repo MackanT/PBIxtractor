@@ -299,3 +299,57 @@ def test_cli_extract_without_model(tmp_path, capsys):
         main(["extract", str(tmp_path / "Lonely.pbix")])
     assert exit_info.value.code == 2
     assert "--model" in capsys.readouterr().err
+
+
+def test_dax_dependencies_are_computed_once_per_run(sample, monkeypatch):
+    """D29: one model_dependencies() per run, shared by the documentation and the BPA."""
+    from pbixtractor import bpa, pipeline
+    from pbixtractor.dax_parser import model_dependencies
+
+    calls = []
+
+    def counted(model):
+        calls.append(1)
+        return model_dependencies(model)
+
+    monkeypatch.setattr(pipeline, "model_dependencies", counted)
+    monkeypatch.setattr(bpa, "model_dependencies", lambda model: pytest.fail("computed again"))
+    result = run_extraction(ExtractionOptions(
+        report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+        output_dir=sample / "out", tabular_editor_analysis=False, write_log_file=False,
+    ))  # fmt: skip
+    assert result.ok, result.message
+    assert calls == [1]
+    assert result.documentation.bpa_violations
+
+
+def test_warning_messages_leave_out_info_notes():
+    from pbixtractor.cli import warning_messages
+
+    logs = "INFO: a note\nWARNING: first\nERROR: second\n  more of it\nDEBUG: detail\nINFO: x"
+    assert warning_messages(logs) == ["WARNING: first", "ERROR: second\n  more of it"]
+    assert warning_messages("") == []
+
+
+def test_cli_counts_and_logs_only_warnings(sample, capsys, monkeypatch):
+    from pbixtractor import pipeline
+
+    def live_statistics(model, options, progress):
+        pipeline.logger.info("A note that is no warning")
+        pipeline.logger.warning("A real warning")
+        return None
+
+    monkeypatch.setattr(pipeline, "_live_statistics", live_statistics)
+    output = sample / "cli_warn"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", str(sample / "Sample.pbix"), "-o", str(output)])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    listed = out.split(" warning(s):\n", 1)
+    count = int(listed[0].rsplit("\n", 1)[-1])
+    assert count == len([line for line in listed[1].splitlines() if line.startswith("  WARNING")])
+    assert "WARNING: A real warning" in out
+    assert "A note that is no warning" not in out
+    (log_file,) = (output / "logs").glob("log_data_*.txt")
+    text = log_file.read_text(encoding="utf-8")
+    assert "A real warning" in text and "A note that is no warning" not in text

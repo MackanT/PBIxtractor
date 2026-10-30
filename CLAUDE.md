@@ -302,8 +302,11 @@ src/pbixtractor/
                     TE's DependsOn: sources measures (+ dynamic format string), calculated
                     columns, calculated tables, RLS TablePermission (name = role), calculation
                     items; case-insensitive: T[X] → column, else measure of T (unknown T:
-                    nothing); [X] → any measure, else (calc column / RLS row context) a column of
-                    its own table, else nothing; bare table name (not before "(" or "[") →
+                    nothing); [X] in TE's order (D23, FormulaFixup.cs; _ModelIndex.unqualified):
+                    a column of the expression's own table (measures, calc columns, RLS, calc
+                    items), else a measure of that table, else a measure in any table (first in
+                    model order), else nothing; a calculated table has no own table (measures
+                    only); bare table name (not before "(" or "[") →
                     Table, unless a VAR of that name is in scope (to the end of its RETURN
                     block); "RETURN [X]" is no qualified ref. Comments/strings never count.
                     Targets once per source; drop_redundant_table_refs applied.
@@ -633,11 +636,18 @@ src/pbixtractor/
                     unpacks DataModel → metadata.sqlitedb (TOM tables) → database_from_metadata()
                     builds the TMSL dict (TOM enum codes → TMSL names; skips internal H$/R$/U$
                     tables (SystemFlags bit 1 - bit 2 marks calculated tables such as DATATABLE
-                    or field parameters, which are kept) and rowNumber columns; carries annotations, so TE's BPA ignore rules survive, and
-                    isAvailableInMdx). compatibilityLevel 1567, or 1601 when a measure has a
-                    dynamic format string (TE 2.29 refuses a property newer than the level:
-                    "Unrecognized JSON property: formatStringDefinition" - BPA and exact
-                    dependencies would silently fall back). Verified on a real .pbix vs its exported .bim: only the known
+                    or field parameters, which are kept) and rowNumber columns; carries annotations, so BPA ignore rules survive, and
+                    isAvailableInMdx; perspectives with their tables/columns/measures/hierarchies
+                    (Perspective* TOM tables; without a PerspectiveTable table the model gets the
+                    annotation PERSPECTIVE_OBJECTS_UNKNOWN and the BPA leaves
+                    PERSPECTIVES_WITH_NO_OBJECTS "not checked"), alternateOf (AlternateOf) and
+                    defaultPowerBIDataSourceVersion (0/1/3 → powerBI_V1/V2/V3, from memory of the
+                    TOM enum; other values left out) when the metadata has them).
+                    compatibilityLevel 1567, or 1601 when a measure has a dynamic format string:
+                    this matters for loading the generated .bim in Tabular Editor (the comparison
+                    tool, tools/compare_tabular_editor.py) - TE 2.29 refuses a property newer than
+                    the level ("Unrecognized JSON property: formatStringDefinition") - not for the
+                    pipeline's BPA, which is Python. Verified on a real .pbix vs its exported .bim: only the known
                     version differences; TE BPA 125 = 125 findings. statistics_from_metadata():
                     rows (row-number column), distinct values ONLY for hash dictionaries
                     (DictionaryStorage.Type 1; value encoding stores a range), sizes via PBIXRay.
@@ -659,8 +669,7 @@ src/pbixtractor/
                     (DataSource name/type), perspective_tables, default_powerbi_datasource_version,
                     variation_columns (variation defaultColumn targets). tmdl.py fills the same
                     (annotation nodes, alternateOf, variation, member, perspectiveTable,
-                    dataSource); pbix_model.py already carried annotations/isAvailableInMdx (no
-                    perspective tables, alternateOf or data source version from a .pbix yet).
+                    dataSource); pbix_model.py fills them from the .pbix metadata too.
                     model_to_dataset() → DataFrame identical to TE's TSV (verified on a real model:
                     all 459 objects match; only DAX whitespace differs; levels follow each
                     hierarchy - the workbooks read that order). write_documentation_tsv(model,
@@ -712,7 +721,9 @@ src/pbixtractor/
                     block lists each rule not checked (severity, category, name, "Not checked",
                     reason; not_checked_rows()), so "missing" never reads as "passed".
   bpa.py            Python Best Practice Analyzer (D16: the only BPA a run uses). run_bpa(model,
-                    statistics=None, rules_path=DEFAULT_BPA_RULES, custom=None, disabled=())
+                    statistics=None, rules_path=DEFAULT_BPA_RULES, custom=None, disabled=(),
+                    dependencies=None) (D29: the pipeline computes model_dependencies once per
+                    run and passes it here; None = computed when a rule needs it)
                     (custom = bpa_custom CustomRules, checked after the built-ins by
                     rule_findings(); disabled = built-in ids skipped: neither findings nor
                     "not checked"; a raising custom rule → not_checked "error: ..." + warning)
@@ -720,20 +731,31 @@ src/pbixtractor/
                     from tabular_editor, most severe first], not_checked [(rule ID, reason)]).
                     Rule metadata from data/BPARules.json (load_rules / rule_by_id, BpaRule);
                     each check is a hand port of the rule's Expression (quoted in a comment),
-                    registered by rule ID in CHECKS via @check(id, requires=...). Objects per TE
-                    scope (iter_objects → BpaObject): Model ("Model"), Table / Calculated Table /
-                    Calculation Group Table (name), Column / Calculated Column / Calculated Table
-                    Column and Measure ('Table'[Name], ' doubled, ] as ]]), Hierarchy, Level,
-                    Partition ("Partition (M - Import)", name), Calculation Item, Relationship
-                    (te_name), Perspective, Role, Table Permission (RLS filter; name = the table:
-                    a guess at TE's TablePermission.Name), Provider/Structured Data Source, Shared
-                    Expression. All 71 rules have a check. The 21 DAX_RULES: regexes run on the
+                    registered by rule ID in CHECKS via @check(id, requires=..., reason=...).
+                    Objects per TE scope (iter_objects → BpaObject), named as TE does (D24,
+                    GetTypeName / DaxObjectFullName): Model ("Model"), "Table (<mode>)" /
+                    "Calculated Table" / "Calculation Group Table" ('Table', ' doubled; mode by
+                    table_mode(): an entity partition → "DQ over AS", else the partitions' mode
+                    (defaultMode for "default"), all equal → that mode, mixed → "Hybrid"), every
+                    column "Column" ('Table'[Name], ] as ]]), Measure ([Name], ] as ]]),
+                    Hierarchy ('Table'[Name], ] NOT escaped), Level, partitions
+                    (partition_type_name: "Partition (M - <mode>)", "(Legacy - <mode>)", "(DQ
+                    over AS)", "(Policy Range)"), Calculation Item, Relationship (te_name),
+                    Perspective, Role, Table Permission (name = its table), Provider/Structured
+                    Data Source, Shared Expression (these last three spellings unverified).
+                    "Table (DirectQuery)" in a rule = table_mode DirectQuery (a Hybrid table is
+                    not). _Context.referenced_by builds its index locally and caches it only
+                    when complete (a crash = that rule's "not checked", the next rule retries).
+                    D26: the high-cardinality rule skips columns without a distinct count;
+                    "needs statistics" only when no column has one. A rule the model's ignore
+                    annotation lists is dropped before the statistics check (never "not
+                    checked"). All 71 rules have a check. The 21 DAX_RULES: regexes run on the
                     expression text like TE's RegEx.IsMatch (comments and strings included, same
                     (?i) flags; names TE pastes into a regex are re.escape'd); DependsOn /
                     ReferencedBy (and ReferencedBy.AllMeasures, transitive) come from
                     dax_parser.model_dependencies; FullyQualified from
-                    dax_parser.reference_occurrences (an unqualified [X] that is no measure =
-                    a column of the object's own table); object-level security is not read
+                    dax_parser.reference_occurrences (D23 order; a calculated table has no own
+                    table); object-level security is not read
                     (UNNECESSARY_COLUMNS takes it as unset). not_checked reasons:
                     "needs statistics" (row counts/cardinality from LiveStatistics, else
                     Vertipaq_* / LongLengthRowCount / DateTimeWithHourMinSec annotations; RI
@@ -742,8 +764,9 @@ src/pbixtractor/
                     never a failed run). Rules above the model's compatibility level are skipped
                     silently (as TE). BestPracticeAnalyzer_IgnoreRules annotations ({"RuleIDs":
                     [...]}) on an object or the model (= every object) suppress findings. KPIs
-                    are not modelled (their scope is never checked). TE scope names/ObjectType
-                    strings are assumed from TE2, not yet compared on Windows (ticket 07).
+                    are not modelled (their scope is never checked; no "[M].KPI" names).
+                    model_sheets.parse_bpa_object_name / bpa_by_object read [M] (matched by
+                    measure name) and 'T' / "Table (<mode>)" as well as the older shapes.
   bpa_custom.py     Custom model quality rules (D6, D17, D18): a YAML file defined by
                     PBIxtractor, USER_RULES_PATH = azure_auth.AUTH_DIR / "bpa_rules.yaml" (tests:
                     conftest points it at a temp folder) or --bpa-rules FILE. `version: 1`,

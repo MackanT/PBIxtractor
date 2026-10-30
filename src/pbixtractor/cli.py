@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument(
         "--no-tabular-editor",
         action="store_true",
-        help="skip the Tabular Editor analysis (BPA, exact dependencies, live statistics)",
+        help="skip live statistics from an open Power BI Desktop (needs Tabular Editor 2)",
     )
     extract.add_argument(
         "--tabular-editor-tsv",
@@ -257,7 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--output", type=Path, help="root of the models' output folders (default: output)"
     )
     catalog_add.add_argument("--no-tabular-editor", action="store_true",
-                             help="skip the Tabular Editor analysis (faster)")
+                             help="skip live statistics from an open Power BI Desktop (needs Tabular Editor 2)")
     catalog_add.add_argument("--no-service-statistics", action="store_true",
                              help="do not read row counts / distinct values from the Power BI service")
     catalog_add.add_argument("--bpa-rules", type=Path, metavar="FILE", help=BPA_RULES_HELP)
@@ -737,13 +737,41 @@ def run_extract(args: argparse.Namespace) -> int:
     for kind, path in result.files.items():
         print(f"  {kind:14} {path}")
     if result.status == "warnings" and not args.quiet:
-        warnings = result.logs.strip().splitlines()
+        warnings = warning_messages(result.logs)
         print(f"\n{len(warnings)} warning(s):")
-        for line in warnings[:20]:
-            print(f"  {line}")
+        for message in warnings[:20]:
+            print("  " + message.replace("\n", "\n  "))
         if len(warnings) > 20:
             print(f"  ... see {result.files.get('log', 'the log file')}")
     return 0
+
+
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def warning_messages(logs: str) -> list[str]:
+    """
+    The WARNING-or-worse records of a run's log text, one string per record.
+
+    Args:
+        logs: ExtractionResult.logs ("LEVEL: message" lines; a message may span several lines)
+
+    Returns:
+        Each warning/error record (its continuation lines joined with newlines); INFO and DEBUG
+        notes are left out
+    """
+    records: list[list[str]] = []
+    for line in logs.strip().splitlines():
+        level = line.split(":", 1)[0]
+        if level in _LOG_LEVELS or not records:
+            records.append([line])
+        else:
+            records[-1].append(line)
+    return [
+        "\n".join(lines)
+        for lines in records
+        if lines[0].split(":", 1)[0] not in ("DEBUG", "INFO")
+    ]
 
 
 def main(argv: list[str] | None = None) -> None:

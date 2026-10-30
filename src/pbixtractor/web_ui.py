@@ -416,8 +416,7 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
             with ui.tab_panel(quality_tab):
                 if doc["quality"] is None:
                     ui.label(
-                        "Best Practice Analyzer did not run (Tabular Editor analysis off or "
-                        "Tabular Editor 2 not found)."
+                        "The model quality check did not run (see the log)"
                     ).classes("text-grey-7")
                 else:
                     counts = Counter(v["rule"] for v in doc["quality"])
@@ -1126,8 +1125,7 @@ def build_page(
 
                 with ui.expansion("Options", icon="tune").classes("w-full") as options_box:
                     te_analysis = ui.switch(
-                        "Tabular Editor analysis: Best Practice Analyzer, exact DAX dependencies, "
-                        "live statistics (runs locally)",
+                        "Live statistics from Power BI Desktop (Tabular Editor 2)",
                         value=tabular_editor is not None,
                     )
                     te_tsv = ui.switch(
@@ -1183,8 +1181,8 @@ def build_page(
                     else:
                         ui.icon("cancel", color="negative")
                         ui.label(
-                            "Tabular Editor 2 not found - BPA, exact dependencies and live "
-                            "statistics are unavailable"
+                            "Tabular Editor 2 not found - live statistics from Power BI Desktop "
+                            "are unavailable"
                         ).classes("text-sm")
                 if not tabular_editor and local:
 

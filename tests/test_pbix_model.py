@@ -21,7 +21,7 @@ from pbixtractor.pbix_model import (
 from pbixtractor.semantic_model import parse_model
 
 SCHEMA = {
-    "Model": ["ID", "Name", "Culture", "DefaultMode"],
+    "Model": ["ID", "Name", "Culture", "DefaultMode", "DefaultPowerBIDataSourceVersion"],
     "Table": ["ID", "Name", "Description", "IsHidden", "DataCategory", "SystemFlags", "IsPrivate",
               "ShowAsVariationsOnly", "CalculationGroupID"],
     "Column": ["ID", "TableID", "ExplicitName", "InferredName", "ExplicitDataType", "InferredDataType",
@@ -47,10 +47,16 @@ SCHEMA = {
                         "FormatStringDefinitionID", "Description"],
     "ColumnStorage": ["ID", "Statistics_DistinctStates", "Statistics_RowCount"],
     "DictionaryStorage": ["ID", "ColumnStorageID", "Type", "Size"],
+    "Perspective": ["ID", "Name"],
+    "PerspectiveTable": ["ID", "PerspectiveID", "TableID", "IncludeAll"],
+    "PerspectiveColumn": ["ID", "PerspectiveTableID", "ColumnID"],
+    "PerspectiveMeasure": ["ID", "PerspectiveTableID", "MeasureID"],
+    "PerspectiveHierarchy": ["ID", "PerspectiveTableID", "HierarchyID"],
+    "AlternateOf": ["ID", "ColumnID", "BaseColumnID", "BaseTableID", "Summarization"],
 }
 
 ROWS = {
-    "Model": [(1, "Model", "sv-SE", 0)],
+    "Model": [(1, "Model", "sv-SE", 0, 3)],
     "Table": [
         (10, "Sales", None, 0, None, 0, 0, 0, None),
         (20, "Dates", "Calendar", 0, "Time", 0, 0, 0, None),
@@ -106,6 +112,12 @@ ROWS = {
     # Type 1 = hash dictionary (DistinctStates is a count), 2 = value encoding (a value range)
     "DictionaryStorage": [(1, 901, 1, 4000), (2, 902, 2, 128), (3, 903, 1, 64), (4, 911, 2, 128),
                           (5, 912, 1, 300), (6, 913, 2, 128), (7, 914, 2, 128)],
+    "Perspective": [(870, "Finance"), (871, "Empty")],
+    "PerspectiveTable": [(880, 870, 10, 0), (881, 870, 20, 1)],
+    "PerspectiveColumn": [(890, 880, 101)],
+    "PerspectiveMeasure": [(891, 880, 500)],
+    "PerspectiveHierarchy": [(892, 881, 810)],
+    "AlternateOf": [(895, 204, 201, None, 0)],  # Dates[Year] groups by Dates[Date Key]
 }
 
 
@@ -191,6 +203,51 @@ def test_statistics_count_rows_and_only_real_distinct_values(metadata):
     assert stats.columns[("Dates", "Month")].distinct_values == 12
     assert stats.table_sizes == {"Sales": 6500, "Dates": 310}
     assert stats.measure_types == {("Sales", "Total"): "Double", ("Sales", "Dynamic"): "Decimal"}
+
+
+def test_perspectives_aggregations_and_the_data_source_version(metadata):
+    model = database_from_metadata(metadata)["model"]
+    assert model["perspectives"] == [
+        {"name": "Finance", "tables": [
+            {"name": "Sales", "columns": [{"name": "Amount"}], "measures": [{"name": "Total"}]},
+            {"name": "Dates", "includeAll": True, "hierarchies": [{"name": "Calendar"}]},
+        ]},
+        {"name": "Empty"},
+    ]  # fmt: skip
+    year = next(c for c in model["tables"][1]["columns"] if c["name"] == "Year")
+    assert year["alternateOf"] == {"summarization": "groupBy", "baseColumn": "Date Key",
+                                   "baseTable": "Dates"}  # fmt: skip
+    assert model["defaultPowerBIDataSourceVersion"] == "powerBI_V3"
+    parsed = parse_model(database_from_metadata(metadata))
+    assert parsed.perspective_tables == {"Finance": ["Sales", "Dates"], "Empty": []}
+    assert parsed.default_powerbi_datasource_version == "powerBI_V3"
+    assert next(c for c in parsed.tables[1].columns if c.name == "Year").alternate_of
+
+
+def test_perspective_objects_decide_the_bpa_rule(metadata):
+    from pbixtractor.bpa import NO_PERSPECTIVE_OBJECTS, rule_by_id, run_bpa
+
+    rule = rule_by_id("PERSPECTIVES_WITH_NO_OBJECTS")
+    violations, _ = run_bpa(parse_model(database_from_metadata(metadata)))
+    assert [v.object_name for v in violations if v.rule == rule.name] == ["Empty"]
+
+    # Metadata without the Perspective* object tables: the rule is "not checked", nothing flagged
+    for table in ("PerspectiveTable", "PerspectiveColumn", "PerspectiveMeasure",
+                  "PerspectiveHierarchy"):
+        metadata.execute(f'DROP TABLE "{table}"')
+    database = database_from_metadata(metadata)
+    assert database["model"]["perspectives"] == [{"name": "Finance"}, {"name": "Empty"}]
+    violations, not_checked = run_bpa(parse_model(database))
+    assert not any(v.rule == rule.name for v in violations)
+    assert dict(not_checked)[rule.id] == NO_PERSPECTIVE_OBJECTS
+
+
+def test_no_perspectives_need_no_note(metadata):
+    metadata.execute('DROP TABLE "PerspectiveTable"')
+    metadata.execute('DELETE FROM "Perspective"')
+    model = database_from_metadata(metadata)["model"]
+    assert "perspectives" not in model
+    assert all(a["name"] != pbix_model.PERSPECTIVE_OBJECTS_UNKNOWN for a in model["annotations"])
 
 
 def _pbix(path: Path, **entries) -> Path:
