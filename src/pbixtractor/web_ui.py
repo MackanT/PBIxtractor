@@ -46,16 +46,9 @@ from .pipeline import (
     run_extraction,
 )
 from .service_stats import ServiceModel
-from .tabular_editor import add_tabular_editor_location, find_tabular_editor
 from .theme import apply_theme, card_header, page_title, serve_fonts, stat_tile
 from .web_config import output_root, stored_choices, url
 from .web_sources import DevOpsPanel, FabricPanel
-
-
-def find_local_instances() -> list:
-    """Power BI Desktop is no longer looked for (statistics come from the .pbix or the
-    service): always empty, until the Desktop status leaves the page."""
-    return []
 
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
 _OUTPUT_DIRS: dict[str, Path] = {}
@@ -181,7 +174,7 @@ def register(
         output_root: Where documentation, uploads and downloads go (default <cwd>/output)
         storage_prefix: Prefix of PBIxtractor's keys in app.storage.general
         local_machine: True only if every user's browser runs on the server's own PC - it
-            allows browsing the server's disk, server paths, Power BI Desktop detection, ...
+            allows browsing the server's disk, server paths, opening the output folder, ...
         access: The host's sign-in/role check, called for every request to the file routes
             (they are plain HTTP routes, outside the host's page login); False → 403. Show
             the page itself only to the same users.
@@ -331,7 +324,7 @@ def _log_text(logs: str) -> None:
 
 
 def _log_count(logs: str) -> int:
-    """Number of log messages (a message can span several lines, e.g. Tabular Editor output)."""
+    """Number of log messages (a message can span several lines, e.g. a traceback)."""
     return len(re.findall(r"^(?:DEBUG|INFO|WARNING|ERROR|CRITICAL): ", logs or "", re.MULTILINE))
 
 
@@ -884,7 +877,6 @@ def build_page(
     """
     embedded = web_config.CONFIG.embedded
     local = web_config.CONFIG.local_machine
-    tabular_editor = find_tabular_editor()
     # Sent as JavaScript once the page is live: a host switching sections client-side
     # (ui.sub_pages) builds this after the first load, when added <body> HTML never arrives
     ui.timer(0.01, lambda: ui.run_javascript(_THEME_SYNC), once=True)
@@ -920,7 +912,7 @@ def build_page(
             on_catalog_change = catalog_link.refresh
         with ui.row().classes("w-full gap-4 items-stretch"):
             # ---------------- inputs ----------------
-            # basis-0: long help texts wrap instead of pushing the Environment card down
+            # basis-0: long help texts wrap instead of widening the card
             with ui.card().classes("grow basis-0 min-w-[420px]"):
                 with ui.row().classes("w-full items-center no-wrap gap-2"):
                     card_header(
@@ -1130,15 +1122,6 @@ def build_page(
                 output_input.set_visibility(local)  # a server path: output_root()/<name> otherwise
 
                 with ui.expansion("Options", icon="tune").classes("w-full") as options_box:
-                    te_analysis = ui.switch(
-                        "Live statistics from Power BI Desktop (Tabular Editor 2)",
-                        value=tabular_editor is not None,
-                    )
-                    te_tsv = ui.switch(
-                        "Use Tabular Editor TSV export (formats DAX via daxformatter.com - "
-                        "sends DAX online)",
-                        value=False,
-                    )
                     service_stats = ui.switch(
                         "Row counts and distinct values from the Power BI service (reports "
                         "downloaded from Fabric; read-only DAX queries)",
@@ -1171,88 +1154,6 @@ def build_page(
                     description_tag = ui.input(
                         "Description tag in DAX", value=ExtractionOptions.description_tag
                     ).classes("w-48")
-
-            # ---------------- environment ----------------
-            with ui.card().classes("w-[380px] max-w-full"):
-                with ui.row().classes("w-full items-center no-wrap gap-2"):
-                    card_header(
-                        "settings_suggest",
-                        "Environment",
-                        "What this PC adds to a run" if local else "What the server adds to a run",
-                    )
-                with ui.row().classes("items-center no-wrap"):
-                    if tabular_editor:
-                        ui.icon("check_circle", color="positive")
-                        ui.label("Tabular Editor 2 found").tooltip(str(tabular_editor))
-                    else:
-                        ui.icon("cancel", color="negative")
-                        ui.label(
-                            "Tabular Editor 2 not found - live statistics from Power BI Desktop "
-                            "are unavailable"
-                        ).classes("text-sm")
-                if not tabular_editor and local:
-
-                    def save_location() -> None:
-                        if add_tabular_editor_location(te_folder.value or ""):
-                            ui.navigate.reload()
-                        else:
-                            ui.notify("No TabularEditor.exe in that folder.", type="warning")
-
-                    with ui.row().classes("w-full items-center no-wrap"):
-                        te_folder = (
-                            ui.input("Tabular Editor 2 folder", placeholder=r"C:\Tools\TabularEditor")
-                            .classes("grow")
-                            .mark("te_folder")
-                        )
-                        ui.button("Save", on_click=save_location).props("flat dense")
-                desktop_box = ui.column().classes("gap-1")
-
-                refresh_state = {"seq": 0}
-
-                async def refresh_desktop(delay: float = 0.0) -> None:
-                    """Scan for Power BI Desktop off the event loop (a scan can take seconds);
-                    while typing, only the last change within `delay` seconds scans."""
-                    refresh_state["seq"] += 1
-                    seq = refresh_state["seq"]
-                    if delay:
-                        await asyncio.sleep(delay)
-                        if seq != refresh_state["seq"]:
-                            return
-                    instances = await run.io_bound(find_local_instances)
-                    if seq != refresh_state["seq"] or desktop_box.is_deleted:
-                        return  # a newer scan runs, or the page is gone
-                    desktop_box.clear()
-                    selected = Path(report_input.value) if report_input.value else None
-                    with desktop_box:
-                        if not instances:
-                            with ui.row().classes("items-center no-wrap"):
-                                ui.icon("info", color="grey")
-                                ui.label(
-                                    "No report open in Power BI Desktop (open it to add row "
-                                    "counts, sizes and measure types)"
-                                ).classes("text-sm text-grey-8")
-                        for instance in instances:
-                            name = instance.report_path.name if instance.report_path else "?"
-                            match = bool(
-                                selected
-                                and instance.report_path
-                                and os.path.normcase(instance.report_path)
-                                == os.path.normcase(selected)
-                            )
-                            with ui.row().classes("items-center no-wrap"):
-                                ui.icon(
-                                    "monitoring", color="positive" if match else "grey"
-                                ).classes("flex-none")
-                                ui.label(
-                                    f"Desktop: {name} (port {instance.port})"
-                                    + (" - live statistics will be included" if match else "")
-                                ).classes("text-sm")
-
-                if local:  # Power BI Desktop on the server is no use to a remote user
-                    ui.button(
-                        "Refresh", icon="refresh", on_click=lambda: refresh_desktop()
-                    ).props("flat dense")
-                    ui.timer(0.05, lambda: refresh_desktop(), once=True)  # after the page is sent
 
         # ---------------- run ----------------
         batch_stop: dict[str, Optional[threading.Event]] = {"event": None}  # the running batch's
@@ -1324,8 +1225,6 @@ def build_page(
             auto_model["value"] = model_input.value or None
         output_input.value = auto_output["value"] = str(output_root() / report_name(path))
         selection.refresh()  # typing another report leaves a drop's other reports out
-        if local:
-            background_tasks.create(refresh_desktop(delay=0.5), name="refresh_desktop")
 
     auto_model = {"value": None}  # the model value on_report_change filled in last
     auto_output = {"value": None}  # the output folder on_report_change suggested last
@@ -1394,8 +1293,6 @@ def build_page(
         settings = batch.BatchSettings(
             output_root=output_root(),
             catalog_dir=catalog_dir,
-            tabular_editor_analysis=te_analysis.value,
-            tabular_editor_tsv=te_tsv.value,
             service_statistics=service_stats.value,
             write_log_file=log_file.value,
             description_tag=description_tag.value or ExtractionOptions.description_tag,
@@ -1552,8 +1449,6 @@ def build_page(
             output_dir=Path(output_input.value or output_root() / (name or report_name(report))),
             name=name,
             description_tag=description_tag.value or ExtractionOptions.description_tag,
-            tabular_editor_analysis=te_analysis.value,
-            tabular_editor_tsv=te_tsv.value,
             write_log_file=log_file.value,
             extra_reports=extra_reports,
             not_included=not_included,

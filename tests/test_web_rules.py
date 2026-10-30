@@ -25,9 +25,7 @@ FIRST = load_rules()[0].id
 
 @pytest.fixture
 def page(tmp_path, monkeypatch):
-    """No Tabular Editor / Desktop, no last run, the temp rule file of conftest."""
-    monkeypatch.setattr(web_ui, "find_tabular_editor", lambda: None)
-    monkeypatch.setattr(web_ui, "find_local_instances", lambda: [])
+    """No last run, the temp rule file of conftest."""
     monkeypatch.setitem(web_ui._CATALOG, "dir", None)
     monkeypatch.setitem(web_rules._LAST, "run", None)
     monkeypatch.chdir(tmp_path)

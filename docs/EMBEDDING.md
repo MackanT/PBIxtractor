@@ -79,13 +79,10 @@ in hosts that switch sections client-side with `ui.sub_pages`.
 page offer things that act on the server's machine:
 
 - typing report/model/output/catalog paths and the server-side file browser
-- saving the Tabular Editor folder
-- looking for reports open in Power BI Desktop (live row counts/sizes)
 - "Open folder"
 
 With `local_machine=False` (the default for `register`), those are hidden. Users upload a
-`.pbix`/`.bim`, or pick a report from Fabric or Azure DevOps. Tabular Editor analysis still runs
-if Tabular Editor 2 is installed on the server.
+`.pbix`/`.bim`, or pick a report from Fabric or Azure DevOps.
 
 ## Things to know
 
@@ -101,7 +98,8 @@ if Tabular Editor 2 is installed on the server.
   from Fabric) - there is no `az login` fallback (the Azure CLI is not used for sign-in). A
   DevOps personal access token in `AZURE_DEVOPS_PAT` covers the rest of Azure DevOps (reports
   whose model is in the repository) without a service principal.
-- Run on Windows for Tabular Editor 2; everything else is portable.
+- Nothing in a run is Windows-only: the model analysis (Best Practice Analyzer, DAX
+  dependencies, DAX formatting) runs in Python on any OS.
 
 ## Checked by tests
 

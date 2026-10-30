@@ -20,7 +20,7 @@ offline HTML lineage viewer, with:
 - 🎯 **Filter Documentation** - Page-level and visual-level filter tracking
 - 🔗 **Dependency Tracking** - Shows which measures use which columns/tables
 - ⚡ **Model Analysis in Python** - Best Practice Analyzer, exact DAX dependencies and DAX
-  formatting on every OS, offline (no Tabular Editor needed)
+  formatting on every OS, offline, with no other program to install
 
 ## Installation
 
@@ -101,7 +101,7 @@ used.
 
 ```powershell
 pbixtractor extract C:\Reports\Sales.pbix                  # model: the one inside the .pbix
-pbixtractor extract Sales.pbix --model Model.bim -o out\Sales --no-tabular-editor
+pbixtractor extract Sales.pbix --model Model.bim -o out\Sales
 pbixtractor extract Sales.pbip                              # PBIP: model.bim or TMDL
 pbixtractor extract --help
 
@@ -132,9 +132,9 @@ Reports with an encrypting sensitivity label cannot be downloaded from Fabric (a
 Output (default `output\<report name>\`): `<name>.xlsx`, `<name>_data.xlsx`, `<name>.json`,
 `<name>_lineage.html` (offline lineage viewer), `<name>_Relationships.png` and
 `documentation.tsv` (every table, column, hierarchy, level, measure, relationship and partition,
-in Tabular Editor 2's export format; measures and calculated columns formatted offline in
-daxformatter.com's style, the rest as in the model - with `--tabular-editor-tsv` Tabular Editor
-writes it instead, with DAX formatted by daxformatter.com).
+one row per object with its name, description, expression, format string, data type and
+display folder; measures and calculated columns formatted offline in daxformatter.com's style,
+the rest as in the model).
 
 ### Custom model quality rules
 
@@ -163,7 +163,7 @@ Properties: `name`, `table`, `description`, `format_string`, `data_type`, `displ
 `hidden`, `expression` (measures and calculated columns) and `dependants` (how many objects'
 DAX reference it). Ops: `equals`, `not_equals`, `contains`, `is_empty`, `not_empty` and `in` (a
 list); `equals`, `not_equals`, `contains` and `in` ignore case. `matches` is a regular
-expression and, as in Tabular Editor, case-sensitive: `"^[a-z]"` finds `sales` but not `Sales`;
+expression and, as in .NET, case-sensitive: `"^[a-z]"` finds `sales` but not `Sales`;
 start the pattern with `(?i)` to ignore case (`"(?i)^[a-z]"` finds both). A pattern gets 2
 seconds per object: one that takes longer (for example `(a+)+$` on a long expression) counts as
 no match for that object, the run logs a warning naming the rule and the object, and goes on. A
@@ -188,10 +188,9 @@ print(result.status, result.files)  # "success" | "warnings" | "error", {"workbo
 ## Requirements
 
 - **Python 3.11+**
-- Optional: **Tabular Editor 2** ([download](https://github.com/TabularEditor/TabularEditor/releases))
-  only for live statistics from a report open in Power BI Desktop (Windows). The Best Practice
-  Analyzer and the DAX dependencies run in Python without it. Found in Program Files
-  automatically; otherwise set its folder in the web UI.
+
+Row counts, distinct values and sizes come from the .pbix itself, or from the Power BI service
+for reports downloaded from Fabric.
 
 ## Project Structure
 
@@ -229,9 +228,13 @@ syntax highlighting. See `docs/ADD_VISUAL_TYPES.md`.
 ```powershell
 uv sync --extra dev
 uv run --frozen pytest -q
-uv run --frozen pytest -q -m "not tabular_editor"   # skip the tests that run Tabular Editor 2
+uv run --frozen pytest -q -m "not tabular_editor"   # skip the developer comparison tests
 uv run --frozen pytest --cov=pbixtractor --cov-report=html
 ```
+
+Optional developer check: `tools/compare_tabular_editor.py MODEL` compares the Python Best
+Practice Analyzer and DAX dependencies with Tabular Editor 2's on one model (Windows, or Wine on
+Linux; documentation runs never need it).
 
 ### Code Formatting
 
@@ -259,9 +262,8 @@ uv run --frozen ruff check src/ tests/
 - Bookmarks: cross-highlight selections and drill state are not listed.
 - Tooltip/drillthrough page detection is not yet tested on real reports.
 - DAX dependencies come from PBIxtractor's own DAX parser on every run (unqualified references
-  resolved as Tabular Editor does; comments and strings ignored). Text matching is only the
-  fallback should that analysis crash.
-- Tabular Editor 2 and Power BI Desktop detection are Windows-only.
+  resolved to a column of the same table first, then a measure; comments and strings ignored).
+  Text matching is only the fallback should that analysis crash.
 
 ## License
 

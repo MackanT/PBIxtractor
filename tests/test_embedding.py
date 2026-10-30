@@ -25,8 +25,6 @@ def host(tmp_path, monkeypatch):
     """A host app page: its own header, PBIxtractor's page inside it."""
     write_sample_pbix(tmp_path / "Sample.pbix")
     (tmp_path / "Sample.bim").write_text(json.dumps(BIM), encoding="utf-8")
-    monkeypatch.setattr(web_ui, "find_tabular_editor", lambda: None)
-    monkeypatch.setattr(web_ui, "find_local_instances", lambda: pytest.fail("scanned the server"))
     monkeypatch.chdir(tmp_path)
     # Module-level registries of served folders: keep this test's runs out of the others
     monkeypatch.setattr(web_ui, "_OUTPUT_DIRS", {})

@@ -154,7 +154,7 @@ src/pbixtractor/
                     local_machine=False, access, bpa_rules=None) for a host app, then build_page() inside the host's page
                     (no header/rail/theme/host check of ours; routes under the prefix; a catalog
                     link on the page). local_machine=False hides everything acting on the server's
-                    machine: path inputs + PathPicker, Tabular Editor folder, Desktop detection,
+                    machine: path inputs + PathPicker,
                     output/catalog folder inputs (and never stores catalog_dir), "Open folder";
                     uploads fill the hidden inputs. _THEME_SYNC script: embedded lineage iframes
                     follow body.body--dark by postMessage (any host). Stand-alone: start() →
@@ -162,7 +162,8 @@ src/pbixtractor/
                     index() = apply_theme + _build_shell() (pine header + 60px icon rail, menu toggles
                     labels, light/dark toggle remembered in stored_choices; Catalog rail entry
                     once a catalog exists) + build_page() (report/model/output inputs, server-side
-                    PathPicker dialog, options, TE/Desktop status) → run_extraction in
+                    PathPicker dialog, options: service statistics, log file, catalog,
+                    description tag) → run_extraction in
                     run.io_bound; progress/log via a queue drained by ui.timer. Results:
                     stat cards, download buttons, tabs Lineage (iframe of <name>_lineage.html
                     served by /files/{token}/{name}; token → output folder, 404 outside it),
@@ -210,10 +211,11 @@ src/pbixtractor/
                     build_page makes one web_sources.AccountState(busy=_JOB_LOCK.locked) for
                     both panels (embedded: none, no control); register() calls
                     azure_auth.allow_browser_login(False) (only a service principal signs in
-                    there), start() leaves it allowed. Power BI Desktop is no longer scanned:
-                    web_ui.find_local_instances() returns [] (its status, the Tabular Editor
-                    folder and the TE switches - which only log the note - leave the page in
-                    ticket 08b).
+                    there), start() leaves it allowed. No Tabular Editor or Power BI Desktop
+                    parts (removed in python-analysis ticket 08b: no folder field, no TE
+                    switches, no found/Desktop status card): runs and batches leave
+                    tabular_editor_analysis / _tsv at their defaults, so no TABULAR_EDITOR_NOTE;
+                    choices an older version stored for them are ignored, never written.
                     Catalog option (switch + folder, default output/_catalog, remembered via
                     stored_choices()); header link "Catalog" → /catalog/.
                     Rules page (stand-alone only; start() → register_app_pages() adds
@@ -927,7 +929,8 @@ src/pbixtractor/
   cross-highlight selections (`visualContainers.*.highlight`) and drill state. With "Selected
   visuals", page/report filters are still listed (assumed applied - not verified in Desktop).
 - Old `Input/*.csv` files (from the removed DearPyGUI "User Input" tab) are not read; only
-  `Input/TabularEditorLocations.txt` is.
+  `Input/TabularEditorLocations.txt` is, and only by the developer check
+  (tabular_editor.find_tabular_editor()).
 - Text-matching dependency fallback order is set-based (not stable across runs). The data
   workbook's "dependencies" sheet headers (MeasureName, Dependent, ...) are unchanged on purpose
   (possible downstream consumers).
