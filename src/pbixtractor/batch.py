@@ -94,6 +94,7 @@ class BatchSettings:
 
     output_root: Path  # each model's documentation goes to <root>/<name>
     catalog_dir: Path  # every model is added to this catalog
+    # Old Tabular Editor options, kept so old callers keep working; unused
     tabular_editor_analysis: bool = True
     tabular_editor_tsv: bool = False
     service_statistics: bool = True
@@ -566,8 +567,6 @@ def _run_job(
         output_dir=Path(settings.output_root) / name,
         name=name,
         description_tag=settings.description_tag,
-        tabular_editor_analysis=settings.tabular_editor_analysis,
-        tabular_editor_tsv=settings.tabular_editor_tsv,
         write_log_file=settings.write_log_file,
         extra_reports=prepared.report_paths[1:],
         not_included=prepared.not_included,

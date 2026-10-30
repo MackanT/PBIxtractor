@@ -5,7 +5,7 @@ DMVs (Microsoft docs). So from the service we get:
     - row counts per table            COUNTROWS, one query for all tables
     - distinct values per column      COLUMNSTATISTICS()
 but not column/table sizes or measure data types (those need INFO/DMV queries, i.e. the XMLA
-endpoint, or the report open in Power BI Desktop - see live_model.py).
+endpoint, which is not planned; a .pbix carries its own: pbix_model.py).
 
 DirectQuery tables are left out of the row counts: counting them would query the source.
 Needs read + build permission on the model and the tenant setting "Dataset Execute Queries
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from .azure_auth import ApiError
-from .live_model import LiveStatistics, statistics_from_rows
+from .statistics import LiveStatistics, statistics_from_rows
 
 logger = logging.getLogger("pbixtractor")
 

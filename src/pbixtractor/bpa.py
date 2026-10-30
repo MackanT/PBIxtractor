@@ -3,7 +3,7 @@
 Rule metadata (ID, name, category, description, severity, scope, compatibility level) comes from
 data/BPARules.json. Each rule's check is ported by hand from its Tabular Editor (Dynamic LINQ)
 Expression - a generic interpreter of those expressions is out of scope. Findings have the shape
-Tabular Editor's analyzer gives (tabular_editor.BpaViolation), so the "Model quality" sheets and
+Tabular Editor's analyzer gives (BpaViolation), so the "Model quality" sheets and
 column read them unchanged.
 
     violations, not_checked = run_bpa(model, statistics)
@@ -30,23 +30,43 @@ from typing import Any, Callable, Iterator, Optional
 
 from .bpa_custom import SCOPES as CUSTOM_SCOPES
 from .bpa_custom import CustomRule, breaks
+from .data import DATA_DIR
 from .dax_parser import model_dependencies, model_index, reference_occurrences
-from .live_model import LiveStatistics
 from .pbix_model import PERSPECTIVE_OBJECTS_UNKNOWN  # .pbix: perspective objects unknown
 from .semantic_model import DATA_TYPES, Column, Measure, Relationship, SemanticModel, Table
-from .tabular_editor import DEFAULT_BPA_RULES, SEVERITIES, BpaViolation
+from .statistics import LiveStatistics
 
 __all__ = [
     "BpaRule",
     "BpaViolation",
     "CustomRule",
     "DEFAULT_BPA_RULES",
+    "SEVERITIES",
     "load_rules",
     "rule_by_id",
     "run_bpa",
 ]
 
 logger = logging.getLogger("pbixtractor")
+
+# Microsoft's standard Best Practice Analyzer rules (MIT licence, see BPARules.LICENSE)
+# Source: https://github.com/microsoft/Analysis-Services/tree/master/BestPracticeRules
+DEFAULT_BPA_RULES = DATA_DIR / "BPARules.json"
+
+# Rule severity as used in the BPA rules file
+SEVERITIES = {1: "Low", 2: "Medium", 3: "High"}
+
+
+@dataclass
+class BpaViolation:
+    """One Best Practice Analyzer finding."""
+
+    object_type: str  # Column, Measure, Table, Relationship, Partition (M - Import), Model, ...
+    object_name: str  # e.g. 'Sales'[Amount]
+    rule: str  # rule name, e.g. "[Performance] Do not use floating point data types"
+    category: str = ""
+    severity: str = ""  # Low | Medium | High
+    description: str = ""
 
 IGNORE_ANNOTATION = "BestPracticeAnalyzer_IgnoreRules"
 

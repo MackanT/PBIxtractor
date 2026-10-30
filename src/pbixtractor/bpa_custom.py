@@ -47,8 +47,8 @@ import regex
 import yaml
 
 from .azure_auth import AUTH_DIR
-from .live_model import LiveStatistics
 from .semantic_model import DATA_TYPES, SemanticModel
+from .statistics import LiveStatistics
 
 USER_RULES_PATH = AUTH_DIR / "bpa_rules.yaml"
 FILE_VERSION = 1

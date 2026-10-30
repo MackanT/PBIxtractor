@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .live_model import ColumnStatistics, LiveStatistics
+from .statistics import ColumnStatistics, LiveStatistics
 
 logger = logging.getLogger("pbixtractor")
 

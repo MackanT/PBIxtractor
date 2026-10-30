@@ -5,10 +5,9 @@ from typing import Optional
 
 from xlsxwriter.workbook import Workbook
 
-from .bpa import rule_by_id
-from .live_model import LiveStatistics
+from .bpa import BpaViolation, rule_by_id
 from .semantic_model import DATA_TYPES, SemanticModel
-from .tabular_editor import BpaViolation
+from .statistics import LiveStatistics
 
 # Friendly names for TMSL storage modes
 STORAGE_MODES = {

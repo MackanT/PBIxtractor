@@ -15,10 +15,10 @@ from pbixtractor.bpa import (
     rule_by_id,
     run_bpa,
 )
-from pbixtractor.live_model import ColumnStatistics, LiveStatistics
 from pbixtractor.model_sheets import bpa_by_object, bpa_cell, not_checked_rows
 from pbixtractor.pipeline import ExtractionOptions, run_extraction
 from pbixtractor.semantic_model import parse_model
+from pbixtractor.statistics import ColumnStatistics, LiveStatistics
 from pbixtractor.tmdl import parse_tmdl, to_tmsl
 
 from .sample_layout import write_sample_pbix
@@ -883,29 +883,32 @@ def test_pipeline_without_tabular_editor_has_a_bpa_result(tmp_path):
         assert "Rules not checked" in book.read("xl/sharedStrings.xml").decode()
 
 
-def test_a_run_without_tabular_editor_is_a_success(tmp_path, monkeypatch):
-    monkeypatch.setattr("pbixtractor.pipeline.find_tabular_editor", lambda *a, **k: None)
+def test_a_run_never_starts_tabular_editor_or_scans_for_desktop(tmp_path, monkeypatch):
+    import subprocess
+
+    from pbixtractor import tabular_editor
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a documentation run must not start a process or look for TE")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(tabular_editor, "find_tabular_editor", forbidden)
     write_sample_pbix(tmp_path / "Sample.pbix")
     (tmp_path / "Sample.bim").write_text(json.dumps(BIM), encoding="utf-8")
 
-    def run(tabular_editor_analysis):
-        return run_extraction(
-            ExtractionOptions(
-                report_path=tmp_path / "Sample.pbix",
-                model_path=tmp_path / "Sample.bim",
-                output_dir=tmp_path / "out",
-                tabular_editor_analysis=tabular_editor_analysis,
-                write_log_file=False,
-            )
+    result = run_extraction(
+        ExtractionOptions(
+            report_path=tmp_path / "Sample.pbix",
+            model_path=tmp_path / "Sample.bim",
+            output_dir=tmp_path / "out",
+            write_log_file=False,
         )
-
-    result = run(True)
+    )
     assert result.ok, result.message
-    assert "INFO: Live statistics from Power BI Desktop skipped" in result.logs
+    assert result.files["tsv"].is_file()
     # The sample report warns about itself (an unbound field, a broken button) - nothing more
-    warnings = [line for line in result.logs.splitlines() if not line.startswith("INFO:")]
-    assert warnings == run(False).logs.splitlines()
-    assert not any("Tabular Editor" in line for line in warnings)
+    assert not any("Tabular Editor" in line or "Desktop" in line for line in result.logs.splitlines())
     documentation = result.documentation
     assert documentation.bpa_violations
     assert {reason for _, reason in documentation.bpa_not_checked} == {NEEDS_STATISTICS}

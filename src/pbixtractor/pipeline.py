@@ -9,14 +9,11 @@ Used by the command line (cli.py) and the web UI (web_ui.py).
 """
 
 import json
-import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
-
-import pandas as pd
 
 from . import bpa_custom
 from .azure_auth import ApiError
@@ -28,7 +25,6 @@ from .documentation import Documentation, build_documentation
 from .excel_report import write_data_workbook, write_main_workbook
 from .json_report import documentation_to_dict, write_json_data
 from .lineage_html import write_lineage_html
-from .live_model import collect_live_statistics
 from .logger import capture_logs, get_logger
 from .pbix_model import has_embedded_model, read_pbix_model
 from .readers import ReportReadError
@@ -50,15 +46,20 @@ from .semantic_model import (
     write_documentation_tsv,
 )
 from .service_stats import ServiceModel, read_service_statistics, service_model_for_report
-from .tabular_editor import export_documentation_tsv, find_tabular_editor
 from .utils import is_excel_open_with_file
 
 logger = get_logger("pbixtractor")
 
-# One extraction at a time: runs share the logger and Tabular Editor/Excel files
+# One extraction at a time: runs share the logger and the output/Excel files
 _RUN_LOCK = threading.Lock()
 
 REPORT_SUFFIXES = (".pbix", ".pbip")
+
+# Logged (INFO) when a run sets one of the old Tabular Editor options, which do nothing now
+TABULAR_EDITOR_NOTE = (
+    "Tabular Editor is no longer used: documentation.tsv is always written, with DAX formatted "
+    "offline, and statistics come from the .pbix or the Power BI service"
+)
 
 
 @dataclass
@@ -70,8 +71,10 @@ class ExtractionOptions:
     output_dir: Path  # all output files go here
     name: str = ""  # base name of the output files (default: report file name)
     description_tag: str = DESCRIPT_TAG  # delimiter of descriptions embedded in DAX
-    tabular_editor_analysis: bool = True  # live statistics from Desktop (the BPA always runs)
-    tabular_editor_tsv: bool = False  # use TE's TSV export (formats DAX via daxformatter.com)
+    # Old Tabular Editor options, still accepted so old callers keep working: they do nothing
+    # but log TABULAR_EDITOR_NOTE when set to a non-default value
+    tabular_editor_analysis: bool = True
+    tabular_editor_tsv: bool = False
     write_log_file: bool = True  # save warnings to <output_dir>/logs/
     # Model mode: more reports on the same model, documented together with report_path (pages
     # become "<report> › <page>"; "unused" then means unused by all of them)
@@ -195,44 +198,6 @@ def _dax_dependencies(model, progress):
         return None
 
 
-def _live_statistics(model, options: ExtractionOptions, progress):
-    """
-    Live statistics if the report is open in Power BI Desktop (read with Tabular Editor 2,
-    until ticket 08 removes Desktop detection).
-
-    Returns:
-        LiveStatistics, or None when unavailable
-    """
-    if not options.tabular_editor_analysis:
-        return None
-
-    tabular_editor = find_tabular_editor()
-    if tabular_editor is None:
-        # A note in the run log, not a warning: the normal case on Linux and without Desktop
-        logger.info(
-            "Live statistics from Power BI Desktop skipped: Tabular Editor 2 not found. Add its "
-            "folder to Input/TabularEditorLocations.txt or switch off live statistics."
-        )
-        return None
-
-    progress("Live statistics (Power BI Desktop)", 0.45)
-    live_statistics = None
-    try:
-        live_statistics, live_note = collect_live_statistics(
-            tabular_editor, options.report_path, {table.name for table in model.tables}
-        )
-        # Debug only: not having the report open in Desktop is the normal case
-        logger.debug(f"Live statistics: {live_note}")
-        if live_statistics and live_statistics.errors:
-            logger.warning(
-                "Some live statistics are missing (Power BI Desktop too old?): "
-                + "; ".join(f"{k}: {v[:150]}" for k, v in live_statistics.errors.items())
-            )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"Reading live statistics from Power BI Desktop failed: {e}")
-    return live_statistics
-
-
 def _custom_rules(path: Optional[Path]) -> bpa_custom.RuleFile:
     """
     The custom model quality rules of a run: the given file, else the user's file if it exists.
@@ -259,8 +224,7 @@ def _best_practice_analyzer(
     model, statistics, progress, rules_file: Optional[Path] = None, dependencies=None
 ) -> tuple[Optional[list], list]:
     """
-    The Python Best Practice Analyzer (bpa.py) on every run, with or without Tabular Editor,
-    plus the custom rules (bpa_custom.py) of rules_file / the user's rule file.
+    The Python Best Practice Analyzer (bpa.py) on every run, plus the custom rules (bpa_custom.py) of rules_file / the user's rule file.
 
     Args:
         dependencies: The run's model_dependencies(), computed once per run and shared with
@@ -394,8 +358,11 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         if not path.exists():
             return ExtractionResult("error", f"Report not found: {path}")
 
-    # 1. Model: always read from the .bim (relationships, sort-by and hierarchy columns come
-    #    from here, even when Tabular Editor provides the TSV)
+    if not options.tabular_editor_analysis or options.tabular_editor_tsv:
+        logger.info(TABULAR_EDITOR_NOTE)
+
+    # 1. Model: read from the .bim / TMDL / .pbix (relationships, sort-by and hierarchy columns
+    #    come from here)
     for missing in options.not_included:
         logger.warning(f"Not included in this documentation ('unused' may be incomplete): {missing}")
 
@@ -406,10 +373,10 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         if source.suffix.lower() == ".pbix":
             pbix = read_pbix_model(source)
             model, pbix_statistics = parse_model(pbix.database), pbix.statistics
-            # Tabular Editor reads a .bim, not a .pbix: hand it the model as one (also an
-            # output file; "_model" so it never overwrites a .bim next to the report)
-            source = files["model"] = out / f"{options.name}_model.bim"
-            source.write_text(
+            # The model as a .bim, an output file to download ("_model" so it never
+            # overwrites a .bim next to the report)
+            files["model"] = out / f"{options.name}_model.bim"
+            files["model"].write_text(
                 json.dumps(pbix.database, indent=2, ensure_ascii=False), encoding="utf-8"
             )
         else:
@@ -418,20 +385,14 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         return ExtractionResult("error", f"Could not read the model {options.model_path}: {e}")
 
     exact_dependencies = _dax_dependencies(model, progress)
-    live_statistics = _live_statistics(model, options, progress)
-    service_statistics = _service_statistics(model, options, progress)
-    if service_statistics is not None:
-        # The model as published wins: a downloaded report is never open in Desktop by its
-        # own path, so Desktop statistics here come from a name-similarity match - possibly a
-        # different (e.g. dev) copy of the model
-        if live_statistics is not None:
-            logger.debug("Using Power BI service statistics instead of a matching Desktop model")
-        live_statistics = service_statistics
-    if live_statistics is None and pbix_statistics is not None:
-        # Not open in Desktop: the statistics saved in the .pbix (as of its last refresh)
+    # Statistics: the model as published, else the ones saved in the .pbix (as of its last
+    # refresh), else none
+    live_statistics = _service_statistics(model, options, progress)
+    if live_statistics is None:
         live_statistics = pbix_statistics
 
-    # Measure data types are only known by a live model (the .bim usually lacks them)
+    # Measure data types: a .bim usually lacks them, the .pbix metadata has them (the service
+    # gives none)
     if live_statistics:
         for measure in model.all_measures:
             measure.data_type = live_statistics.measure_types.get(
@@ -442,22 +403,13 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         model, live_statistics, progress, options.bpa_rules, exact_dependencies
     )
 
-    if options.tabular_editor_tsv:
-        progress("Tabular Editor TSV export", 0.5)
-        tabular_editor = find_tabular_editor()
-        if tabular_editor is None:
-            return ExtractionResult("error", "Tabular Editor 2 not found (needed for the TSV export).")
-        tsv_path = export_documentation_tsv(tabular_editor, source, out / "documentation.tsv")
-        dataset = pd.read_csv(tsv_path, sep="\t", header=0)
-        files["tsv"] = tsv_path
-    else:
-        dataset = model_to_dataset(model)
-        # Always left in the output folder, as the old program did (measures and calculated
-        # columns with formatted DAX)
-        try:
-            files["tsv"] = write_documentation_tsv(model, out / "documentation.tsv")
-        except OSError as e:
-            logger.warning(f"Could not write {out / 'documentation.tsv'}: {e}")
+    dataset = model_to_dataset(model)
+    # Always left in the output folder, as the old program did (measures and calculated
+    # columns with formatted DAX)
+    try:
+        files["tsv"] = write_documentation_tsv(model, out / "documentation.tsv")
+    except OSError as e:
+        logger.warning(f"Could not write {out / 'documentation.tsv'}: {e}")
 
     # 2. Report(s)
     if options.extra_reports:

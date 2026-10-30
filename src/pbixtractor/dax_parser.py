@@ -2,7 +2,7 @@
 
     tokens = tokenize("SUM ( Sales[Amount] ) // total")
     "".join(t.text for t in tokens)          # the input, exactly
-    dependencies = model_dependencies(model)  # tabular_editor.Dependency rows
+    dependencies = model_dependencies(model)  # Dependency rows
 
 The tokenizer is lossless and never raises on malformed DAX. model_dependencies() resolves
 references the way DAX does (case-insensitively): qualified T[X] to a column or measure of T,
@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from typing import NamedTuple, Optional
 
 from .semantic_model import SemanticModel, Table
-from .tabular_editor import Dependency, drop_redundant_table_refs
 
 WHITESPACE = "whitespace"
 COMMENT = "comment"
@@ -30,6 +29,64 @@ PUNCTUATION = "punctuation"
 UNKNOWN = "unknown"
 
 TRIVIA = (WHITESPACE, COMMENT)
+
+
+@dataclass(frozen=True)
+class Dependency:
+    """A direct DAX dependency: source (measure, calculated column/table, RLS) -> target."""
+
+    # Measure | Column | Table | TablePermission (RLS filter; name = role) | CalculationItem
+    source_type: str
+    source_table: str
+    source_name: str
+    target_type: str  # Measure | Column | Table | ...
+    target_table: str
+    target_name: str
+
+    @property
+    def source_ref(self) -> str:
+        return _dax_ref(self.source_type, self.source_table, self.source_name)
+
+    @property
+    def target_ref(self) -> str:
+        return _dax_ref(self.target_type, self.target_table, self.target_name)
+
+
+def _dax_ref(object_type: str, table: str, name: str) -> str:
+    """Table[Name] for columns/measures, 'Table' for tables, "RLS: role (table)" for filters."""
+    if object_type == "Table":
+        return f"'{name}'"
+    if object_type == "TablePermission":
+        return f"RLS: {name} ({table})"
+    return f"{table}[{name}]"
+
+
+def drop_redundant_table_refs(dependencies: list[Dependency]) -> list[Dependency]:
+    """
+    Remove "depends on table X" entries when the same source also uses a column of X.
+
+    Tabular Editor lists 'Sales' as well as Sales[Amount] for SUM ( Sales[Amount] ); the table
+    entry only adds information when it is the sole reference, e.g. COUNTROWS ( Sales ).
+
+    Args:
+        dependencies: Dependency rows, e.g. of model_dependencies()
+
+    Returns:
+        Filtered list, original order kept
+    """
+    tables_with_columns = {
+        (d.source_type, d.source_table, d.source_name, d.target_table)
+        for d in dependencies
+        if d.target_type == "Column"
+    }
+    return [
+        d
+        for d in dependencies
+        if not (
+            d.target_type == "Table"
+            and (d.source_type, d.source_table, d.source_name, d.target_name) in tables_with_columns
+        )
+    ]
 
 
 @dataclass(frozen=True)

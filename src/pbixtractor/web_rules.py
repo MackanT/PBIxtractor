@@ -24,8 +24,8 @@ from nicegui import run, ui
 
 from . import bpa_custom
 from .bpa import load_rules
-from .live_model import LiveStatistics
 from .semantic_model import SemanticModel
+from .statistics import LiveStatistics
 
 TEST_LIMIT = 50  # objects listed by "Test"
 CONFIRM_OVERWRITE = "This removes the rules that could not be read"

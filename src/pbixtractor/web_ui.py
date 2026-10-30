@@ -35,7 +35,6 @@ from nicegui import app, background_tasks, events, run, ui
 from . import __version__, azure_auth, batch, fabric, web_config, web_rules, web_sources
 from .azure_auth import ApiError
 from .data import DATA_DIR
-from .live_model import find_local_instances
 from .pbix_model import LiveConnection, live_connection
 from .pipeline import (
     REPORT_SUFFIXES,
@@ -51,6 +50,12 @@ from .tabular_editor import add_tabular_editor_location, find_tabular_editor
 from .theme import apply_theme, card_header, page_title, serve_fonts, stat_tile
 from .web_config import output_root, stored_choices, url
 from .web_sources import DevOpsPanel, FabricPanel
+
+
+def find_local_instances() -> list:
+    """Power BI Desktop is no longer looked for (statistics come from the .pbix or the
+    service): always empty, until the Desktop status leaves the page."""
+    return []
 
 # Output folders of runs in this session, served read-only under /files/<token>/<file name>
 _OUTPUT_DIRS: dict[str, Path] = {}
@@ -1205,7 +1210,7 @@ def build_page(
                 refresh_state = {"seq": 0}
 
                 async def refresh_desktop(delay: float = 0.0) -> None:
-                    """Scan for Power BI Desktop off the event loop (psutil can take seconds);
+                    """Scan for Power BI Desktop off the event loop (a scan can take seconds);
                     while typing, only the last change within `delay` seconds scans."""
                     refresh_state["seq"] += 1
                     seq = refresh_state["seq"]

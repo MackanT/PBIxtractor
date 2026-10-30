@@ -1,6 +1,11 @@
-"""Tabular Editor 2 command-line integration (optional, Windows only).
+"""Tabular Editor 2 command-line integration (developer-only, Windows or Wine).
 
+Developer-only: used by tools/compare_tabular_editor.py and its tests (and the slow
+`tabular_editor` tests), not by the program - documentation runs never start Tabular Editor.
 Everything here runs locally against the .bim file; nothing is sent to external services.
+The shared types live elsewhere and are re-exported here, so old imports keep working:
+BpaViolation, SEVERITIES, DEFAULT_BPA_RULES (bpa.py), Dependency, drop_redundant_table_refs
+(dax_parser.py), LiveStatistics, ColumnStatistics, statistics_from_rows (statistics.py).
 
     exe = find_tabular_editor()
     violations = run_best_practice_analyzer(exe, "Model.bim")
@@ -14,22 +19,36 @@ import json
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .data import DATA_DIR
+from .bpa import DEFAULT_BPA_RULES, SEVERITIES, BpaViolation
+from .dax_parser import Dependency, drop_redundant_table_refs
+from .statistics import ColumnStatistics, LiveStatistics, statistics_from_rows
 
-# Microsoft's standard Best Practice Analyzer rules (MIT licence, see BPARules.LICENSE)
-# Source: https://github.com/microsoft/Analysis-Services/tree/master/BestPracticeRules
-DEFAULT_BPA_RULES = DATA_DIR / "BPARules.json"
+__all__ = [
+    "BpaViolation",
+    "ColumnStatistics",
+    "DEFAULT_BPA_RULES",
+    "Dependency",
+    "LiveStatistics",
+    "SEVERITIES",
+    "add_tabular_editor_location",
+    "drop_redundant_table_refs",
+    "export_dependencies",
+    "export_documentation_tsv",
+    "find_tabular_editor",
+    "load_bpa_rules",
+    "parse_bpa_results",
+    "parse_dependencies",
+    "run_best_practice_analyzer",
+    "run_script",
+    "statistics_from_rows",
+]
 
 # Where to look for "Tabular Editor/TabularEditor.exe" after the folders listed in
 # Input/TabularEditorLocations.txt
 DEFAULT_SEARCH_DIRS = [Path(r"C:\Program Files"), Path(r"C:\Program Files (x86)")]
-
-# Rule severity as used in the BPA rules file
-SEVERITIES = {1: "Low", 2: "Medium", 3: "High"}
 
 
 def _default_locations_file() -> Path:
@@ -95,18 +114,6 @@ def add_tabular_editor_location(
     locations_file.parent.mkdir(parents=True, exist_ok=True)
     locations_file.write_text("\n".join(listed) + "\n")
     return found
-
-
-@dataclass
-class BpaViolation:
-    """One Best Practice Analyzer finding."""
-
-    object_type: str  # Column, Measure, Table, Relationship, Partition (M - Import), Model, ...
-    object_name: str  # e.g. 'Sales'[Amount]
-    rule: str  # rule name, e.g. "[Performance] Do not use floating point data types"
-    category: str = ""
-    severity: str = ""  # Low | Medium | High
-    description: str = ""
 
 
 def load_bpa_rules(rules_path: Path = DEFAULT_BPA_RULES) -> dict[str, dict]:
@@ -287,36 +294,6 @@ SaveFile(System.IO.Path.Combine(@"%FOLDER%", "dependencies.tsv"), sb.ToString())
 """
 
 
-@dataclass(frozen=True)
-class Dependency:
-    """A direct DAX dependency: source (measure, calculated column/table, RLS) -> target."""
-
-    # Measure | Column | Table | TablePermission (RLS filter; name = role) | CalculationItem
-    source_type: str
-    source_table: str
-    source_name: str
-    target_type: str  # Measure | Column | Table | ...
-    target_table: str
-    target_name: str
-
-    @property
-    def source_ref(self) -> str:
-        return _dax_ref(self.source_type, self.source_table, self.source_name)
-
-    @property
-    def target_ref(self) -> str:
-        return _dax_ref(self.target_type, self.target_table, self.target_name)
-
-
-def _dax_ref(object_type: str, table: str, name: str) -> str:
-    """Table[Name] for columns/measures, 'Table' for tables, "RLS: role (table)" for filters."""
-    if object_type == "Table":
-        return f"'{name}'"
-    if object_type == "TablePermission":
-        return f"RLS: {name} ({table})"
-    return f"{table}[{name}]"
-
-
 def parse_dependencies(tsv: str) -> list[Dependency]:
     """
     Parse the TSV written by the dependency script.
@@ -358,36 +335,8 @@ def export_dependencies(exe: Path, bim_path: str | Path, timeout: int = 300) -> 
     return parse_dependencies(outputs["dependencies.tsv"])
 
 
-def drop_redundant_table_refs(dependencies: list[Dependency]) -> list[Dependency]:
-    """
-    Remove "depends on table X" entries when the same source also uses a column of X.
-
-    Tabular Editor lists 'Sales' as well as Sales[Amount] for SUM ( Sales[Amount] ); the table
-    entry only adds information when it is the sole reference, e.g. COUNTROWS ( Sales ).
-
-    Args:
-        dependencies: Output of export_dependencies()
-
-    Returns:
-        Filtered list, original order kept
-    """
-    tables_with_columns = {
-        (d.source_type, d.source_table, d.source_name, d.target_table)
-        for d in dependencies
-        if d.target_type == "Column"
-    }
-    return [
-        d
-        for d in dependencies
-        if not (
-            d.target_type == "Table"
-            and (d.source_type, d.source_table, d.source_name, d.target_name) in tables_with_columns
-        )
-    ]
-
-
 # ============================================================================
-# documentation.tsv export (optional "Use Tabular Editor" mode)
+# documentation.tsv export (the old TabularScript.cs; for comparisons only)
 # ============================================================================
 
 # Same export as the original TabularScript.cs. FormatDax() sends DAX to daxformatter.com.

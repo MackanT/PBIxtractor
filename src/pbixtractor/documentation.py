@@ -15,13 +15,14 @@ from typing import Optional
 
 import pandas as pd
 
+from .bpa import BpaViolation
 from .constants import REPORT_COLUMNS
 from .dax import find_columns, find_measures
+from .dax_parser import Dependency
 from .extractors import FilterExtractor, visual_title
-from .live_model import LiveStatistics
 from .readers import BookmarkDefinition, ReportDefinition, slicer_selection
 from .semantic_model import SemanticModel
-from .tabular_editor import BpaViolation, Dependency
+from .statistics import LiveStatistics
 from .utils import find_nth_occurrence
 from .visual_helpers import VisualTypeMapper
 

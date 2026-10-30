@@ -27,7 +27,7 @@ Examples:
   pbixtractor account list                        The entries; * = the one in use
   pbixtractor account use 2                       Switch (number, user or tenant name)
   pbixtractor extract C:/Reports/Sales.pbix       Document a report (model: Sales.bim next to it)
-  pbixtractor extract Sales.pbix --model Model.bim -o out/Sales --no-tabular-editor
+  pbixtractor extract Sales.pbix --model Model.bim -o out/Sales
   pbixtractor extract C:/Reports/Sales.pbip       PBIP project (model.bim or TMDL, found via
                                                   the report's definition.pbir)
   pbixtractor extract Sales.pbix --model Sales.SemanticModel/definition     TMDL model
@@ -130,16 +130,9 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--output", type=Path, help="output folder (default: output/<name>)"
     )
     extract.add_argument("--name", help="base name of the output files (default: report name)")
-    extract.add_argument(
-        "--no-tabular-editor",
-        action="store_true",
-        help="skip live statistics from an open Power BI Desktop (needs Tabular Editor 2)",
-    )
-    extract.add_argument(
-        "--tabular-editor-tsv",
-        action="store_true",
-        help="use Tabular Editor's TSV export (formats DAX via daxformatter.com - sends DAX online)",
-    )
+    # Old options, still accepted so old scripts keep working: they only print a note
+    extract.add_argument("--no-tabular-editor", action="store_true", help=argparse.SUPPRESS)
+    extract.add_argument("--tabular-editor-tsv", action="store_true", help=argparse.SUPPRESS)
     extract.add_argument("--description-tag", help="delimiter of descriptions embedded in DAX")
     extract.add_argument("--bpa-rules", type=Path, metavar="FILE", help=BPA_RULES_HELP)
     extract.add_argument("--no-log-file", action="store_true", help="do not write logs/*.txt")
@@ -256,8 +249,7 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_add.add_argument(
         "-o", "--output", type=Path, help="root of the models' output folders (default: output)"
     )
-    catalog_add.add_argument("--no-tabular-editor", action="store_true",
-                             help="skip live statistics from an open Power BI Desktop (needs Tabular Editor 2)")
+    catalog_add.add_argument("--no-tabular-editor", action="store_true", help=argparse.SUPPRESS)
     catalog_add.add_argument("--no-service-statistics", action="store_true",
                              help="do not read row counts / distinct values from the Power BI service")
     catalog_add.add_argument("--bpa-rules", type=Path, metavar="FILE", help=BPA_RULES_HELP)
@@ -295,6 +287,14 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--port", type=int, default=8081, help="port (default: 8081)")
     web.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
     return parser
+
+
+def _tabular_editor_note(args: argparse.Namespace) -> None:
+    """Print one note when an old Tabular Editor option is used (they do nothing now)."""
+    if getattr(args, "no_tabular_editor", False) or getattr(args, "tabular_editor_tsv", False):
+        from .pipeline import TABULAR_EDITOR_NOTE
+
+        print(f"Note: {TABULAR_EDITOR_NOTE}.", file=sys.stderr)
 
 
 def _fabric_client(args: argparse.Namespace):
@@ -446,6 +446,7 @@ def run_catalog_add(args: argparse.Namespace) -> int:
     )
     from .devops import parse_devops_url, parse_version
 
+    _tabular_editor_note(args)
     if sum(bool(x) for x in (args.files, args.fabric_workspace, args.devops)) != 1:
         print("Give one of: report files, --fabric-workspace or --devops.", file=sys.stderr)
         return 2
@@ -515,7 +516,6 @@ def run_catalog_add(args: argparse.Namespace) -> int:
         BatchSettings(
             output_root=output_root,
             catalog_dir=args.folder,
-            tabular_editor_analysis=not args.no_tabular_editor,
             service_statistics=not args.no_service_statistics,
             write_log_file=not args.no_log_file,
             bpa_rules=args.bpa_rules,
@@ -642,6 +642,7 @@ def run_extract(args: argparse.Namespace) -> int:
 
     connected: list[FetchedModel] = []  # a published model fetched for a live-connected report
 
+    _tabular_editor_note(args)
     if sum(bool(x) for x in (args.report, args.fabric, args.devops)) != 1:
         print(
             "Give one of: a report path, --fabric WORKSPACE/REPORT or --devops URL.",
@@ -706,8 +707,6 @@ def run_extract(args: argparse.Namespace) -> int:
         model_path=model,
         output_dir=args.output or Path("output") / name,
         name=name,
-        tabular_editor_analysis=not args.no_tabular_editor,
-        tabular_editor_tsv=args.tabular_editor_tsv,
         write_log_file=not args.no_log_file,
         extra_reports=extra_reports,
         not_included=not_included,

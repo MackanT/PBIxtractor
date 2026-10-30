@@ -9,9 +9,22 @@ export_dependencies. Both get the model only (no statistics), so the rules that 
 or cardinality are "not checked" in Python and listed separately.
 
 Prints a summary and writes every difference to compare_tabular_editor.xlsx (sheets summary,
-bpa differences, dependency differences, object types). Windows only (Tabular Editor 2).
+bpa differences, dependency differences, object types). A developer check: documentation runs
+never use Tabular Editor 2. It needs Windows, or Wine on Linux.
 Exit code 0 when both ran (differences or not), 1 when Tabular Editor failed, 2 when the model
 or Tabular Editor was not found.
+
+Tabular Editor 2 under Wine (Linux), for this tool and the `tabular_editor` tests:
+    1. Install Wine and Mono for it, e.g. `sudo apt install wine64 wine-mono` (or download the
+       wine-mono .msi and run `wine msiexec /i wine-mono-<version>-x86.msi`).
+    2. Unpack TabularEditor.Portable.zip of release 2.29 (or newer 2.x; github.com/TabularEditor/
+       TabularEditor/releases) into a folder, e.g. ~/te2.
+    3. Write a wrapper script named TabularEditor.exe that runs it, and make it executable:
+           #!/bin/sh
+           exec wine "$HOME/te2/TabularEditor.exe" "$@"
+       Put it in a folder listed in Input/TabularEditorLocations.txt (so find_tabular_editor()
+       finds it, also for the tests), or pass it with --tabular-editor.
+    The model path is passed as a Linux path; Wine maps it through its Z: drive.
 """
 
 import argparse
@@ -27,14 +40,15 @@ sys.path.insert(0, str(REPO / "src"))
 
 import xlsxwriter  # noqa: E402
 
-from pbixtractor.bpa import load_rules, run_bpa  # noqa: E402
-from pbixtractor.dax_parser import model_dependencies  # noqa: E402
+from pbixtractor.bpa import BpaViolation, load_rules, run_bpa  # noqa: E402
+from pbixtractor.dax_parser import (  # noqa: E402
+    Dependency,
+    drop_redundant_table_refs,
+    model_dependencies,
+)
 from pbixtractor.pbix_model import read_pbix_model  # noqa: E402
 from pbixtractor.semantic_model import model_source, parse_model, read_model  # noqa: E402
 from pbixtractor.tabular_editor import (  # noqa: E402
-    BpaViolation,
-    Dependency,
-    drop_redundant_table_refs,
     export_dependencies,
     find_tabular_editor,
     run_best_practice_analyzer,

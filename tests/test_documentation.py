@@ -479,7 +479,7 @@ def _xlsx_rows(path, sheet: str) -> list[list[str]]:
 
 
 def _violation(object_type, object_name, rule, severity):
-    from pbixtractor.tabular_editor import BpaViolation
+    from pbixtractor.bpa import BpaViolation
 
     return BpaViolation(
         object_type=object_type, object_name=object_name, rule=rule, severity=severity

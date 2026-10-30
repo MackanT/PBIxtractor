@@ -276,10 +276,10 @@ def test_live_connected_reports_name_their_published_model(tmp_path):
 
 
 def test_a_pbix_with_its_own_model_needs_no_bim(tmp_path, monkeypatch):
-    """The pipeline reads the model inside the .pbix, hands Tabular Editor a generated .bim and
-    uses the statistics stored in the file."""
+    """The pipeline reads the model inside the .pbix, writes it as a .bim to download and uses
+    the statistics stored in the file."""
     from pbixtractor import pipeline
-    from pbixtractor.live_model import LiveStatistics
+    from pbixtractor.statistics import LiveStatistics
 
     from .sample_layout import write_sample_pbix
     from .test_semantic_model import BIM

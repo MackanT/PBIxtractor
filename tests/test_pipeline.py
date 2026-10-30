@@ -334,12 +334,12 @@ def test_warning_messages_leave_out_info_notes():
 def test_cli_counts_and_logs_only_warnings(sample, capsys, monkeypatch):
     from pbixtractor import pipeline
 
-    def live_statistics(model, options, progress):
+    def service_statistics(model, options, progress):
         pipeline.logger.info("A note that is no warning")
         pipeline.logger.warning("A real warning")
         return None
 
-    monkeypatch.setattr(pipeline, "_live_statistics", live_statistics)
+    monkeypatch.setattr(pipeline, "_service_statistics", service_statistics)
     output = sample / "cli_warn"
     with pytest.raises(SystemExit) as exit_info:
         main(["extract", str(sample / "Sample.pbix"), "-o", str(output)])
@@ -353,3 +353,47 @@ def test_cli_counts_and_logs_only_warnings(sample, capsys, monkeypatch):
     (log_file,) = (output / "logs").glob("log_data_*.txt")
     text = log_file.read_text(encoding="utf-8")
     assert "A real warning" in text and "A note that is no warning" not in text
+
+
+# ---------------------------------------------------------------- old Tabular Editor options
+
+
+@pytest.mark.parametrize(
+    "old_option", [{"tabular_editor_analysis": False}, {"tabular_editor_tsv": True}]
+)
+def test_old_tabular_editor_options_only_log_a_note(sample, old_option):
+    from pbixtractor.pipeline import TABULAR_EDITOR_NOTE
+
+    def run(folder, **options):
+        return run_extraction(ExtractionOptions(
+            report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+            output_dir=sample / folder, write_log_file=False, **options,
+        ))  # fmt: skip
+
+    default, old = run("default"), run("old", **old_option)
+    assert old.status == default.status and old.ok
+    assert old.logs.count(TABULAR_EDITOR_NOTE) == 1 and TABULAR_EDITOR_NOTE not in default.logs
+    assert f"INFO: {TABULAR_EDITOR_NOTE}" in old.logs
+    # Nothing else changes: the same warnings, and the TSV is always written offline
+    assert old.logs.replace(f"INFO: {TABULAR_EDITOR_NOTE}\n", "") == default.logs
+    assert old.files["tsv"].read_bytes() == default.files["tsv"].read_bytes()
+
+
+@pytest.mark.parametrize("old_option", ["--no-tabular-editor", "--tabular-editor-tsv"])
+def test_cli_accepts_the_old_tabular_editor_options_with_a_note(sample, capsys, old_option):
+    from pbixtractor.pipeline import TABULAR_EDITOR_NOTE
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", str(sample / "Sample.pbix"), "-o", str(sample / "old"), old_option, "-q"])
+    assert exit_info.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.err.count(TABULAR_EDITOR_NOTE) == 1
+    assert (sample / "old" / "documentation.tsv").is_file()
+
+
+@pytest.mark.parametrize("command", [["extract"], ["catalog", "add"], []])
+def test_help_mentions_no_tabular_editor(capsys, command):
+    with pytest.raises(SystemExit):
+        main(command + ["--help"])
+    text = capsys.readouterr().out
+    assert "tabular" not in text.lower() and "desktop" not in text.lower()
