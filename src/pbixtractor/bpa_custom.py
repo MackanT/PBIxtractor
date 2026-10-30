@@ -18,23 +18,32 @@ The file (``~/.pbixtractor/bpa_rules.yaml`` for every run on this PC, or ``--bpa
         conditions:       # all must hold (may be empty if `any` is given)
           - {property: display_folder, op: is_empty}
         any:              # optional: at least one must hold
-          - {property: name, op: matches, value: "^[A-Z]"}
+          - {property: name, op: matches, value: "^[a-z]"}   # starts with a lower-case letter
 
 A rule finds every object of its scope for which all `conditions` and (when given) at least one
 of `any` hold. Findings are bpa.BpaViolation rows named like the built-in checks', so the model
 quality sheets and the "Model quality" column show them like any other.
 
+`equals`, `not_equals`, `contains` and `in` ignore case. `matches` is a regular expression and,
+as in Tabular Editor (.NET Regex.IsMatch), case-sensitive unless the pattern starts with `(?i)`:
+"^[a-z]" finds "sales" but not "Sales"; "(?i)^[a-z]" finds both. Patterns run with the `regex`
+package and a MATCH_TIMEOUT (2 s) per object: a pattern that takes longer (catastrophic
+backtracking) does not match that object, and the run logs one warning per rule and continues.
+
 The web UI's rules page (ticket 06) reads PROPERTIES / OPS / SCOPES for its form and uses
 validate_rule(), save_rule_file() and evaluate_rule().
 """
 
+import logging
 import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Optional, Union
 
+import regex
 import yaml
 
 from .azure_auth import AUTH_DIR
@@ -47,6 +56,9 @@ FILE_VERSION = 1
 ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 SEVERITY_NAMES = ("Low", "Medium", "High")
 DEFAULT_CATEGORY = "Custom"
+MATCH_TIMEOUT = 2.0  # seconds per `matches` search (D32)
+
+logger = logging.getLogger("pbixtractor")
 
 # Custom scope -> the bpa.iter_objects() scopes it covers. "Column" = every column (data,
 # calculated, calculated table column); "CalculatedColumn" = only those with DAX.
@@ -153,8 +165,8 @@ def _condition_errors(condition: Any, scope: Optional[str], where: str) -> list[
         errors.append(f"{where}: op 'in' needs a list")
     elif op == "matches":
         try:
-            re.compile(str(value))
-        except re.error as e:
+            _pattern(str(value))
+        except regex.error as e:
             errors.append(f"{where}: bad regex {value!r}: {e}")
     elif op in ("equals", "not_equals", "contains") and isinstance(value, (list, dict)):
         errors.append(f"{where}: op {op!r} needs a single value")
@@ -405,6 +417,12 @@ def _same(actual: Any, expected: Any) -> bool:
     return str(actual).lower() == str(expected if expected is not None else "").lower()
 
 
+@lru_cache(maxsize=256)
+def _pattern(text: str) -> "regex.Pattern":
+    """A `matches` pattern, compiled with the regex package (case-sensitive unless (?i))."""
+    return regex.compile(text)
+
+
 def _holds(ctx, obj, condition: Condition) -> bool:
     actual = _property(ctx, obj, condition.property)
     op, value = condition.op, condition.value
@@ -422,15 +440,29 @@ def _holds(ctx, obj, condition: Condition) -> bool:
     if op == "contains":
         return str(value).lower() in text.lower()
     if op == "matches":
-        return re.search(str(value), text, re.IGNORECASE) is not None
+        # TimeoutError goes to breaks(): that object does not match
+        return _pattern(str(value)).search(text, timeout=MATCH_TIMEOUT) is not None
     raise ValueError(f"unknown op {op!r}")
 
 
 def breaks(ctx, obj, rule: CustomRule) -> bool:
-    """Does the object (in the rule's scope) break the rule?"""
-    if not all(_holds(ctx, obj, c) for c in rule.conditions):
+    """
+    Does the object (in the rule's scope) break the rule? A `matches` that takes longer than
+    MATCH_TIMEOUT counts as no match; the first such object per rule and run is logged.
+    """
+    try:
+        if not all(_holds(ctx, obj, c) for c in rule.conditions):
+            return False
+        return not rule.any or any(_holds(ctx, obj, c) for c in rule.any)
+    except TimeoutError:
+        warned = vars(ctx).setdefault("custom_timeouts", set())
+        if rule.id not in warned:
+            warned.add(rule.id)
+            logger.warning(
+                f"Custom model quality rule {rule.id}: the pattern took longer than "
+                f"{MATCH_TIMEOUT:g} s on {obj.object_name}; skipped"
+            )
         return False
-    return not rule.any or any(_holds(ctx, obj, c) for c in rule.any)
 
 
 def evaluate_rule(

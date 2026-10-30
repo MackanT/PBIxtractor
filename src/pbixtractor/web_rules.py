@@ -5,7 +5,10 @@
 Lists the built-in Best Practice Analyzer rules (data/BPARules.json), each with a switch "On"
 (off = its id under `disabled:`), and the custom rules of the user's rule file
 (bpa_custom.USER_RULES_PATH, ~/.pbixtractor/bpa_rules.yaml) with a form to add, edit and delete
-them. Every change is saved at once through bpa_custom.save_rule_file (atomic).
+them. Every change is saved at once (D31): the file is read again, only this one change (add,
+edit, delete, switch on or off) is applied to it, it is saved through bpa_custom.save_rule_file
+(atomic) and the lists are shown from the file again - a stale tab or a hand edit is never
+overwritten.
 
 "Test" runs the form's rule (unsaved values, validated first) on the model of the last
 successful documentation run in this process (any tab, single or batch): web_ui calls
@@ -190,6 +193,80 @@ def form_errors(rule: dict, others: list[bpa_custom.CustomRule]) -> list[str]:
 # ============================================================================
 
 
+# A change to the rule file: applied to the file as just read; returns None (applied), ""
+# (nothing to do: the file already says so) or why it is refused
+Change = Callable[[bpa_custom.RuleFile], Optional[str]]
+
+
+def _find(rules: list[bpa_custom.CustomRule], rule_id: str) -> Optional[int]:
+    return next((i for i, r in enumerate(rules) if r.id.upper() == rule_id.upper()), None)
+
+
+def add_rule(new: bpa_custom.CustomRule) -> Change:
+    """Add a rule; refused if its id exists (meanwhile) in the file."""
+    def change(current: bpa_custom.RuleFile) -> Optional[str]:
+        if _find(current.rules, new.id) is not None:
+            return f"A custom rule with the id {new.id} exists already in {rules_path()}"
+        current.rules.append(new)
+        return None
+
+    return change
+
+
+def replace_rule(rule_id: str, new: bpa_custom.CustomRule) -> Change:
+    """Replace the rule with this id (added again if it was deleted meanwhile)."""
+    def change(current: bpa_custom.RuleFile) -> Optional[str]:
+        position = _find(current.rules, rule_id)
+        clash = _find(current.rules, new.id)
+        if clash is not None and clash != position:
+            return f"A custom rule with the id {new.id} exists already in {rules_path()}"
+        if position is None:
+            current.rules.append(new)
+        else:
+            current.rules[position] = new
+        return None
+
+    return change
+
+
+def delete_rule_id(rule_id: str) -> Change:
+    """Delete the rule with this id (nothing to do if it is gone already)."""
+    def change(current: bpa_custom.RuleFile) -> Optional[str]:
+        position = _find(current.rules, rule_id)
+        if position is None:
+            return ""
+        current.rules.pop(position)
+        return None
+
+    return change
+
+
+def switch_builtin(rule_id: str, on: bool) -> Change:
+    """Remove (on) or add (off) one built-in id under `disabled:`."""
+    def change(current: bpa_custom.RuleFile) -> Optional[str]:
+        if (rule_id not in current.disabled) == on:
+            return ""
+        if on:
+            current.disabled = [i for i in current.disabled if i != rule_id]
+        else:
+            current.disabled.append(rule_id)
+        return None
+
+    return change
+
+
+def apply_change(change: Change) -> tuple[bpa_custom.RuleFile, Optional[str]]:
+    """
+    Read the file fresh and apply one change to it, without saving (the page asks first when
+    the file has rules that could not be read).
+
+    Returns:
+        (the file with the change applied, None applied / "" nothing to do / refusal text)
+    """
+    current = _load()
+    return current, change(current)
+
+
 def build_rules_page() -> None:
     """The page's content: the error banner, the built-in rules and the custom rules."""
     from .theme import card_header, empty_state, page_title
@@ -199,35 +276,59 @@ def build_rules_page() -> None:
         "rules": list(loaded.rules),
         "disabled": list(loaded.disabled),
         "errors": list(loaded.errors),
-        "confirmed": not loaded.errors,  # saving drops the broken rules: asked once
     }
+    switches: dict[str, ui.switch] = {}
 
-    async def save() -> bool:
-        """Write the file; after a load error, only once the user agrees."""
-        if not state["confirmed"]:
-            with ui.dialog() as dialog, ui.card():
-                ui.label(f"{CONFIRM_OVERWRITE}:").classes("font-semibold")
-                for error in state["errors"]:
-                    ui.label(error).classes("text-sm text-negative")
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("Cancel", on_click=lambda: dialog.submit(False)).props(
-                        "flat"
-                    ).mark("confirm_cancel")
-                    ui.button("Save anyway", on_click=lambda: dialog.submit(True)).props(
-                        "color=negative"
-                    ).mark("confirm_overwrite")
-            agreed = await dialog
-            dialog.delete()
-            if not agreed:
-                return False
-            state["confirmed"] = True
+    def show(current: bpa_custom.RuleFile) -> None:
+        """Show the lists as the file has them. A switch set here emits a change; its toggle()
+        then finds the file in that state already and does nothing (no save, no dialog)."""
+        state["rules"] = list(current.rules)
+        state["disabled"] = list(current.disabled)
+        state["errors"] = list(current.errors)
+        banner.refresh()
+        custom_list.refresh()
+        for rule_id, switch in switches.items():
+            on = rule_id not in state["disabled"]
+            if switch.value != on:
+                switch.value = on
+
+    async def confirmed(errors: list[str]) -> bool:
+        """Saving drops the rules that could not be read: only when the user agrees."""
+        with ui.dialog() as dialog, ui.card():
+            ui.label(f"{CONFIRM_OVERWRITE}:").classes("font-semibold")
+            for error in errors:
+                ui.label(error).classes("text-sm text-negative")
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Cancel", on_click=lambda: dialog.submit(False)).props(
+                    "flat"
+                ).mark("confirm_cancel")
+                ui.button("Save anyway", on_click=lambda: dialog.submit(True)).props(
+                    "color=negative"
+                ).mark("confirm_overwrite")
+        agreed = await dialog
+        dialog.delete()
+        return bool(agreed)
+
+    async def save(change: Change) -> bool:
+        """Apply this one change to the file as it is now, save it and show the result."""
+        current, outcome = apply_change(change)
+        if outcome == "":
+            show(current)
+            return True
+        if outcome is not None:
+            ui.notify(outcome, type="negative")
+            show(current)
+            return False
+        if current.errors and not await confirmed(current.errors):
+            show(_load())  # e.g. puts a switch back
+            return False
         try:
-            bpa_custom.save_rule_file(rules_path(), state["rules"], state["disabled"])
+            bpa_custom.save_rule_file(rules_path(), current.rules, current.disabled)
         except OSError as error:
             ui.notify(f"Could not save {rules_path()}: {error}", type="negative")
+            show(_load())
             return False
-        state["errors"] = []
-        banner.refresh()
+        show(_load())
         return True
 
     with ui.column().classes("w-full max-w-screen-2xl mx-auto p-4 gap-4"):
@@ -275,7 +376,7 @@ def build_rules_page() -> None:
                 if not state["rules"]:
                     empty_state("rule", "No custom rules yet", "Add one with \"Add rule\".")
                     return
-                for index, rule in enumerate(state["rules"]):
+                for rule in state["rules"]:
                     with ui.row().classes("items-center gap-3 w-full no-wrap").mark(
                         f"custom_{rule.id}"
                     ):
@@ -285,20 +386,23 @@ def build_rules_page() -> None:
                                 f"{rule.id} · {rule.scope} · {rule.severity} · {rule.category}"
                             ).classes("text-sm text-grey-7")
                         ui.button(
-                            icon="edit", on_click=lambda i=index: open_form(i)
+                            icon="edit", on_click=lambda i=rule.id: open_form(i)
                         ).props('flat round dense aria-label="Edit"').tooltip("Edit").mark(
                             f"edit_{rule.id}"
                         )
                         ui.button(
-                            icon="delete", on_click=lambda i=index: delete_rule(i)
+                            icon="delete", on_click=lambda i=rule.id: delete_rule(i)
                         ).props('flat round dense color=negative aria-label="Delete"').tooltip(
                             "Delete"
                         ).mark(f"delete_{rule.id}")
 
             custom_list()
 
-        async def delete_rule(index: int) -> None:
-            rule = state["rules"][index]
+        async def delete_rule(rule_id: str) -> None:
+            position = _find(state["rules"], rule_id)
+            if position is None:
+                return
+            rule = state["rules"][position]
             with ui.dialog() as dialog, ui.card():
                 ui.label(f"Delete the rule {rule.name} ({rule.id})?")
                 with ui.row().classes("w-full justify-end"):
@@ -310,12 +414,8 @@ def build_rules_page() -> None:
             dialog.delete()
             if not agreed:
                 return
-            removed = state["rules"].pop(index)
-            if not await save():
-                state["rules"].insert(index, removed)
-                return
-            custom_list.refresh()
-            ui.notify(f"Deleted {removed.name}", type="positive")
+            if await save(delete_rule_id(rule.id)):
+                ui.notify(f"Deleted {rule.name}", type="positive")
 
         # ── built-in rules ────────────────────────────────────────────────────
         builtins = load_rules()
@@ -349,7 +449,8 @@ def build_rules_page() -> None:
                         ui.label(
                             f"{rule.category} · {rule.severity} · {', '.join(rule.scope)}"
                         ).classes("text-sm text-grey-7")
-                switch.on_value_change(lambda e, r=rule: toggle(r.id, e.value, e.sender))
+                switch.on_value_change(lambda e, r=rule: toggle(r.id, e.value))
+                switches[rule.id] = switch
                 rows.append((text, row))
 
             def filter_rows() -> None:
@@ -359,25 +460,14 @@ def build_rules_page() -> None:
 
             search.on_value_change(filter_rows)
 
-        reverting = {"value": False}
-
-        async def toggle(rule_id: str, on: bool, switch) -> None:
-            if reverting["value"]:
-                return
-            before = list(state["disabled"])
-            if on:
-                state["disabled"] = [i for i in state["disabled"] if i != rule_id]
-            elif rule_id not in state["disabled"]:
-                state["disabled"].append(rule_id)
-            if not await save():
-                state["disabled"] = before
-                reverting["value"] = True
-                switch.value = not on
-                reverting["value"] = False
+        async def toggle(rule_id: str, on: bool) -> None:
+            # No flag: a switch put back by show() asks for the file's state, so nothing to do
+            await save(switch_builtin(rule_id, on))
 
         # ── the form ──────────────────────────────────────────────────────────
-        def open_form(index: Optional[int]) -> None:
-            existing = state["rules"][index] if index is not None else None
+        def open_form(rule_id: Optional[str]) -> None:
+            position = _find(state["rules"], rule_id) if rule_id is not None else None
+            existing = state["rules"][position] if position is not None else None
             values = {
                 "id": existing.id if existing else "",
                 "name": existing.name if existing else "",
@@ -390,7 +480,7 @@ def build_rules_page() -> None:
                 ],
                 "any": [_row(c) for c in existing.any] if existing else [],
             }
-            others = [r for i, r in enumerate(state["rules"]) if i != index]
+            others = [r for r in state["rules"] if existing is None or r.id != existing.id]
 
             with ui.dialog() as dialog, ui.card().classes("w-[760px] max-w-full"):
                 with ui.row().classes("items-center gap-3 w-full no-wrap"):
@@ -519,15 +609,9 @@ def build_rules_page() -> None:
                     if rule is None:
                         return
                     new = bpa_custom.rule_from_dict(rule)
-                    before = list(state["rules"])
-                    if index is None:
-                        state["rules"].append(new)
-                    else:
-                        state["rules"][index] = new
-                    if not await save():
-                        state["rules"] = before
+                    change = add_rule(new) if existing is None else replace_rule(existing.id, new)
+                    if not await save(change):
                         return
-                    custom_list.refresh()
                     ui.notify(f"Saved {new.name}", type="positive")
                     dialog.close()
 

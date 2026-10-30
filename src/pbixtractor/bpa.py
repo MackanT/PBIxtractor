@@ -294,12 +294,12 @@ def iter_objects(model: SemanticModel) -> Iterator[BpaObject]:
             )
     for source in model.data_sources:
         if source.type.lower() == "structured":
-            yield BpaObject("StructuredDataSource", "Structured Data Source", source.name, source)
+            yield BpaObject("StructuredDataSource", "Data Source (Power Query)", source.name, source)
         else:
-            yield BpaObject("ProviderDataSource", "Provider Data Source", source.name, source)
+            yield BpaObject("ProviderDataSource", "Data Source (Legacy)", source.name, source)
     for expression in model.expressions:
         yield BpaObject(
-            "NamedExpression", "Shared Expression", expression.name, expression,
+            "NamedExpression", "Expression", expression.name, expression,
             expression.annotations,
         )
 

@@ -140,6 +140,20 @@ def test_highlight_dax_keeps_names_that_look_like_placeholders():
     assert "&& " in text and "|| " in text
 
 
+def test_highlight_dax_keeps_leading_spaces():
+    """D28: a line's indent stays as it is; inner spacing is per token as before."""
+    formats = {k: k for k in ("comment", "quote", "var", "varname", "measure", "function", "return")}
+    formats["para"] = [f"para{i}" for i in range(15)]
+    dax = 'SUM (\n    Sales[Amount]\n)\n        // note\nVAR  x =  "a\n  b"'
+    segments = highlight_dax(dax, formats, ["SUM"])
+    text = _plain(segments, formats)
+    assert text.startswith("SUM ( \n    Sales[Amount]")
+    assert "\n        // note" in text
+    assert "VAR x = " in text  # inner double spaces: one per token, as before
+    assert "    " in segments  # one segment per indent
+    assert "\ue004" not in "".join(text)  # no placeholder left, also inside a string
+
+
 def test_highlight_dax_survives_deep_nesting_and_a_trailing_var():
     formats = {k: k for k in ("comment", "quote", "var", "varname", "measure", "function", "return")}
     formats["para"] = [f"para{i}" for i in range(15)]
@@ -666,10 +680,11 @@ def test_definition_cells_are_formatted_while_the_json_keeps_the_dax(tmp_path):
                         (output / "Sample_data.xlsx", "common")):  # fmt: skip
         name = OBJECT_COLUMNS.index("Name")
         rows = {row[name]: row for row in _xlsx_rows(path, sheet) if len(row) > definition}
-        # highlight_dax() spaces the tokens; the layout (lines, tab indents, casing) is the
+        # highlight_dax() spaces the tokens; the layout (lines, 4-space indents, casing) is the
         # formatter's
         online = rows["Online"][definition]
-        assert online.startswith("CALCULATE ( \n\t")
+        assert online.startswith("CALCULATE ( \n    [")
+        assert "\t" not in online
         assert "ALL ( Sales )" in online and "\n)" in online
         is_big = rows["Is Big"][definition]  # calculated column: four lines in the model
         assert "\n" not in is_big and "TRUE ( )" in is_big

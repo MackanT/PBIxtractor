@@ -82,8 +82,10 @@ def found(rule_data, the_model=None) -> list[str]:
         (cond("name", "equals", "TOTAL"), ["[Total]"]),
         (cond("name", "not_equals", "total"), ["[twice]", "[Ratio]"]),
         (cond("expression", "contains", "divide"), ["[Ratio]"]),
-        (cond("name", "matches", "^[a-z]"), ["[Total]", "[twice]", "[Ratio]"]),
-        (cond("name", "matches", "^t"), ["[Total]", "[twice]"]),
+        (cond("name", "matches", "^[a-z]"), ["[twice]"]),  # case-sensitive (D25)
+        (cond("name", "matches", "(?i)^[a-z]"), ["[Total]", "[twice]", "[Ratio]"]),
+        (cond("name", "matches", "^t"), ["[twice]"]),
+        (cond("name", "matches", "(?i)^t"), ["[Total]", "[twice]"]),
         (cond("display_folder", "is_empty"), ["[twice]", "[Ratio]"]),
         (cond("display_folder", "not_empty"), ["[Total]"]),
         (cond("format_string", "in", ["0%", "#,0.00"]), ["[Ratio]"]),
@@ -99,6 +101,35 @@ def found(rule_data, the_model=None) -> list[str]:
 )
 def test_each_op_and_property_on_measures(condition, expected):
     assert found(rule(conditions=[condition])) == expected
+
+
+def test_matches_is_case_sensitive_unless_i():
+    """D25: .NET Regex.IsMatch; equals / contains / in still ignore case."""
+    assert found(rule(conditions=[cond("expression", "matches", "DIVIDE")])) == ["[Ratio]"]
+    assert found(rule(conditions=[cond("expression", "matches", "divide")])) == []
+    assert found(rule(conditions=[cond("expression", "matches", "(?i)divide")])) == ["[Ratio]"]
+    assert found(rule(conditions=[cond("name", "equals", "RATIO")])) == ["[Ratio]"]
+    assert found(rule(conditions=[cond("name", "in", ["RATIO"])])) == ["[Ratio]"]
+
+
+def test_a_slow_pattern_times_out_with_one_warning(caplog):
+    """D32: catastrophic backtracking stops after MATCH_TIMEOUT; the run goes on."""
+    import time
+
+    measures = [{"name": name, "expression": "a" * 30000 + "b"} for name in ("Slow", "Slower")]
+    slow_model = parse_model(db([table("T", [col("A")], measures)]))
+    data = rule(conditions=[cond("expression", "matches", "(a+)+$")])
+    start = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="pbixtractor"):
+        violations, _ = run_bpa(slow_model, custom=[rule_from_dict(data)])
+    seconds = time.monotonic() - start
+    assert bpa_custom.MATCH_TIMEOUT == 2.0
+    assert seconds < 10  # two objects, at most 2 s each (plus the built-in rules)
+    assert not [v for v in violations if v.rule == "Rule one"]
+    warnings = [r.getMessage() for r in caplog.records if "took longer" in r.getMessage()]
+    assert warnings == [
+        "Custom model quality rule R1: the pattern took longer than 2 s on [Slow]; skipped"
+    ]
 
 
 def test_column_properties():

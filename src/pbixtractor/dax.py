@@ -17,6 +17,8 @@ _COLUMN_REF = re.compile(r"('(?:[^']|'')+'|\w+)\[(.*?)\]")
 # Placeholders for highlight_dax(): private-use characters, which cannot occur in real DAX
 # (plain words like "XXX" could - a column or variable with that name was rewritten)
 _TAB, _NEWLINE, _AND, _OR = "", "", "", ""
+_INDENT = ""  # one leading space of a line (the formatter's 4-space indent)
+_LEADING_SPACES = re.compile(r"(?m)^ +")
 
 
 def find_functions(dax_code: str, known_functions: list) -> list[str]:
@@ -100,13 +102,22 @@ def highlight_dax(dax_code: str, formats: dict, known_functions: list) -> list:
     columns_clean = ["[" + column + "]" for _, column in columns]
     measures = find_measures(dax_code)
 
-    # Protect whitespace and operators that the tokenizer would otherwise split or drop
-    text = dax_code.replace("\t", f" {_TAB} ")
+    # Protect whitespace and operators that the tokenizer would otherwise split or drop. Leading
+    # spaces are kept as they are (an indent); other spaces are re-spaced per token.
+    text = _LEADING_SPACES.sub(lambda m: _INDENT * len(m.group()), dax_code)
+    text = text.replace("\t", f" {_TAB} ")
     text = text.replace("\r\n", f" {_NEWLINE} ")
     text = text.replace("\n", f" {_NEWLINE} ")
     text = text.replace("&&", f" {_AND} ")
     text = text.replace("||", f" {_OR} ")
-    tokens = [token for token in _TOKEN.findall(text) if token.strip()]
+    tokens: list[str] = []
+    for token in _TOKEN.findall(text):
+        if not token.strip():
+            continue
+        if token == _INDENT and tokens and tokens[-1].startswith(_INDENT):
+            tokens[-1] += token  # one segment per indent
+        else:
+            tokens.append(token)
 
     segments = []
     add = segments.extend
@@ -137,6 +148,8 @@ def highlight_dax(dax_code: str, formats: dict, known_functions: list) -> list:
                 quote_counter = 0
             else:
                 add((token,))
+        elif token.startswith(_INDENT):
+            add((" " * len(token),))
         elif token == _TAB:
             add(("\t",))
         elif token == _NEWLINE:
@@ -175,4 +188,5 @@ def highlight_dax(dax_code: str, formats: dict, known_functions: list) -> list:
         else:
             add((token, " "))
 
-    return segments
+    # An indent inside a multi-line string was added as it is: spaces again
+    return [s.replace(_INDENT, " ") if isinstance(s, str) else s for s in segments]

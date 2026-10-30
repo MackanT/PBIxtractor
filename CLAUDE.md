@@ -18,6 +18,8 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
   The DearPyGUI desktop UI (extractor.py, --ui/--test) was removed on 2026-09-29.
 - pandas, xlsxwriter (rich-text cells), networkx + matplotlib (relationship PNG)
 - pydantic for row models (the jsonpath-ng dependency was removed 2026-09-30: nothing used it)
+- regex (PyPI) for custom rules' `matches` only: a timeout per search (bpa_custom.MATCH_TIMEOUT);
+  the built-in rules keep `re`
 - Optional: Tabular Editor 2 CLI (Windows-only, ≥2.29), called via `subprocess`:
   - Tabular Editor analysis (default on; `--no-tabular-editor`): only live statistics from an
     open Power BI Desktop now (until ticket 08). The Best Practice Analyzer is bpa.py (Python: all
@@ -216,14 +218,23 @@ src/pbixtractor/
                     After each successful run (in its thread: _run_and_remember; batch: per
                     outcome) web_rules remembers the model for "Test".
   web_rules.py      The "Model quality rules" page (build_rules_page): error banner when
-                    load_rule_file reports problems (the first save asks "This removes the rules
-                    that could not be read"), the 71 built-ins with a search and a switch "On"
-                    each (off = id under disabled, saved at once), custom rules with Add / edit /
-                    delete (confirmed) and a form dialog (id, name, category, severity,
+                    load_rule_file reports problems (a save while the file has them asks "This
+                    removes the rules that could not be read"), the 71 built-ins with a search and
+                    a switch "On" each (off = id under disabled, saved at once), custom rules with
+                    Add / edit / delete (confirmed) and a form dialog (id, name, category, severity,
                     description, scope; condition rows + optional any group: property choices =
                     bpa_custom.PROPERTIES for the scope, ops = OPS, value hidden for ops without
                     one, comma list for `in`). Save = validate_rule + unique id (form_errors),
-                    then bpa_custom.save_rule_file(USER_RULES_PATH). "Test" = evaluate_rule on the
+                    then save(change) (D31): apply_change() reads the file fresh and applies only
+                    this one Change - add_rule (refused if the id exists now), replace_rule(id)
+                    (re-added if deleted meanwhile; refused onto another rule's id),
+                    delete_rule_id (gone = nothing to do), switch_builtin(id, on) (already so =
+                    nothing to do) - then save_rule_file(USER_RULES_PATH) and show() re-renders
+                    from the file (other tabs' saves and hand edits are kept). Cancel on the
+                    confirmation = show() from the file, which puts the switch back; the change
+                    event that emits finds the file in that state already (no save, no second
+                    dialog; no "reverting" flag: NiceGUI runs async handlers later). Embedded
+                    (web_config.CONFIG.embedded) web_ui remembers no model (D27). "Test" = evaluate_rule on the
                     form's unsaved rule in run.io_bound against the last run (remember_run(name,
                     model, statistics) / remember_model_file(name, path): batch outcomes carry no
                     model, so it is read again from its file - service statistics are then
@@ -292,7 +303,8 @@ src/pbixtractor/
                     button_target_and_label, field_description.
   dax.py            find_functions/find_measures/find_columns, text_dependencies() (only
                     used when the dax_parser analysis crashed: exact deps None), highlight_dax()
-                    → rich-text segments.
+                    → rich-text segments: tokens re-spaced one space each, except a line's
+                    leading spaces, kept as one segment (the formatter's 4-space indent, D28).
   dax_parser.py     tokenize(dax) → [Token(kind, text, position)], lossless ("".join(texts) ==
                     input; the formatter relies on it), never raises: whitespace, comment (//,
                     --, /* */; unclosed → end), string ("" escape), quoted_name ('' escape),
@@ -337,9 +349,9 @@ src/pbixtractor/
                     after OBJECT_COLUMNS (QUALITY_INDEX; OBJECT_COLUMNS itself does not grow,
                     the data workbook's "common" is unchanged); _write_objects(quality=).
                     _write_objects: the Definition cell of a Measure / Calculated Column
-                    (FORMATTED_TYPES) shows format_dax() output (leading 4-space indents → tabs:
-                    highlight_dax drops spaces) in both workbooks; Depends On / text matching use
-                    the original Definition.
+                    (FORMATTED_TYPES) shows format_dax() output (its 4-space indents as they are:
+                    highlight_dax keeps leading spaces; no tabs since D28) in both workbooks;
+                    Depends On / text matching use the original Definition.
   relationship_graph.py save_relationship_graph() → PNG (networkx spring layout).
   m_sources.py      m_sources(M, queries, name) → (connector, source objects): Schema/Item,
                     Name (single-db connectors), Lakehouse Id/ItemKind, native SQL
@@ -741,8 +753,9 @@ src/pbixtractor/
                     Hierarchy ('Table'[Name], ] NOT escaped), Level, partitions
                     (partition_type_name: "Partition (M - <mode>)", "(Legacy - <mode>)", "(DQ
                     over AS)", "(Policy Range)"), Calculation Item, Relationship (te_name),
-                    Perspective, Role, Table Permission (name = its table), Provider/Structured
-                    Data Source, Shared Expression (these last three spellings unverified).
+                    Perspective, Role, Table Permission (name = its table), "Data Source (Power
+                    Query)" (structured), "Data Source (Legacy)" (provider), "Expression" (shared
+                    expression; all three as Tabular Editor's GetTypeName).
                     "Table (DirectQuery)" in a rule = table_mode DirectQuery (a Hybrid table is
                     not). _Context.referenced_by builds its index locally and caches it only
                     when complete (a crash = that rule's "not checked", the next rule retries).
@@ -778,9 +791,15 @@ src/pbixtractor/
                     name, table, description, format_string, data_type (TE spelling, e.g. Double),
                     display_folder, hidden, expression (measures + calculated columns), dependants
                     (ReferencedBy count from model_dependencies), each with the scopes it exists on
-                    (another scope = validation error); OPS equals / not_equals / contains (case-
-                    insensitive), matches (re.search, IGNORECASE), is_empty / not_empty (no
-                    value), in (a list); hidden/dependants compare values. load_rule_file(path) →
+                    (another scope = validation error); OPS equals / not_equals / contains / in
+                    (a list) case-insensitive, matches = a `regex`-package search, case-sensitive
+                    unless the pattern has (?i) (D25, as .NET Regex.IsMatch; compiled once,
+                    lru_cache), timeout MATCH_TIMEOUT = 2.0 s per object (D32): a TimeoutError =
+                    no match, breaks() logs one WARNING per rule and run ("Custom model quality
+                    rule <id>: the pattern took longer than 2 s on <object>; skipped", kept in
+                    _Context.custom_timeouts) and the run goes on; validate_rule compiles with
+                    `regex` too; is_empty / not_empty (no value); hidden/dependants compare
+                    values. load_rule_file(path) →
                     RuleFile(rules, disabled, errors "<id | rule #n | file X>: <problem>"), never
                     raises for content: bad YAML → no rules; a bad rule is dropped; unknown
                     disabled ids named. validate_rule(dict), rule_from_dict / rule_to_dict,

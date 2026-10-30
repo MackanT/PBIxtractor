@@ -35,6 +35,7 @@ dependencies = [
     "msal>=1.30",  # browser sign-in, accounts (azure_auth.py)
     "msal-extensions>=1.2",  # token cache: OS-encrypted, else a 0600 file
     "pbixray>=0.15",  # reads the model inside a .pbix (MIT; native wheels for Windows + Linux)
+    "regex>=2024.11.6",  # custom rules: matches with a timeout (bpa_custom.py)
 ]
 
 [project.optional-dependencies]

@@ -832,9 +832,10 @@ def rules_index() -> None:
 
 
 def _remember_for_rules(result: ExtractionResult, options: ExtractionOptions) -> None:
-    """Keep a successful run's model for the rules page's "Test" (web_rules)."""
+    """Keep a successful run's model for the rules page's "Test" (web_rules). Embedded there is
+    no rules page, so no model is kept in memory (D27)."""
     documentation = result.documentation
-    if not result.ok or documentation is None:
+    if web_config.CONFIG.embedded or not result.ok or documentation is None:
         return
     web_rules.remember_run(
         options.name if options.extra_reports else model_name(options.model_path),
@@ -855,7 +856,7 @@ def _run_and_remember(options: ExtractionOptions, progress, on_log) -> Extractio
 def _remember_outcome_for_rules(outcome: batch.JobOutcome) -> None:
     """Keep a successful batch model for "Test" (read again from its file when tested)."""
     options = outcome.options
-    if outcome.ok and options is not None:
+    if not web_config.CONFIG.embedded and outcome.ok and options is not None:
         name = options.name if options.extra_reports else model_name(options.model_path)
         web_rules.remember_model_file(name, options.model_path, report=options.name)
 

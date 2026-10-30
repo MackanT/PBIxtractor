@@ -237,3 +237,111 @@ def test_start_adds_the_rules_page(monkeypatch):
     )
     web_ui.start(open_browser=False)
     assert pages == {"/rules": web_ui.rules_index}
+
+
+def _rule(rule_id, name="A rule"):
+    return {"id": rule_id, "name": name, "severity": "Low", "scope": "Measure",
+            "conditions": [{"property": "name", "op": "not_empty"}]}
+
+
+def test_a_save_keeps_what_another_tab_saved_meanwhile(page):
+    """D31: tab B (loaded before tab A added X) switches a built-in off; both are kept."""
+    async def scenario(user):
+        await user.should_see(f"Built-in rules ({len(load_rules())})")
+        bpa_custom.save_rule_file(page, [_rule("X")])  # tab A, after this page loaded
+        _el(user, f"builtin_{FIRST}").value = False
+        await _wait_for(lambda: _saved(page)["disabled"] == [FIRST])
+        assert [r["id"] for r in _saved(page)["rules"]] == ["X"]
+        await user.should_see(marker="custom_X")  # the list shows the file again
+
+    _simulate(scenario)
+
+
+def test_a_save_keeps_a_hand_edit(page):
+    bpa_custom.save_rule_file(page, [_rule("OLD")])
+
+    async def scenario(user):
+        await user.should_see(marker="custom_OLD")
+        page.write_text(  # edited by hand after the page loaded
+            "version: 1\ndisabled: []\nrules:\n"
+            "  - {id: OLD, name: Edited by hand, severity: High, scope: Measure,\n"
+            "     conditions: [{property: name, op: not_empty}]}\n"
+            "  - {id: HAND, name: Hand, severity: Low, scope: Table,\n"
+            "     conditions: [{property: hidden, op: equals, value: true}]}\n",
+            encoding="utf-8",
+        )
+        await _fill(user, rule_id="NEW")
+        user.find(marker="rule_save").click()
+        await _wait_for(lambda: len(_saved(page)["rules"]) == 3)
+        rules = _saved(page)["rules"]
+        assert [r["id"] for r in rules] == ["OLD", "HAND", "NEW"]
+        assert rules[0]["name"] == "Edited by hand" and rules[0]["severity"] == "High"
+
+    _simulate(scenario)
+
+
+def test_changes_apply_to_the_file_as_it_is_now(page):
+    bpa_custom.save_rule_file(page, [_rule("A"), _rule("B")])
+    new_a = bpa_custom.rule_from_dict(_rule("A", "New A"))
+
+    current, outcome = web_rules.apply_change(web_rules.add_rule(new_a))
+    assert outcome and "exists already" in outcome  # add: refused, the id exists now
+    current, outcome = web_rules.apply_change(web_rules.replace_rule("A", new_a))
+    assert outcome is None and [r.name for r in current.rules] == ["New A", "A rule"]
+    renamed = bpa_custom.rule_from_dict(_rule("B"))
+    _, outcome = web_rules.apply_change(web_rules.replace_rule("A", renamed))
+    assert outcome and "exists already" in outcome  # edit to another rule's id
+    bpa_custom.save_rule_file(page, [_rule("B")])  # A deleted meanwhile
+    current, outcome = web_rules.apply_change(web_rules.replace_rule("A", new_a))
+    assert outcome is None and [r.id for r in current.rules] == ["B", "A"]  # added again
+    _, outcome = web_rules.apply_change(web_rules.delete_rule_id("GONE"))
+    assert outcome == ""  # nothing to do
+    current, outcome = web_rules.apply_change(web_rules.switch_builtin(FIRST, False))
+    assert outcome is None and current.disabled == [FIRST]
+    _, outcome = web_rules.apply_change(web_rules.switch_builtin(FIRST, True))
+    assert outcome == ""  # on already
+
+
+def test_cancel_puts_the_switch_back_without_asking_again(page):
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "version: 1\nrules:\n  - id: BROKEN\n    name: x\n    severity: Huge\n    scope: Measure\n"
+        "    conditions: [{property: name, op: not_empty}]\n",
+        encoding="utf-8",
+    )
+    before = page.read_text(encoding="utf-8")
+
+    def dialogs(user):
+        return [e for e in user.client.elements.values() if "confirm_cancel" in e._markers]
+
+    async def scenario(user):
+        await user.should_see(marker="rules_file_errors")
+        _el(user, f"builtin_{FIRST}").value = False
+        await user.should_see(web_rules.CONFIRM_OVERWRITE, retries=20)
+        user.find(marker="confirm_cancel").click()
+        await _wait_for(lambda: _el(user, f"builtin_{FIRST}").value is True)
+        for _ in range(20):  # give a looping handler time to show itself
+            await asyncio.sleep(0.05)
+            assert not dialogs(user)
+        assert page.read_text(encoding="utf-8") == before
+        await user.should_see(marker="rules_file_errors")
+
+    _simulate(scenario)
+
+
+def test_an_embedded_run_keeps_no_model(page, monkeypatch):
+    """D27: embedded there is no rules page, so the last run's model is not kept."""
+    monkeypatch.setattr(web_ui.web_config, "CONFIG", web_ui.web_config.WebConfig(embedded=True))
+    model = parse_model(BIM)
+
+    class Doc:
+        live_statistics = None
+
+    Doc.model = model
+    result = web_ui.ExtractionResult("success", "ok", documentation=Doc())
+    options = web_ui.ExtractionOptions(report_path="Sales.pbix", model_path="Sales.bim", output_dir=".")
+    web_ui._remember_for_rules(result, options)
+    assert web_rules.last_run() is None
+    outcome = web_ui.batch.JobOutcome(job=None, status="success", message="", options=options)
+    web_ui._remember_outcome_for_rules(outcome)
+    assert web_rules.last_run() is None

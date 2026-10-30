@@ -5,7 +5,6 @@ write_data_workbook("Report_data.xlsx", documentation, graph_path, known_functio
 """
 
 import logging
-import re
 import warnings
 
 import xlsxwriter
@@ -174,11 +173,6 @@ def _set_object_columns(worksheet, formats: dict) -> None:
 FORMATTED_TYPES = ("Measure", "Calculated Column")
 
 
-def _tab_indents(dax: str) -> str:
-    """Leading 4-space indents as tabs: highlight_dax() keeps tabs and drops spaces."""
-    return re.sub(r"(?m)^(?: {4})+", lambda m: "\t" * (len(m.group()) // 4), dax)
-
-
 def _write_objects(
     worksheet,
     documentation: Documentation,
@@ -203,7 +197,7 @@ def _write_objects(
 
         text = row["Definition"]
         if row["Type"] in FORMATTED_TYPES:
-            text = _tab_indents(format_dax(text))
+            text = format_dax(text)  # highlight_dax keeps its indents
         definition = highlight_dax(text, formats, known_functions)
         parents = documentation.depends_on(row["Table"], row["Name"])
         if parents is None:

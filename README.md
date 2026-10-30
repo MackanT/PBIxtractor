@@ -79,8 +79,9 @@ them, switch any off) and your own custom rules: add, edit or delete one with a 
 severity, conditions on name, description, DAX, ...). "Test" runs the rule in the form on the
 model of the last documentation run in the app, without saving it. Every change is saved at
 once to `~/.pbixtractor/bpa_rules.yaml`, the same file every run on this PC uses (see "Custom
-model quality rules" below). If that file has rules that cannot be read, the page lists them
-and asks before a save rewrites the file without them.
+model quality rules" below). Each save reads the file again and applies only that one change,
+so changes made in another tab or by hand in the file are kept. If the file has rules that
+cannot be read, the page lists them and asks before a save rewrites the file without them.
 
 Fabric and Azure DevOps use one sign-in account, shown at the top of both panels ("Signed in as
 <user> · <tenant>"). Choose another one from the list (one entry per tenant of each user you
@@ -155,14 +156,19 @@ rules:
     conditions:          # all must hold
       - {property: display_folder, op: is_empty}
     any:                 # optional: at least one must hold
-      - {property: name, op: matches, value: "^[A-Z]"}
+      - {property: name, op: matches, value: "^[a-z]"}   # starts with a lower-case letter
 ```
 
 Properties: `name`, `table`, `description`, `format_string`, `data_type`, `display_folder`,
 `hidden`, `expression` (measures and calculated columns) and `dependants` (how many objects'
-DAX reference it). Ops: `equals`, `not_equals`, `contains` (case-insensitive), `matches` (a
-regex, case-insensitive), `is_empty`, `not_empty` and `in` (a list). A broken rule never stops a
-run: it is left out with a warning naming it, and the built-in rules still run.
+DAX reference it). Ops: `equals`, `not_equals`, `contains`, `is_empty`, `not_empty` and `in` (a
+list); `equals`, `not_equals`, `contains` and `in` ignore case. `matches` is a regular
+expression and, as in Tabular Editor, case-sensitive: `"^[a-z]"` finds `sales` but not `Sales`;
+start the pattern with `(?i)` to ignore case (`"(?i)^[a-z]"` finds both). A pattern gets 2
+seconds per object: one that takes longer (for example `(a+)+$` on a long expression) counts as
+no match for that object, the run logs a warning naming the rule and the object, and goes on. A
+broken rule never stops a run: it is left out with a warning naming it, and the built-in rules
+still run.
 
 ### From Python
 

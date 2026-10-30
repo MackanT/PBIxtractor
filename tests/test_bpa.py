@@ -571,6 +571,20 @@ def test_other_object_names():
     assert objects["Relationship"][0] == "Relationship"
 
 
+def test_data_source_and_expression_types():
+    """D24: Tabular Editor's GetTypeName for data sources and shared expressions."""
+    database = db(
+        [table("T", [col("A")])],
+        dataSources=[{"name": "S", "type": "structured"}, {"name": "L", "type": "provider"}],
+        expressions=[{"name": "E", "kind": "m", "expression": "1"}],
+    )
+    objects = [(o.scope, o.object_type, o.object_name)
+               for o in bpa.iter_objects(parse_model(database))]  # fmt: skip
+    assert ("StructuredDataSource", "Data Source (Power Query)", "S") in objects
+    assert ("ProviderDataSource", "Data Source (Legacy)", "L") in objects
+    assert ("NamedExpression", "Expression", "E") in objects
+
+
 def test_model_quality_column_reads_python_findings():
     violations = findings(db([table("Sales", [col("Amount", "double")])]))
     cells = bpa_by_object(violations)
