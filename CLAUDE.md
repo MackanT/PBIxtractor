@@ -1064,7 +1064,10 @@ pipeline and CLI on the anonymised sample data.
   the Python BPA + dax_parser dependencies vs Tabular Editor 2's on one .bim / TMDL / .pbix model;
   prints per-rule and dependency differences, writes compare_tabular_editor.xlsx with sheets
   summary, bpa differences, dependency differences, object types; exit 2 = no TE or model, 1 = TE
-  failed. Python side gets no statistics, so statistics rules are "not checked" there).
+  failed. Python side gets no statistics, so statistics rules are "not checked" there),
+  compare_quality.py (`OLD_data.xlsx NEW_data.xlsx`: only the "model quality" and "dependencies"
+  sheets of two data workbooks - e.g. an old Tabular Editor run vs a new Python run of the same
+  model; case/space-insensitive; exit 0 same, 1 different, 2 bad arguments; zipfile, no openpyxl).
 
 ## Branches
 - `main`: legacy single-file `PB-Ixtractor.py` (has working button/bookmark logic).
