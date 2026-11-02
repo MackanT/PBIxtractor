@@ -135,6 +135,35 @@ def test_split_ref(ref, expected):
     assert _split_ref(ref) == expected
 
 
+def test_viewer_interactions_stay_fast(doc):
+    """The page's script avoids the measured slow paths (string checks: no JS test runner)."""
+    html = render_lineage_html(doc)
+    script = html[html.rindex("<script>") :]
+    draw = script[script.index("function draw(") : script.index("function nodeOf(")]
+    # Fit, render and reveal use the layout's own coordinates, never a DOM measurement
+    assert "getBBox" not in script and "consolidate()" not in script
+    # Text hidden when too small or while the wheel zooms: one class on the SVG root
+    assert "TEXT_MIN_SCALE = 0.5" in script
+    assert 'svg.classList.toggle("small-text", state.scale < TEXT_MIN_SCALE)' in script
+    assert 'svg.classList.add("zooming")' in script
+    assert "svg.small-text .node text, svg.zooming .node text { display: none; }" in html
+    # The nearest-N cut is linear (a Set and a counter)
+    assert "Object.keys(keep)" not in script and "ids.indexOf(" not in script
+    assert "new Set(ids)" in script
+    # Debounced search over text and an order computed once; rows built lazily, one handler set
+    assert "SEARCH_DELAY = 150" in script and "setTimeout(function () { state.query = value" in script
+    assert "n.hay = (n.label" in script and "LIST_ORDER.sort(" in script
+    assert "matches.sort(" not in script and "LIST_PAGE = 100" in script
+    assert 'row.addEventListener("click"' not in script
+    # Nodes: one string per drawing (escaped), no listeners per node; dimming through one class
+    assert "addEventListener" not in draw and "innerHTML" in draw
+    assert '.replace(/</g, "&lt;")' in script and '.replace(/"/g, "&quot;")' in script
+    assert "#viewport.has-mark .node:not(.rel):not(.marked) { opacity: .25; }" in html
+    assert 'document.querySelectorAll(".node")' not in script
+    # The details panel is laid out on its own: new details never relayout the graph
+    assert "position: absolute; inset: 0; contain: strict;" in html
+
+
 def test_html_has_guide(doc):
     html = render_lineage_html(doc)
     assert 'id="help"' in html and 'id="guide"' in html

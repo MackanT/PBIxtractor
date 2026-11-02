@@ -286,6 +286,21 @@ src/pbixtractor/
                     #<node id> in the URL opens that item (kept in sync via replaceState). Left
                     list = graph: click marks (highlight + details, reveal() pans to it),
                     double-click/Enter opens the lineage.
+                    Speed (viewer-improvements ticket 01, measured with Playwright at 4x CPU
+                    throttling): node text hidden below zoom 0.5 (TEXT_MIN_SCALE, svg class
+                    small-text) and while the wheel zooms (class zooming, back 150 ms after
+                    the last wheel event); Fit / reveal from the layout's coordinates (no
+                    getBBox; the graph area's size read once, again after resize / Panels);
+                    the 600-node cut is linear (Set + counter); search debounced 150 ms over
+                    n.hay (lower-case text) in LIST_ORDER (sorted once), rows built 100 at a
+                    time (IntersectionObserver / "Show more"), one delegated handler set on the
+                    list, no rebuild on plain navigation (listKey); nodes drawn as one escaped
+                    markup string (esc) with one delegated handler set on #nodes (mouseenter/
+                    -leave caught while capturing); mark/highlight change only the previous
+                    and the new item (graph.nodes / .edges / .near built per drawing), the rest
+                    dims through #viewport.has-hi / .has-mark (+ .hi / .rel / .marked). The
+                    details panel body is absolute + contain: strict - without it every new
+                    details text made Chrome lay out all the graph's SVG text again.
                     Several models (the catalog's lineage.html): build_multi_viewer_data([(entry,
                     build_viewer_data)]) → ids "<key>|<id>", nodes carry m (key) + model (name);
                     same-named sources merged ("source|<name lower, no brackets>", shared = count,

@@ -449,6 +449,7 @@ input[type=search] { width: 100%; padding: 7px 9px; border: 1px solid var(--bord
   border-left: 3px solid var(--attn); background: var(--bg); }
 .result .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .result .group { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.result.more { color: var(--accent); }
 main { position: relative; min-width: 0; min-height: 0; }
 #toolbar { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; gap: 8px;
   align-items: center; flex-wrap: wrap; z-index: 2; pointer-events: none; }
@@ -474,14 +475,21 @@ svg.dragging { cursor: grabbing; }
 .node.marked rect:first-of-type { stroke: var(--attn); stroke-width: 3.5; }
 .btn.primary { background: var(--accent); color: var(--on-color); border-color: var(--accent); }
 .node.unused rect { stroke-dasharray: 5 3; }
-.node.dim { opacity: .25; }
 .edge { fill: none; stroke: var(--edge); stroke-width: 1.2; }
 .edge.filters { stroke-dasharray: 4 3; }
 .edge.hi { stroke: var(--edge-hi); stroke-width: 2.2; }
-.edge.dim { opacity: .15; }
+/* One class on the graph group dims everything unrelated: .has-hi (an item highlighted: its
+   edges .hi) and .has-mark (an item marked: the highlighted item and its neighbours .rel) */
+#viewport.has-hi .edge:not(.hi) { opacity: .15; }
+#viewport.has-mark .node:not(.rel):not(.marked) { opacity: .25; }
+/* Text too small to read (zoomed out) or while the wheel zooms: hidden, shapes stay */
+svg.small-text .node text, svg.zooming .node text { display: none; }
 #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   color: var(--muted); pointer-events: none; }
-#details .body { overflow: auto; padding: 10px 16px 20px; flex: 1; }
+/* The details are laid out on their own (absolute + contain): new details then never make the
+   browser lay out the whole graph again */
+#details { position: relative; }
+#details .body { overflow: auto; padding: 10px 16px 20px; position: absolute; inset: 0; contain: strict; }
 .kv { margin: 0 0 10px; }
 .kv dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
 .kv dd { margin: 2px 0 0; white-space: pre-wrap; word-break: break-word; }
@@ -618,8 +626,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 
     <h3>Selecting an item</h3>
     <ul>
-      <li><b>Click</b> an item in the graph to mark it: its lines are highlighted and its details
-        appear on the right - the graph stays as it is. Click empty space to unmark.</li>
+      <li><b>Click</b> an item in the graph to mark it: its lines are highlighted, unrelated items
+        fade and its details appear on the right - the graph stays as it is. Names are hidden
+        while they would be too small to read (zoomed far out) and while the wheel zooms. Click empty space to unmark.</li>
       <li><b>Double-click</b> (or Enter, or "Open its lineage" on the right) to open the item's own
         lineage.</li>
       <li><b>Upstream</b> (to the left) = what the item is <b>built from</b>.</li>
@@ -678,6 +687,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function plural(top) { return top === "report" ? "reports" : "pages"; }
   function feedsNone(top) { return top === "report" ? "feeds no report" : "feeds no report page"; }
   var MAX_NODES = 600, NODE_W = 210, NODE_H = 34, GAP_X = 90, GAP_Y = 12;
+  // Node text is hidden below this zoom (12 px labels would be under ~6 px on screen)
+  var TEXT_MIN_SCALE = 0.5, SEARCH_DELAY = 150, LIST_PAGE = 100;
+  var compare = (window.Intl && Intl.Collator ? new Intl.Collator() : { compare: function (a, b) { return a.localeCompare(b); } }).compare;
 
   var byId = {}, up = {}, down = {};
   DATA.nodes.forEach(function (n) { byId[n.id] = n; up[n.id] = []; down[n.id] = []; });
@@ -699,14 +711,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   TYPES.forEach(function (t) { state.types[t] = true; });
 
   var $ = function (id) { return document.getElementById(id); };
-  var svgNS = "http://www.w3.org/2000/svg";
   function color(type) { return "var(--" + type + ")"; }
-  function el(tag, attrs, text) {
-    var node = document.createElementNS(svgNS, tag);
-    for (var k in attrs) node.setAttribute(k, attrs[k]);
-    if (text != null) node.textContent = text;
-    return node;
-  }
   function html(tag, cls, text) {
     var node = document.createElement(tag);
     if (cls) node.className = cls;
@@ -747,54 +752,105 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     chip.appendChild(box); chip.appendChild(dot); chip.appendChild(document.createTextNode(TYPE_LABEL[t]));
     $("types").appendChild(chip);
   });
-  $("search").addEventListener("input", function (e) { state.query = e.target.value.toLowerCase(); renderResults(); });
+  // The search waits until typing pauses (SEARCH_DELAY ms)
+  var searchTimer = null;
+  $("search").addEventListener("input", function (e) {
+    var value = e.target.value.toLowerCase();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () { state.query = value; renderResults(); }, SEARCH_DELAY);
+  });
   $("unusedOnly").addEventListener("change", function (e) { state.unusedOnly = e.target.checked; renderResults(); });
   $("direction").addEventListener("change", function (e) { state.direction = e.target.value; renderGraph(); });
 
-  function renderResults() {
+  // Computed once: every node's lower-case search text, and the list order (type, group, label)
+  var LIST_ORDER = DATA.nodes.slice();
+  LIST_ORDER.forEach(function (n) { n.hay = (n.label + " " + where(n)).toLowerCase(); n.rank = TYPES.indexOf(n.type); });
+  LIST_ORDER.sort(function (a, b) {
+    return b.rank - a.rank || compare(a.group, b.group) || compare(a.label, b.label);
+  });
+
+  // The list shows LIST_PAGE rows at first, more when its end scrolls into view (or is clicked)
+  var listMatches = [], listShown = 0, listKey = null, rowEls = {}, rowActive = null, rowMarked = null, moreRow = null;
+  var moreObserver = window.IntersectionObserver ? new IntersectionObserver(function (entries) {
+    if (entries.some(function (e) { return e.isIntersecting; })) appendRows();
+  }, { root: $("results") }) : null;
+  function renderResults(force) {
+    var key = [state.query, state.unusedOnly, state.model, TYPES.map(function (t) { return state.types[t] ? 1 : 0; }).join("")].join("\u0000");
+    if (key === listKey && force !== true) { syncRows(); return; }  // same input: only the marks change
+    listKey = key;
     var list = $("results"); list.textContent = "";
-    var matches = DATA.nodes.filter(function (n) {
+    rowEls = {}; rowActive = null; rowMarked = null; listShown = 0; moreRow = null;
+    var q = state.query;
+    listMatches = LIST_ORDER.filter(function (n) {
       if (!state.types[n.type]) return false;
       if (state.unusedOnly && !n.unused) return false;
       if (state.model && n.m !== state.model && !(n.type === "source" && (sourceModels[n.id] || {})[state.model])) return false;
-      if (!state.query) return true;
-      return (n.label + " " + where(n)).toLowerCase().indexOf(state.query) >= 0;
+      return !q || n.hay.indexOf(q) >= 0;
     });
-    matches.sort(function (a, b) {
-      return TYPES.indexOf(b.type) - TYPES.indexOf(a.type) || a.group.localeCompare(b.group) ||
-             a.label.localeCompare(b.label);
-    });
-    matches.slice(0, 300).forEach(function (n) {
-      var row = html("div", "result" + (n.id === state.selected ? " active" : "") +
-                     (n.id === state.marked ? " marked" : ""));
-      row.setAttribute("role", "option");
-      row.tabIndex = 0;
-      row.dataset.id = n.id;
-      var dot = html("span", "dot"); dot.style.background = color(n.type);
-      row.appendChild(dot);
-      row.appendChild(html("span", "name", n.label));
-      if (MULTI && DATA.differs[n.id]) row.appendChild(html("span", "diff", "≠"));
-      if (where(n)) row.appendChild(html("span", "group", where(n)));
-      row.title = TYPE_LABEL[n.type] + ": " + n.label + (n.unused ? " (unused)" : "");
-      // Like the graph: click marks it (details on the right), double-click opens its lineage
-      row.addEventListener("click", function () { mark(n.id); reveal(n.id); });
-      row.addEventListener("dblclick", function () { select(n.id); });
-      row.addEventListener("keydown", function (ev) {
-        if (ev.key === "Enter") select(n.id);
-        else if (ev.key === " ") { ev.preventDefault(); mark(n.id); reveal(n.id); }
-      });
-      list.appendChild(row);
-    });
-    if (matches.length > 300) list.appendChild(html("div", "result muted", (matches.length - 300) + " more - refine the search"));
-    if (!matches.length) list.appendChild(html("div", "result muted", "No matches"));
+    if (!listMatches.length) list.appendChild(html("div", "result muted", "No matches"));
+    appendRows();
   }
+  function appendRows() {
+    var list = $("results");
+    if (moreRow) { if (moreObserver) moreObserver.unobserve(moreRow); moreRow.remove(); moreRow = null; }
+    var end = Math.min(listMatches.length, listShown + LIST_PAGE), frag = document.createDocumentFragment();
+    for (var i = listShown; i < end; i++) frag.appendChild(resultRow(listMatches[i]));
+    listShown = end;
+    if (listShown < listMatches.length) {
+      moreRow = html("div", "result more", "Show more (" + (listMatches.length - listShown) + " more)");
+      frag.appendChild(moreRow);
+    }
+    list.appendChild(frag);
+    if (moreRow && moreObserver) moreObserver.observe(moreRow);
+    syncRows();
+  }
+  function resultRow(n) {
+    var row = html("div", "result");
+    row.setAttribute("role", "option");
+    row.tabIndex = 0;
+    row.dataset.id = n.id;
+    var dot = html("span", "dot"); dot.style.background = color(n.type);
+    row.appendChild(dot);
+    row.appendChild(html("span", "name", n.label));
+    if (MULTI && DATA.differs[n.id]) row.appendChild(html("span", "diff", "≠"));
+    if (where(n)) row.appendChild(html("span", "group", where(n)));
+    row.title = TYPE_LABEL[n.type] + ": " + n.label + (n.unused ? " (unused)" : "");
+    rowEls[n.id] = row;
+    return row;
+  }
+  // The shown (active) and marked rows follow the state: only the old and the new row change
+  function syncRows() {
+    rowActive = moveClass(rowEls, "active", rowActive, state.selected);
+    rowMarked = moveClass(rowEls, "marked", rowMarked, state.marked);
+  }
+  function moveClass(els, cls, from, to) {
+    if (from && els[from] && from !== to) els[from].classList.remove(cls);
+    if (to && els[to]) els[to].classList.add(cls);
+    return to && els[to] ? to : null;
+  }
+  // One handler set for the whole list. Like the graph: click marks it (details on the right),
+  // double-click (or Enter) opens its lineage
+  function rowOf(ev) { var row = ev.target.closest && ev.target.closest(".result"); return row && row.parentNode === $("results") ? row : null; }
+  $("results").addEventListener("click", function (ev) {
+    var row = rowOf(ev); if (!row) return;
+    if (row === moreRow) { appendRows(); return; }
+    if (row.dataset.id) { mark(row.dataset.id); reveal(row.dataset.id); }
+  });
+  $("results").addEventListener("dblclick", function (ev) {
+    var row = rowOf(ev); if (row && row.dataset.id) select(row.dataset.id);
+  });
+  $("results").addEventListener("keydown", function (ev) {
+    var row = rowOf(ev); if (!row || !row.dataset.id) return;
+    if (ev.key === "Enter") select(row.dataset.id);
+    else if (ev.key === " ") { ev.preventDefault(); mark(row.dataset.id); reveal(row.dataset.id); }
+  });
 
   // ---------- lineage ----------
   function walk(start, neighbours) {
     var seen = {}, queue = [start];
     seen[start] = true;
-    while (queue.length) {
-      var id = queue.shift();
+    for (var head = 0; head < queue.length; head++) {
+      var id = queue[head];
       neighbours[id].forEach(function (n) { if (!seen[n.id]) { seen[n.id] = true; queue.push(n.id); } });
     }
     return seen;
@@ -814,8 +870,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var keys = Object.keys(layers).map(Number).sort(function (a, b) { return a - b; });
     keys.forEach(function (k) {
       layers[k].sort(function (a, b) {
-        return (byId[a].model || "").localeCompare(byId[b].model || "") ||
-               byId[a].group.localeCompare(byId[b].group) || byId[a].label.localeCompare(byId[b].label);
+        return compare(byId[a].model || "", byId[b].model || "") ||
+               compare(byId[a].group, byId[b].group) || compare(byId[a].label, byId[b].label);
       });
     });
     var pos = {};
@@ -921,6 +977,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function renderGraph() {
     var edgesG = $("edges"), nodesG = $("nodes");
     edgesG.textContent = ""; nodesG.textContent = "";
+    viewport.classList.remove("has-hi", "has-mark");
+    graph = null;
     var view = current();
     if (!view) { $("empty").style.display = "flex"; $("status").textContent = ""; return; }
     $("empty").style.display = "none";
@@ -935,19 +993,21 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var ids = lineage(state.selected);
     var truncated = ids.length > MAX_NODES;
     if (truncated) {
-      // keep the selection and its closest neighbours
-      var keep = {}; keep[state.selected] = true;
+      // keep the selection and its closest neighbours (breadth first; a Set and a counter)
+      var inLineage = new Set(ids), keep = new Set([state.selected]), kept = [state.selected];
       var frontier = [state.selected];
-      while (frontier.length && Object.keys(keep).length < MAX_NODES) {
+      while (frontier.length && kept.length < MAX_NODES) {
         var next = [];
-        frontier.forEach(function (id) {
-          up[id].concat(down[id]).forEach(function (n) {
-            if (!keep[n.id] && ids.indexOf(n.id) >= 0 && Object.keys(keep).length < MAX_NODES) { keep[n.id] = true; next.push(n.id); }
-          });
-        });
+        for (var f = 0; f < frontier.length && kept.length < MAX_NODES; f++) {
+          var around = up[frontier[f]].concat(down[frontier[f]]);
+          for (var j = 0; j < around.length && kept.length < MAX_NODES; j++) {
+            var nid = around[j].id;
+            if (!keep.has(nid) && inLineage.has(nid)) { keep.add(nid); kept.push(nid); next.push(nid); }
+          }
+        }
         frontier = next;
       }
-      ids = Object.keys(keep);
+      ids = kept;
     }
     var counts = {}; ids.forEach(function (id) { var t = byId[id].type; counts[t] = (counts[t] || 0) + 1; });
     $("status").textContent = ids.length + " items: " + TYPES.filter(function (t) { return counts[t]; })
@@ -958,90 +1018,127 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 
   // Draw nodes and edges (edges from downAdj); unusedSet marks extra "unused" nodes (tooltip:
   // unusedText, e.g. "feeds no report")
+  // Text for SVG markup built as one string (much faster than an element at a time)
+  function esc(text) {
+    return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
   function draw(ids, upAdj, downAdj, selectedId, unusedSet, unusedText) {
     var edgesG = $("edges"), nodesG = $("nodes");
     var present = {}; ids.forEach(function (id) { present[id] = true; });
     var xy = layout(ids, upAdj, downAdj);
-    var edgeEls = [];
+    // Built once per drawing: node elements, each node's edge elements and neighbours (marking
+    // and highlighting touch only these), and the bounds Fit uses (from the layout)
+    graph = { xy: xy, selected: selectedId, nodes: {}, edges: {}, near: {}, bounds: null, hi: null };
+    ids.forEach(function (id) { graph.edges[id] = []; graph.near[id] = [id]; });
+    var edgeHtml = [], edgeEnds = [], nodeHtml = [];
     ids.forEach(function (id) {
       downAdj[id].forEach(function (n) {
         if (!present[n.id]) return;
         var a = xy[id], b = xy[n.id];
         var x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
         var mid = (x1 + x2) / 2;
-        var path = el("path", { d: "M" + x1 + "," + y1 + " C" + mid + "," + y1 + " " + mid + "," + y2 + " " + x2 + "," + y2,
-                                "class": "edge " + n.type });
-        path.dataset.from = id; path.dataset.to = n.id;
-        edgesG.appendChild(path); edgeEls.push(path);
+        edgeHtml.push('<path d="M' + x1 + "," + y1 + " C" + mid + "," + y1 + " " + mid + "," + y2 + " " + x2 + "," + y2 +
+                      '" class="edge ' + esc(n.type) + '"/>');
+        edgeEnds.push([id, n.id]);
+        graph.near[id].push(n.id); graph.near[n.id].push(id);
       });
     });
 
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     ids.forEach(function (id) {
       var n = byId[id], p = xy[id];
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + NODE_W); maxY = Math.max(maxY, p.y + NODE_H);
       var unused = n.unused || !!(unusedSet && unusedSet[id]);
-      var g = el("g", { "class": "node" + (id === selectedId ? " selected" : "") + (unused ? " unused" : ""),
-                        transform: "translate(" + p.x + "," + p.y + ")", tabindex: "0" });
-      g.appendChild(el("rect", { width: NODE_W, height: NODE_H, stroke: unused ? "var(--unused)" : color(n.type) }));
-      g.appendChild(el("rect", { width: 5, height: NODE_H, fill: color(n.type), stroke: "none" }));
       var label = n.label.length > 30 ? n.label.slice(0, 29) + "…" : n.label;
-      g.appendChild(el("text", { x: 12, y: 15 }, label));
       var sub = MULTI && n.model && n.type !== "model" ? n.model + (n.group ? " / " + n.group : "") : n.group;
-      g.appendChild(el("text", { x: 12, y: 28, "class": "type" },
-        TYPE_LABEL[n.type] + (sub ? " · " + (sub.length > 26 ? sub.slice(0, 25) + "…" : sub) : "")));
       var differs = MULTI && DATA.differs[id];
-      if (differs) g.appendChild(el("text", { x: NODE_W - 16, y: 16, "class": "diff" }, "≠"));
-      g.appendChild(el("title", {}, TYPE_LABEL[n.type] + ": " + n.label + (where(n) ? "\n" + where(n) : "") +
-        (n.unused ? "\nUnused" : unused ? "\n" + unusedText.charAt(0).toUpperCase() + unusedText.slice(1) : "") +
-        (differs ? "\n≠ Not the same in another model (see its details)" : "")));
-      // Click: mark it and show its details; double-click (or Enter): open its lineage
-      g.addEventListener("click", function (ev) { ev.stopPropagation(); mark(id); });
-      g.addEventListener("dblclick", function (ev) { ev.stopPropagation(); select(id); });
-      g.addEventListener("keydown", function (ev) {
-        if (ev.key === "Enter") select(id);
-        else if (ev.key === " ") { ev.preventDefault(); mark(id); }
-      });
-      g.addEventListener("mouseenter", function () { highlight(id); });
-      g.addEventListener("mouseleave", function () { highlight(state.marked); });
-      g.dataset.id = id;
-      nodesG.appendChild(g);
+      nodeHtml.push('<g class="node' + (id === selectedId ? " selected" : "") + (unused ? " unused" : "") +
+        '" transform="translate(' + p.x + "," + p.y + ')" tabindex="0" data-id="' + esc(id) + '">' +
+        '<rect width="' + NODE_W + '" height="' + NODE_H + '" stroke="' + (unused ? "var(--unused)" : color(n.type)) + '"/>' +
+        '<rect width="5" height="' + NODE_H + '" fill="' + color(n.type) + '" stroke="none"/>' +
+        '<text x="12" y="15">' + esc(label) + "</text>" +
+        '<text x="12" y="28" class="type">' + esc(TYPE_LABEL[n.type] + (sub ? " · " + (sub.length > 26 ? sub.slice(0, 25) + "…" : sub) : "")) + "</text>" +
+        (differs ? '<text x="' + (NODE_W - 16) + '" y="16" class="diff">≠</text>' : "") +
+        "<title>" + esc(TYPE_LABEL[n.type] + ": " + n.label + (where(n) ? "\n" + where(n) : "") +
+          (n.unused ? "\nUnused" : unused ? "\n" + unusedText.charAt(0).toUpperCase() + unusedText.slice(1) : "") +
+          (differs ? "\n≠ Not the same in another model (see its details)" : "")) + "</title></g>");
     });
-    shownEdges = edgeEls;
+    if (ids.length) graph.bounds = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    edgesG.innerHTML = edgeHtml.join("");
+    nodesG.innerHTML = nodeHtml.join("");
+    var paths = edgesG.children, gs = nodesG.children;
+    edgeEnds.forEach(function (ends, i) { graph.edges[ends[0]].push(paths[i]); graph.edges[ends[1]].push(paths[i]); });
+    ids.forEach(function (id, i) { graph.nodes[id] = gs[i]; });
+    viewport.classList.remove("has-hi", "has-mark");
     fit();
   }
 
+  // One handler set on the node group for every node. Click: mark it and show its details;
+  // double-click (or Enter): open its lineage; hover: highlight its lines
+  var nodesG = $("nodes");
+  function nodeOf(ev) { var g = ev.target.closest && ev.target.closest(".node"); return g && g.dataset.id ? g : null; }
+  nodesG.addEventListener("click", function (ev) { var g = nodeOf(ev); if (g) { ev.stopPropagation(); mark(g.dataset.id); } });
+  nodesG.addEventListener("dblclick", function (ev) { var g = nodeOf(ev); if (g) { ev.stopPropagation(); select(g.dataset.id); } });
+  nodesG.addEventListener("keydown", function (ev) {
+    var g = nodeOf(ev); if (!g) return;
+    if (ev.key === "Enter") select(g.dataset.id);
+    else if (ev.key === " ") { ev.preventDefault(); mark(g.dataset.id); }
+  });
+  // mouseenter/-leave do not bubble, but an ancestor sees them while capturing
+  nodesG.addEventListener("mouseenter", function (ev) {
+    if (ev.target.classList && ev.target.classList.contains("node")) highlight(ev.target.dataset.id);
+  }, true);
+  nodesG.addEventListener("mouseleave", function (ev) {
+    if (ev.target.classList && ev.target.classList.contains("node")) highlight(state.marked);
+  }, true);
+
   // ---------- marking (single click) ----------
-  var shownEdges = [];
+  // The drawn graph (see draw); null when nothing is drawn
+  var graph = null;
   function mark(id) {
+    var prev = state.marked;
     state.marked = id;
-    document.querySelectorAll(".node").forEach(function (g) {
-      g.classList.toggle("marked", !!id && g.dataset.id === id && id !== state.selected);
-    });
-    document.querySelectorAll(".result").forEach(function (row) {
-      row.classList.toggle("marked", !!id && row.dataset.id === id);
-    });
+    if (graph) {
+      if (prev && graph.nodes[prev]) graph.nodes[prev].classList.remove("marked");
+      if (id && graph.nodes[id] && id !== state.selected) graph.nodes[id].classList.add("marked");
+      viewport.classList.toggle("has-mark", !!id && !!graph.nodes[id]);
+    }
+    syncRows();
     highlight(id);
     renderDetails();
   }
 
   // Bring a node of the current graph into view (same zoom); nothing if it is not shown
   function reveal(id) {
-    var g = document.querySelector('.node[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
-    if (!g) return;
-    var m = g.transform.baseVal.consolidate().matrix, w = svg.clientWidth || 800, h = svg.clientHeight || 600;
-    var x = state.tx + m.e * state.scale, y = state.ty + m.f * state.scale;
+    var p = graph && graph.xy[id];
+    if (!p || !graph.nodes[id]) return;
+    var w = size().w, h = size().h;
+    var x = state.tx + p.x * state.scale, y = state.ty + p.y * state.scale;
     if (x < 0 || y < 50 || x + NODE_W * state.scale > w || y + NODE_H * state.scale > h) {
-      state.tx = w / 2 - (m.e + NODE_W / 2) * state.scale;
-      state.ty = h / 2 - (m.f + NODE_H / 2) * state.scale;
+      state.tx = w / 2 - (p.x + NODE_W / 2) * state.scale;
+      state.ty = h / 2 - (p.y + NODE_H / 2) * state.scale;
       apply();
     }
   }
 
+  // Highlight an item's lines and mark its neighbours (.rel): only the previous and the new
+  // item's elements change; everything else is dimmed by one class on the graph group
   function highlight(id) {
-    shownEdges.forEach(function (p) {
-      var on = id && (p.dataset.from === id || p.dataset.to === id);
-      p.classList.toggle("hi", !!on);
-      p.classList.toggle("dim", !!id && !on);
-    });
+    if (!graph) return;
+    var prev = graph.hi;
+    if (id && !graph.nodes[id]) id = null;
+    if (prev === id) return;
+    if (prev) {
+      graph.edges[prev].forEach(function (p) { p.classList.remove("hi"); });
+      graph.near[prev].forEach(function (n) { graph.nodes[n].classList.remove("rel"); });
+    }
+    if (id) {
+      graph.edges[id].forEach(function (p) { p.classList.add("hi"); });
+      graph.near[id].forEach(function (n) { graph.nodes[n].classList.add("rel"); });
+    }
+    graph.hi = id;
+    viewport.classList.toggle("has-hi", !!id);
   }
 
   // ---------- details ----------
@@ -1217,20 +1314,30 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 
   // ---------- pan & zoom ----------
   var svg = $("canvas"), viewport = $("viewport");
-  function apply() { viewport.setAttribute("transform", "translate(" + state.tx + "," + state.ty + ") scale(" + state.scale + ")"); }
+  // The graph area's size, read once (reading it right after drawing would make the browser lay
+  // out the new graph at once); read again after a resize or the Panels toggle
+  var svgSize = null;
+  function size() {
+    if (!svgSize) svgSize = { w: svg.clientWidth || 800, h: svg.clientHeight || 600 };
+    return svgSize;
+  }
+  function apply() {
+    viewport.setAttribute("transform", "translate(" + state.tx + "," + state.ty + ") scale(" + state.scale + ")");
+    svg.classList.toggle("small-text", state.scale < TEXT_MIN_SCALE);
+  }
   var MIN_READABLE = 0.45;
   // Fit the whole graph; if that makes text unreadable, zoom to the selected item instead
   // (unless forced by the Fit button)
+  // (bounds and positions from the layout: nothing is measured in the page)
   function fit(force) {
-    var box = viewport.getBBox(), w = svg.clientWidth || 800, h = svg.clientHeight || 600;
-    if (!box.width) return;
+    var box = graph && graph.bounds, w = size().w, h = size().h;
+    if (!box || !box.width) return;
     var scale = Math.min(1.2, (w - 40) / box.width, (h - 70) / box.height);
-    var selected = document.querySelector(".node.selected");
+    var selected = graph.selected && graph.xy[graph.selected];
     if (scale < MIN_READABLE && force !== true && selected) {
-      var b = selected.getBBox(), m = selected.transform.baseVal.consolidate().matrix;
       state.scale = 0.8;
-      state.tx = w / 2 - (m.e + b.width / 2) * state.scale;
-      state.ty = h / 2 - (m.f + b.height / 2) * state.scale;
+      state.tx = w / 2 - (selected.x + NODE_W / 2) * state.scale;
+      state.ty = h / 2 - (selected.y + NODE_H / 2) * state.scale;
     } else {
       state.scale = scale;
       state.tx = (w - box.width * scale) / 2 - box.x * scale;
@@ -1240,7 +1347,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   }
   $("fit").addEventListener("click", function () { fit(true); });
   function zoomBy(factor) {
-    var mx = svg.clientWidth / 2, my = svg.clientHeight / 2;
+    var mx = size().w / 2, my = size().h / 2;
     var s = Math.max(0.05, Math.min(4, state.scale * factor));
     state.tx = mx - (mx - state.tx) * (s / state.scale); state.ty = my - (my - state.ty) * (s / state.scale);
     state.scale = s; apply();
@@ -1254,7 +1361,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   $("everything").addEventListener("click", function () { show({ kind: "all" }); });
   $("panels").addEventListener("click", function () {
     $("app").classList.toggle("wide");
-    requestAnimationFrame(function () { fit(); });
+    requestAnimationFrame(function () { svgSize = null; fit(); });
   });
   svg.addEventListener("wheel", function (e) {
     e.preventDefault();
@@ -1262,7 +1369,12 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var factor = Math.exp(-e.deltaY * 0.0015), s = Math.max(0.05, Math.min(4, state.scale * factor));
     state.tx = mx - (mx - state.tx) * (s / state.scale); state.ty = my - (my - state.ty) * (s / state.scale);
     state.scale = s; apply();
+    // No text while the wheel (or a pinch) zooms: it comes back when it stops
+    svg.classList.add("zooming");
+    clearTimeout(wheelTimer);
+    wheelTimer = setTimeout(function () { svg.classList.remove("zooming"); }, 150);
   }, { passive: false });
+  var wheelTimer = null;
   var drag = null, dragged = false;
   svg.addEventListener("mousedown", function (e) {
     drag = { x: e.clientX - state.tx, y: e.clientY - state.ty, startX: e.clientX, startY: e.clientY };
@@ -1277,7 +1389,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   // A click on empty space (not a drag) clears the marked item
   svg.addEventListener("click", function () { if (!dragged && state.marked) mark(null); });
   window.addEventListener("mouseup", function () { drag = null; svg.classList.remove("dragging"); });
-  window.addEventListener("resize", function () { if (current()) fit(); });
+  window.addEventListener("resize", function () { svgSize = null; if (current()) fit(); });
   window.addEventListener("keydown", function (e) {
     if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); back(); return; }
     if (e.altKey && e.key === "ArrowRight") { e.preventDefault(); forward(); return; }
@@ -1310,6 +1422,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 
   // ---------- start: the system overview, then the linked item (#<item id>) if any ----------
   var linked = decodeURIComponent(location.hash.slice(1));  // read before render() resets it
+  size();  // measured before anything is drawn: cheap
   show({ kind: "overview" });
   if (linked && byId[linked]) select(linked);
 })();
