@@ -15,6 +15,7 @@ from html import escape
 from pathlib import Path
 
 from .compare import compare_entries, differences
+from .dax_format import format_dax
 from .design import PAGE_THEME_SCRIPT, page_css
 
 # Flow direction for each lineage edge type: True = same as the JSON edge, False = reversed.
@@ -179,6 +180,16 @@ def _visual_labels(doc: dict) -> dict[str, str]:
     return labels
 
 
+def _formatted_dax(node_type: str, details: dict) -> str | None:
+    """The details panel's formatted DAX of a measure or calculated column (dax_format), only
+    when it differs from the expression as written; "Expression" itself stays as written."""
+    expression = details.get("Expression")
+    if node_type not in ("measure", "column") or not isinstance(expression, str):
+        return None
+    formatted = format_dax(expression)
+    return formatted if formatted != expression else None
+
+
 def build_viewer_data(doc: dict) -> dict:
     """
     Nodes (with layer and details) and flow-direction edges for the viewer.
@@ -223,18 +234,20 @@ def build_viewer_data(doc: dict) -> dict:
     for node_id, node in nodes.items():
         node_type = node["type"]
         layer = 3 + depths.get(node_id, 0) if node_type == "measure" else layer_of[node_type]
-        viewer_nodes.append(
-            {
-                "id": node_id,
-                "type": node_type,
-                "label": visual_labels.get(node_id, node["label"]),
-                # a field's table, a visual's page, a page's report
-                "group": node.get("table") or node.get("page") or node.get("report") or "",
-                "layer": layer,
-                "unused": node_id in unused,
-                "details": details.get(node_id, {}),
-            }
-        )
+        viewer_node = {
+            "id": node_id,
+            "type": node_type,
+            "label": visual_labels.get(node_id, node["label"]),
+            # a field's table, a visual's page, a page's report
+            "group": node.get("table") or node.get("page") or node.get("report") or "",
+            "layer": layer,
+            "unused": node_id in unused,
+            "details": details.get(node_id, {}),
+        }
+        formatted = _formatted_dax(node_type, viewer_node["details"])
+        if formatted:
+            viewer_node["dax_formatted"] = formatted
+        viewer_nodes.append(viewer_node)
 
     counts = {t: sum(1 for n in viewer_nodes if n["type"] == t) for t in TYPE_ORDER}
     return {
@@ -432,11 +445,29 @@ h2 { font-size: 15px; margin: 0; word-break: break-word; }
 .section { padding: 10px 16px; border-bottom: 1px solid var(--border); }
 input[type=search] { width: 100%; padding: 7px 9px; border: 1px solid var(--border);
   border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px;
-  border: 1px solid var(--border); border-radius: 999px; cursor: pointer; user-select: none; }
-.chip input { margin: 0; }
+/* The type chips and "Only unused": one compact row of small toggles (wraps to 2 lines at most
+   at 290 px); the checkbox stays for keyboards and screen readers, the chip shows its state */
+.chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 7px; }
+.chip { display: inline-flex; align-items: center; gap: 3px; padding: 0 4px; font-size: 11px;
+  line-height: 18px; border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
+  user-select: none; position: relative; }
+.chip input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+.chip:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chip.is-off { opacity: .45; text-decoration: line-through; }
+.chip.unused { border-style: dashed; }
+.chip.unused.is-off { text-decoration: none; }
+.chip.unused:not(.is-off) { border-color: var(--unused); color: var(--unused); }
+.chip .dot { width: 7px; height: 7px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+/* "In this view (N)" / "Whole model (N)" above the list, with the switch between them */
+#listHead { display: flex; align-items: center; gap: 8px; padding: 6px 16px 2px; font-size: 12px; }
+#listHead[hidden] { display: none; }
+#listTitle { flex: 1; font-weight: 600; color: var(--muted); }
+.linkbtn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
+.linkbtn:hover { text-decoration: underline; }
+.result .twisty { width: 12px; flex: none; color: var(--muted); text-align: center; }
+.result.member { padding-left: 34px; }
+.result.grouprow .name { font-weight: 600; }
 #results { overflow: auto; flex: 1; padding: 4px 0; }
 .result { padding: 5px 16px; cursor: pointer; display: flex; gap: 8px; align-items: baseline; }
 .result:hover, .result.active { background: var(--bg); }
@@ -514,6 +545,20 @@ svg.small-text .band text, svg.zooming .band text { display: none; }
 pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid var(--border);
   border-radius: 8px; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 Consolas, monospace; }
 .links a { color: var(--accent); cursor: pointer; display: block; padding: 1px 0; }
+/* "Built from" / "Used by": one collapsible section per type, "Columns (42)" */
+.grouped > dt { margin-bottom: 2px; }
+.grouped .counts { text-transform: none; letter-spacing: 0; }
+details.sect { margin: 2px 0; }
+details.sect > summary { cursor: pointer; padding: 2px 0; font-weight: 600; list-style-position: inside; }
+details.sect > .links { padding-left: 14px; }
+.links a.more { color: var(--muted); }
+.daxhead { display: flex; align-items: baseline; gap: 8px; }
+.daxhead .linkbtn { font-size: 11px; text-transform: none; letter-spacing: 0; }
+/* The Guide hint: until the Guide has been opened once */
+#guideHint { font-size: 12px; color: var(--muted); background: var(--panel); border: 1px dashed var(--border);
+  border-radius: 8px; padding: 4px 8px; cursor: pointer; box-shadow: var(--shadow); }
+#guideHint[hidden] { display: none; }
+#detailsToggle { display: none; }
 .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
   color: var(--on-color); margin-right: 6px; }
 #guide { position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,.45); display: none;
@@ -539,9 +584,20 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   border: 1.5px solid var(--measure); border-radius: 4px; margin-right: 6px; }
 #guide .box.unused { border: 1.5px dashed var(--unused); }
 #guide .close { float: right; }
-@media (max-width: 1100px) { #app { grid-template-columns: 260px 1fr; } #details { display: none; }
-  #app.show-details #details { display: flex; position: fixed; right: 0; top: 0; bottom: 0;
-  width: min(360px, 100vw); z-index: 5; } }
+/* Narrow (e.g. the web UI's iframe): the details are an overlay on the right of the graph, at
+   most DETAILS_W wide, with a handle that collapses it to a slim tab (TAB_W). Fit, reveal() and
+   the off-screen markers leave its width out (graph area = graph width - overlay) */
+@media (max-width: 1199px) { #app { grid-template-columns: 260px 1fr; }
+  #details { position: fixed; right: 0; top: 0; bottom: 0; width: min(320px, calc(100vw - 40px));
+    z-index: 5; box-shadow: var(--shadow); }
+  #details .body { left: 26px; }
+  #detailsToggle { display: flex; position: absolute; left: 0; top: 0; bottom: 0; width: 26px; z-index: 1;
+    align-items: center; justify-content: center; padding: 0; border: 0; border-right: 1px solid var(--border);
+    background: var(--panel); color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+  #detailsToggle:hover { color: var(--text); background: var(--bg); }
+  #detailsToggle span { writing-mode: vertical-rl; white-space: nowrap; }
+  #app.details-collapsed #details { width: 26px; }
+  #app.details-collapsed #details .body { display: none; } }
 @media (max-width: 700px) { #app { grid-template-columns: 1fr; grid-template-rows: 45vh 55vh; }
   aside { border-right: 0; border-bottom: 1px solid var(--border); } }
 </style>
@@ -556,10 +612,10 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     </header>
     <div class="section">
       <input type="search" id="search" placeholder="Search tables, columns, measures, visuals, pages" aria-label="Search">
-      <div class="chips" id="types"></div>
-      <label class="chip" style="margin-top:8px"><input type="checkbox" id="unusedOnly"> Only unused columns/measures</label>
+      <div class="chips" id="types"><label class="chip unused is-off" title="Only unused columns and measures"><input type="checkbox" id="unusedOnly"> Only unused</label></div>
       <select id="modelFilter" aria-label="Model" hidden style="margin-top:8px; width:100%"><option value="">All models</option></select>
     </div>
+    <div id="listHead" hidden><span id="listTitle"></span><button class="linkbtn" id="listScope"></button></div>
     <div id="results" role="listbox"></div>
   </aside>
   <main>
@@ -583,6 +639,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       </span>
       <button class="btn" id="collapse" title="Collapse the expanded groups again" hidden>⊟ Collapse groups</button>
       <button class="btn" id="panels" title="Hide or show the side panels for a bigger graph">⇔ Panels</button>
+      <span id="guideHint" hidden title="Open the guide: how to read this view">New here?</span>
       <button class="btn" id="help" title="How to read this view">? Guide</button>
       <span id="status"></span>
     </div>
@@ -595,7 +652,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       <button class="btn off" data-side="bottom"></button>
     </div>
   </main>
-  <section id="details"><div class="body" id="detailsBody"></div></section>
+  <section id="details"><button id="detailsToggle" aria-controls="detailsBody"></button><div class="body" id="detailsBody"></div></section>
 </div>
 <div id="guide" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
   <div class="card">
@@ -646,7 +703,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       <li><b>⤴ Up a level</b>: from a column or measure to its table, from a visual to its page,
         from a page to its report, and from a table, report or source to the overview.</li>
       <li><b>− Fit +</b>: zoom out, frame the item and its direct neighbours (or the whole graph
-        when it fits with readable names), zoom in (the mouse wheel zooms too).</li>
+        when it fits with readable names; never closer than 75 %), zoom in (the mouse wheel zooms too).</li>
       <li><b>12 more →</b> at an edge of the graph: that many items lie beyond it. Click to move
         the nearest of them into view.</li>
       <li><b>⇔ Panels</b>: hide the side panels for a bigger graph (click again to bring them back).</li>
@@ -680,14 +737,19 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 
     <h3>The three panels</h3>
     <ul>
-      <li><b>Left</b>: search, show/hide item types, and "Only unused columns/measures". Click an
-        item to mark it (its node is highlighted in the graph when shown, and its details appear
-        on the right); double-click (or Enter) to open its lineage.</li>
+      <li><b>Left</b>: search, show/hide item types, and "Only unused" (columns and measures).
+        With a lineage open the list shows <b>what is in this view</b> (a group's members under its
+        ▸); <b>Whole model</b> lists everything. Click an item to mark it (its node is highlighted
+        in the graph when shown, and its details appear on the right); double-click (or Enter) to
+        open its lineage.</li>
       <li><b>Middle</b>: the graph. Drag to move, scroll to zoom, hover an item to highlight its
         lines; click to mark, double-click to open.</li>
-      <li><b>Right</b>: details of the marked (or shown) item - DAX, data type, storage mode,
-        rows/size when the .pbix or the Power BI service had statistics - and "Built from" / "Used by"
-        lists; clicking an entry there opens its lineage.</li>
+      <li><b>Right</b>: details of the marked (or shown) item - DAX (formatted; "Show as written"
+        shows it exactly as in the model), data type, storage mode, rows/size when the .pbix or the
+        Power BI service had statistics - and "Built from" / "Used by" per type ("Used by: 42
+        columns · 512 measures"), each type a section that opens with a click. Click an entry to
+        mark it, double-click to open its lineage. On a narrow page the details lie over the graph:
+        its handle collapses them to a tab.</li>
     </ul>
 
     <h3>Worth knowing</h3>
@@ -733,6 +795,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function fmt(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
   // Node text is hidden below this zoom (labels would be under ~9.5 px on screen)
   var TEXT_MIN_SCALE = 0.5, SEARCH_DELAY = 150, LIST_PAGE = 100;
+  // Fit never zooms in beyond this (labels about 14 px on screen); the + button still can
+  var FIT_MAX = 0.75;
   var compare = (window.Intl && Intl.Collator ? new Intl.Collator() : { compare: function (a, b) { return a.localeCompare(b); } }).compare;
 
   // ---------- text sizes ----------
@@ -843,13 +907,16 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     filter.addEventListener("change", function (e) { state.model = e.target.value; renderResults(); });
   }
 
+  var unusedChip = $("unusedOnly").parentNode;
+  if (MULTI) unusedChip.lastChild.textContent = " Unused";  // one chip more (Model): still 2 lines
   TYPES.forEach(function (t) {
     var chip = html("label", "chip");
+    chip.title = "Show or hide " + TYPE_LABEL[t].toLowerCase() + "s in the list";
     var box = html("input"); box.type = "checkbox"; box.checked = true;
-    box.addEventListener("change", function () { state.types[t] = box.checked; renderResults(); });
+    box.addEventListener("change", function () { state.types[t] = box.checked; chip.classList.toggle("is-off", !box.checked); renderResults(); });
     var dot = html("span", "dot"); dot.style.background = color(t);
     chip.appendChild(box); chip.appendChild(dot); chip.appendChild(document.createTextNode(TYPE_LABEL[t]));
-    $("types").appendChild(chip);
+    $("types").insertBefore(chip, unusedChip);
   });
   // The search waits until typing pauses (SEARCH_DELAY ms)
   var searchTimer = null;
@@ -858,7 +925,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     clearTimeout(searchTimer);
     searchTimer = setTimeout(function () { state.query = value; renderResults(); }, SEARCH_DELAY);
   });
-  $("unusedOnly").addEventListener("change", function (e) { state.unusedOnly = e.target.checked; renderResults(); });
+  $("unusedOnly").addEventListener("change", function (e) {
+    state.unusedOnly = e.target.checked; unusedChip.classList.toggle("is-off", !e.target.checked); renderResults();
+  });
   $("direction").addEventListener("change", function (e) { state.direction = e.target.value; renderGraph(); });
 
   // Computed once: every node's lower-case search text, and the list order (type, group, label)
@@ -868,26 +937,80 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     return b.rank - a.rank || compare(a.group, b.group) || compare(a.label, b.label);
   });
 
-  // The list shows LIST_PAGE rows at first, more when its end scrolls into view (or is clicked)
+  // The list shows LIST_PAGE rows at first, more when its end scrolls into view (or is clicked).
+  // With a lineage open it shows what is in the view ("In this view (N)": the drawn items and
+  // groups, a group's members below it when its ▸ is opened, or when the search matches them);
+  // "Whole model" switches to every item (always so on an overview). The switch is kept for this
+  // tab, in memory only.
   var listMatches = [], listShown = 0, listKey = null, rowEls = {}, rowActive = null, rowMarked = null, moreRow = null;
+  var listScope = "view", listOpen = {}, listGen = 0, listMember = {}, listView = null, listTop = 0, viewSorted = null;
+  var WHOLE = MULTI ? "All models" : "Whole model";
   var moreObserver = window.IntersectionObserver ? new IntersectionObserver(function (entries) {
     if (entries.some(function (e) { return e.isIntersecting; })) appendRows();
   }, { root: $("results") }) : null;
+  $("results").addEventListener("scroll", function (e) { listTop = e.target.scrollTop; }, { passive: true });
+  function listInView() { return listScope === "view" && !!graph && !!graph.selected; }
+  // "In this view" starts with the shown item, then follows the flow (sources first, as the
+  // graph reads); "Whole model" lists reports and pages first (LIST_ORDER)
+  function byListOrder(a, b) { return a.rank - b.rank || compare(a.group || "", b.group || "") || compare(a.label, b.label); }
+  // The drawn nodes in list order (once per drawing); a group's members sorted once
+  function viewOrder() {
+    if (viewSorted && viewSorted.gen === listGen) return viewSorted.list;
+    var list = graph.ids.filter(function (id) { return id !== graph.selected; }).map(N);
+    list.forEach(function (n) {
+      if (!n.isGroup || n.hay) return;
+      n.hay = (n.label + " " + (n.model || "")).toLowerCase(); n.rank = TYPES.indexOf(n.type);
+    });
+    viewSorted = { gen: listGen, list: [N(graph.selected)].concat(list.sort(byListOrder)) };  // the shown item first
+    return viewSorted.list;
+  }
+  function membersOf(g) {
+    return g.sortedMembers || (g.sortedMembers = g.members.map(function (id) { return byId[id]; }).sort(byListOrder));
+  }
   function renderResults(force) {
-    var key = [state.query, state.unusedOnly, state.model, TYPES.map(function (t) { return state.types[t] ? 1 : 0; }).join("")].join("\u0000");
+    var inView = listInView();
+    var key = [state.query, state.unusedOnly, state.model, TYPES.map(function (t) { return state.types[t] ? 1 : 0; }).join(""),
+               inView ? "v" + listGen : "m"].join("\u0000");
     if (key === listKey && force !== true) { syncRows(); return; }  // same input: only the marks change
     listKey = key;
-    var list = $("results"); list.textContent = "";
-    rowEls = {}; rowActive = null; rowMarked = null; listShown = 0; moreRow = null;
+    var head = $("listHead"), canView = !!(graph && graph.selected);
+    head.hidden = !canView;
+    if (canView) {
+      $("listTitle").textContent = inView ? "In this view (" + fmt(graph.itemCount) + ")" : WHOLE + " (" + fmt(DATA.nodes.length) + ")";
+      $("listScope").textContent = inView ? WHOLE : "In this view";
+      $("listScope").title = inView ? "List every item of the model" : "List only what is in the current view";
+    }
+    var list = $("results"), sameView = inView && listView === graph.selected, top = listTop;
+    list.textContent = "";
+    rowEls = {}; rowActive = null; rowMarked = null; listShown = 0; moreRow = null; listMember = {};
     var q = state.query;
-    listMatches = LIST_ORDER.filter(function (n) {
+    function keep(n) {
       if (!state.types[n.type]) return false;
       if (state.unusedOnly && !n.unused) return false;
       if (state.model && n.m !== state.model && !(n.type === "source" && (sourceModels[n.id] || {})[state.model])) return false;
-      return !q || n.hay.indexOf(q) >= 0;
-    });
+      return true;
+    }
+    function hit(n) { return !q || n.hay.indexOf(q) >= 0; }
+    if (!inView) listMatches = LIST_ORDER.filter(function (n) { return keep(n) && hit(n); });
+    else {
+      listMatches = [];
+      viewOrder().forEach(function (n) {
+        if (!n.isGroup) { if (keep(n) && hit(n)) listMatches.push(n); return; }
+        if (!state.types[n.type] || (state.model && n.m !== state.model)) return;
+        var members = membersOf(n).filter(keep);
+        if (!members.length) return;
+        var self = hit(n), found = self ? members : members.filter(hit);
+        if (!self && !found.length) return;
+        listMatches.push(n);
+        // its members: when opened in the list, or the ones the search found
+        var shown = listOpen[n.key] ? found : q && !self ? found : [];
+        shown.forEach(function (m) { listMember[m.id] = n.id; listMatches.push(m); });
+      });
+    }
+    listView = inView ? graph.selected : null;
     if (!listMatches.length) list.appendChild(html("div", "result muted", "No matches"));
     appendRows();
+    if (sameView && top) list.scrollTop = top;  // the same view drawn again (a group expanded)
   }
   function appendRows() {
     var list = $("results");
@@ -904,16 +1027,21 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     syncRows();
   }
   function resultRow(n) {
-    var row = html("div", "result");
+    var row = html("div", "result" + (n.isGroup ? " grouprow" : listMember[n.id] ? " member" : ""));
     row.setAttribute("role", "option");
     row.tabIndex = 0;
     row.dataset.id = n.id;
+    if (n.isGroup) {
+      row.appendChild(html("span", "twisty", listOpen[n.key] ? "▾" : "▸"));
+      row.setAttribute("aria-expanded", listOpen[n.key] ? "true" : "false");
+    }
     var dot = html("span", "dot"); dot.style.background = color(n.type);
     row.appendChild(dot);
     row.appendChild(html("span", "name", n.label));
     if (MULTI && DATA.differs[n.id]) row.appendChild(html("span", "diff", "≠"));
     if (where(n)) row.appendChild(html("span", "group", where(n)));
-    row.title = TYPE_LABEL[n.type] + ": " + n.label + (n.unused ? " (unused)" : "");
+    row.title = n.isGroup ? TYPE_LABEL[n.type] + " group: " + n.label + "\n▸ its members here · click: details · double-click: expand it in the graph"
+      : TYPE_LABEL[n.type] + ": " + n.label + (n.unused ? " (unused)" : "");
     rowEls[n.id] = row;
     return row;
   }
@@ -927,21 +1055,50 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (to && els[to]) els[to].classList.add(cls);
     return to && els[to] ? to : null;
   }
+  $("listScope").addEventListener("click", function () {
+    listScope = listScope === "view" ? "model" : "view";
+    listTop = 0; $("results").scrollTop = 0;
+    renderResults();
+  });
+  // A click marks, a double-click opens - also when the first click rebuilt the rows under the
+  // mouse (a group expanded, new details): the second click opens what the first one marked
+  var lastClick = null;
+  function firstClick(id) { lastClick = { id: id, t: Date.now(), opened: false }; }
+  function secondClick(ev) {
+    if (!(ev.detail >= 2 && lastClick && !lastClick.opened && Date.now() - lastClick.t < 700)) return false;
+    lastClick.opened = true; lastClick.t = Date.now();
+    open(lastClick.id);
+    return true;
+  }
+  function justOpened() { return !!lastClick && lastClick.opened && Date.now() - lastClick.t < 700; }
   // One handler set for the whole list. Like the graph: click marks it (details on the right),
-  // double-click (or Enter) opens its lineage
+  // double-click (or Enter) opens its lineage; a group's ▸ lists its members below it
   function rowOf(ev) { var row = ev.target.closest && ev.target.closest(".result"); return row && row.parentNode === $("results") ? row : null; }
+  function toggleListGroup(gid) {
+    var g = groupNodes[gid]; if (!g) return;
+    listOpen[g.key] = !listOpen[g.key];
+    renderResults(true);
+    if (rowEls[gid]) rowEls[gid].focus({ preventScroll: true });
+  }
   $("results").addEventListener("click", function (ev) {
+    if (secondClick(ev)) return;
     var row = rowOf(ev); if (!row) return;
-    if (row === moreRow) { appendRows(); return; }
-    if (row.dataset.id) jump(row.dataset.id);
+    if (row === moreRow) { lastClick = null; appendRows(); return; }
+    if (!row.dataset.id) return;
+    if (ev.target.classList.contains("twisty")) { lastClick = null; toggleListGroup(row.dataset.id); return; }
+    firstClick(row.dataset.id);
+    jump(row.dataset.id);
   });
   $("results").addEventListener("dblclick", function (ev) {
-    var row = rowOf(ev); if (row && row.dataset.id) select(row.dataset.id);
+    if (justOpened()) return;
+    var row = rowOf(ev); if (row && row.dataset.id && !ev.target.classList.contains("twisty")) open(row.dataset.id);
   });
   $("results").addEventListener("keydown", function (ev) {
     var row = rowOf(ev); if (!row || !row.dataset.id) return;
-    if (ev.key === "Enter") select(row.dataset.id);
+    if (ev.key === "Enter") open(row.dataset.id);
     else if (ev.key === " ") { ev.preventDefault(); jump(row.dataset.id); }
+    else if ((ev.key === "ArrowRight" || ev.key === "ArrowLeft") && groupNodes[row.dataset.id] &&
+             !!listOpen[groupNodes[row.dataset.id].key] === (ev.key === "ArrowLeft")) toggleListGroup(row.dataset.id);
   });
 
   // ---------- lineage ----------
@@ -1184,7 +1341,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     viewport.classList.remove("has-hi", "has-mark");
     graph = null; groupNodes = {};
     var view = current();
-    if (!view) { $("empty").style.display = "flex"; $("status").textContent = ""; scheduleMarkers(); return; }
+    if (!view) { $("empty").style.display = "flex"; $("status").textContent = ""; scheduleMarkers(); renderResults(); return; }
     $("empty").style.display = "none";
 
     if (view.kind !== "item") {
@@ -1192,6 +1349,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       $("status").textContent = ov.status;
       draw(ov.ids, ov.up, ov.down, null, ov.unused, feedsNone(ov.top), ov.bands);
       fit();
+      renderResults();  // an overview lists the whole model
       return;
     }
 
@@ -1204,7 +1362,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       (grouped.groups ? " (grouped: " + grouped.groups + (grouped.groups === 1 ? " group)" : " groups)") : "");
     draw(grouped.ids, grouped.up, grouped.down, state.selected, null, "");
     graph.memberOf = grouped.memberOf;
+    graph.itemCount = ids.length;
     fit(focus);
+    renderResults();  // "In this view": the drawn items and groups
   }
 
   // ---------- groups (big lineages) ----------
@@ -1327,7 +1487,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     // Built once per drawing: node elements, each node's edge elements and neighbours (marking
     // and highlighting touch only these), and the bounds Fit uses (from the layout)
     graph = { ids: ids, xy: xy, box: box, limit: placed.limit, selected: selectedId, nodes: {}, edges: {}, near: {},
-              bounds: null, hi: null, memberOf: {} };
+              bounds: null, hi: null, memberOf: {}, itemCount: ids.length };
+    listGen++;  // a new drawing: "In this view" lists it
     ids.forEach(function (id) { graph.edges[id] = []; graph.near[id] = [id]; });
     var edgeHtml = [], edgeEnds = [], nodeHtml = [], bandHtml = [], bandEdges = {};
     function path(x1, y1, x2, y2, type, title) {
@@ -1459,13 +1620,14 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     syncRows();
     highlight(id);
     renderDetails();
+    if (id) { autoOpenDetails(); keepClear(id); }  // narrow pages: never under the details overlay
   }
 
   // Bring a node of the current graph into view (same zoom); nothing if it is not shown
   function reveal(id) {
     var p = graph && graph.xy[id];
     if (!p || !graph.nodes[id]) return;
-    var w = size().w, h = size().h;
+    var w = areaW(), h = size().h;
     var x = state.tx + p.x * state.scale, y = state.ty + p.y * state.scale;
     var b = graph.box[id];
     if (x < 0 || y < 50 || x + b.w * state.scale > w || y + b.h * state.scale > h) {
@@ -1495,17 +1657,108 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   }
 
   // ---------- details ----------
+  // Entries are links with data-id, one handler set on the panel: a click marks the item (its
+  // group expands), a double-click opens its lineage (also when the click rebuilt the details:
+  // firstClick / secondClick). Long lists are built LIST_PAGE links at a time.
+  var detailsObserver = window.IntersectionObserver ? new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) { if (e.isIntersecting && e.target.fill) e.target.fill(); });
+  }, { root: $("detailsBody") }) : null;
+  var SECTION_OPEN = 10;  // a section with more items starts collapsed
+  function plain(t) { return t.label + (where(t) ? " (" + where(t) + ")" : "") + (t.unused ? " (unused)" : ""); }
+  function typed(t) { return TYPE_LABEL[t.type] + ": " + t.label + (where(t) ? " (" + where(t) + ")" : ""); }
+  function count(k, type) { return fmt(k) + " " + TYPE_LABEL[type].toLowerCase() + (k === 1 ? "" : "s"); }
+  function byLabelId(a, b) { return compare(byId[a].label, byId[b].label) || compare(byId[a].group || "", byId[b].group || ""); }
+  function lazyLinks(dd, ids, text) {
+    var done = 0, more = null;
+    function fill() {
+      if (more) { if (detailsObserver) detailsObserver.unobserve(more); more.remove(); more = null; }
+      var end = Math.min(ids.length, done + LIST_PAGE), frag = document.createDocumentFragment();
+      for (var i = done; i < end; i++) {
+        var a = html("a", null, text(byId[ids[i]])); a.dataset.id = ids[i]; frag.appendChild(a);
+      }
+      done = end;
+      if (done < ids.length) {
+        more = html("a", "more", "Show more (" + fmt(ids.length - done) + " more)"); more.fill = fill;
+        frag.appendChild(more);
+      }
+      dd.appendChild(frag);
+      if (more && detailsObserver) detailsObserver.observe(more);
+    }
+    if (!ids.length) dd.appendChild(html("span", "muted", "-")); else fill();
+  }
+  // One list: "<title> (N)"
   function linkList(title, ids) {
     var box = html("div", "kv");
-    box.appendChild(html("dt", null, title + " (" + ids.length + ")"));
+    box.appendChild(html("dt", null, title + " (" + fmt(ids.length) + ")"));
     var dd = html("dd", "links");
-    ids.slice(0, 200).forEach(function (id) {
-      var target = byId[id];
-      var a = html("a", null, TYPE_LABEL[target.type] + ": " + target.label + (where(target) ? " (" + where(target) + ")" : ""));
-      a.addEventListener("click", function () { select(id); });
-      dd.appendChild(a);
+    lazyLinks(dd, ids, typed);
+    box.appendChild(dd);
+    return box;
+  }
+  // "<title>: 42 columns · 512 measures · 18 visuals" and a collapsible section per bucket
+  // ({name, ids}; more than SECTION_OPEN items: collapsed unless open), its links sorted and
+  // built when it first opens
+  function sections(title, summary, buckets, openAll) {
+    var box = html("div", "kv grouped"), dt = html("dt", null, title + ": ");
+    dt.appendChild(html("span", "counts", summary || "-"));
+    box.appendChild(dt);
+    var dd = html("dd");
+    buckets.forEach(function (b) {
+      var sec = html("details", "sect"), list = html("div", "links"), filled = false;
+      sec.appendChild(html("summary", null, b.name + " (" + fmt(b.ids.length) + ")"));
+      sec.appendChild(list);
+      function fill() { if (!filled) { filled = true; lazyLinks(list, b.ids.slice().sort(byLabelId), plain); } }
+      if (openAll || b.ids.length <= SECTION_OPEN) { sec.open = true; fill(); }
+      sec.addEventListener("toggle", function () { if (sec.open) fill(); });
+      dd.appendChild(sec);
     });
-    if (!ids.length) dd.appendChild(html("span", "muted", "-"));
+    box.appendChild(dd);
+    return box;
+  }
+  // "Built from" / "Used by": per type, in the flow order
+  function byType(title, ids) {
+    var per = {};
+    ids.forEach(function (id) { var t = byId[id].type; (per[t] = per[t] || []).push(id); });
+    var types = TYPES.filter(function (t) { return per[t]; });
+    return sections(title, types.map(function (t) { return count(per[t].length, t); }).join(" · "),
+      types.map(function (t) { return { name: TYPE_LABEL[t] + "s", ids: per[t] }; }));
+  }
+  $("detailsBody").addEventListener("click", function (ev) {
+    if (secondClick(ev)) return;
+    var a = ev.target.closest && ev.target.closest("a");
+    if (!a) return;
+    if (a.fill) { lastClick = null; a.fill(); return; }
+    if (!a.dataset.id) return;  // e.g. a model's own lineage viewer (a real link)
+    firstClick(a.dataset.id);
+    jump(a.dataset.id);
+  });
+  $("detailsBody").addEventListener("dblclick", function (ev) {
+    if (justOpened()) return;
+    var a = ev.target.closest && ev.target.closest("a[data-id]");
+    if (a) open(a.dataset.id);
+  });
+  // DAX: formatted (dax_formatted, when it differs) or as written; the choice is kept for the
+  // session (sessionStorage, try/catch: without it, for this page) and applies to every item
+  var DAX_KEY = "pbixtractor.lineage.daxAsWritten", daxAsWritten = false;
+  try { daxAsWritten = sessionStorage.getItem(DAX_KEY) === "1"; } catch (e) { /* no storage */ }
+  function expressionBox(n, value) {
+    var box = html("div", "kv"), dt = html("dt", "daxhead");
+    dt.appendChild(html("span", null, "Expression"));
+    var formatted = n.dax_formatted && !daxAsWritten;
+    if (n.dax_formatted) {
+      var toggle = html("button", "linkbtn", daxAsWritten ? "Show formatted" : "Show as written");
+      toggle.id = "daxToggle";
+      toggle.title = daxAsWritten ? "Show the DAX formatted (daxformatter.com style)" : "Show the DAX exactly as it is written in the model";
+      toggle.addEventListener("click", function () {
+        daxAsWritten = !daxAsWritten;
+        try { sessionStorage.setItem(DAX_KEY, daxAsWritten ? "1" : "0"); } catch (e) { /* no storage */ }
+        renderDetails();
+      });
+      dt.appendChild(toggle);
+    }
+    box.appendChild(dt);
+    var dd = html("dd");
+    dd.appendChild(html("pre", null, formatted ? n.dax_formatted : value));
     box.appendChild(dd);
     return box;
   }
@@ -1545,20 +1798,20 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (where(n)) body.appendChild(html("div", "muted", where(n)));
     if (n.type === "model") modelLink(body, n);
     if (n.id !== state.selected && !(n.type === "model" && view && view.kind === "model" && view.id === n.id)) {
-      var open = html("button", "btn primary", "Open its lineage");
-      open.style.marginTop = "10px";
-      open.title = "Same as double-clicking the item";
-      open.addEventListener("click", function () { select(n.id); });
-      body.appendChild(open);
+      var openBtn = html("button", "btn primary", "Open its lineage");
+      openBtn.style.marginTop = "10px";
+      openBtn.title = "Same as double-clicking the item";
+      openBtn.addEventListener("click", function () { select(n.id); });
+      body.appendChild(openBtn);
     }
     var dl = html("dl"); dl.style.marginTop = "12px";
     Object.keys(n.details).forEach(function (key) {
+      var value = String(n.details[key]);
+      if (key === "Expression") { dl.appendChild(expressionBox(n, value)); return; }
       var box = html("div", "kv");
       box.appendChild(html("dt", null, key));
-      var value = String(n.details[key]);
-      var dd = html("dd");
-      if (key === "Expression") dd.appendChild(html("pre", null, value)); else dd.textContent = value;
-      box.appendChild(dd); dl.appendChild(box);
+      box.appendChild(html("dd", null, value));
+      dl.appendChild(box);
     });
     body.appendChild(dl);
     if (MULTI && DATA.same[n.id]) {
@@ -1575,12 +1828,14 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       return;
     }
     [["Built from", up], ["Used by", down]].forEach(function (pair) {
-      var ids = pair[1][n.id].map(function (m) { return m.id; }).filter(function (id) { return byId[id]; });
-      body.appendChild(linkList(pair[0], ids));
+      var seen = new Set(), ids = [];
+      pair[1][n.id].forEach(function (m) { if (byId[m.id] && !seen.has(m.id)) { seen.add(m.id); ids.push(m.id); } });
+      body.appendChild(byType(pair[0], ids));
     });
   }
 
-  // A group: its name, count and members (a click on one expands the group and marks it)
+  // A group: its name, count and members, in the same sections (a click on one expands the
+  // group and marks it); a layer's group lists its members per table (page)
   function groupDetails(body, g) {
     var badge = html("span", "badge", TYPE_LABEL[g.type] + " group"); badge.style.background = color(g.type);
     var title = html("h2"); title.appendChild(badge); title.appendChild(document.createTextNode(g.label));
@@ -1593,15 +1848,19 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     button.title = "Same as double-clicking the group";
     button.addEventListener("click", function () { expand(g.id); });
     body.appendChild(button);
-    var box = html("div", "kv"); box.style.marginTop = "12px";
-    box.appendChild(html("dt", null, "Members (" + fmt(g.members.length) + ")"));
-    var dd = html("dd", "links");
-    g.members.slice().sort(function (a, b) { return compare(byId[a].label, byId[b].label); }).forEach(function (id) {
-      var a = html("a", null, byId[id].label + (byId[id].unused ? " (unused)" : ""));
-      a.addEventListener("click", function () { jump(id); });
-      dd.appendChild(a);
-    });
-    box.appendChild(dd);
+    var buckets;
+    if (g.whole) {
+      var per = {}, names = [];
+      g.members.forEach(function (id) {
+        var name = byId[id].group || (g.type === "visual" ? "(no page)" : "(no table)");
+        if (!per[name]) { per[name] = []; names.push(name); }
+        per[name].push(id);
+      });
+      buckets = names.sort(compare).map(function (name) { return { name: name, ids: per[name] }; });
+    } else buckets = [{ name: TYPE_LABEL[g.type] + "s", ids: g.members }];
+    var box = sections("Members", count(g.members.length, g.type) +
+      (g.whole ? " in " + fmt(buckets.length) + (g.type === "visual" ? " pages" : " tables") : ""), buckets, !g.whole);
+    box.style.marginTop = "12px";
     body.appendChild(box);
   }
 
@@ -1625,8 +1884,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       var a = html("a", null, (pair[1] ? "= identical · " : "≠ " + pair[2].join(", ") + " differs · ") + target.model +
         (target.group ? " (" + target.group + ")" : ""));
       a.title = pair[1] ? "The same (DAX formatting ignored)" : "Same name, different " + pair[2].join(", ");
-      a.addEventListener("click", function () { mark(target.id); });
-      a.addEventListener("dblclick", function () { select(target.id); });
+      a.dataset.id = target.id;  // click: mark, double-click: open (the panel's handlers)
       dd.appendChild(a);
     });
     box.appendChild(dd);
@@ -1651,8 +1909,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var view = current();
     state.selected = view && view.kind !== "overview" && view.kind !== "all" ? view.id : null;
     state.marked = null;
-    renderResults(); renderGraph(); renderDetails(); updateButtons();
-    if (state.selected) $("app").classList.add("show-details");
+    if (state.selected) autoOpenDetails();  // before the drawing: Fit leaves its width out
+    renderGraph(); renderDetails(); updateButtons();  // renderGraph also renders the list
     // Keep the address in sync (#<item id>) so a view can be linked to, without adding history
     try {
       history.replaceState(null, "", state.selected ? "#" + encodeURIComponent(state.selected) : location.pathname + location.search);
@@ -1701,6 +1959,51 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (!svgSize) svgSize = { w: svg.clientWidth || 800, h: svg.clientHeight || 600 };
     return svgSize;
   }
+  // The visible graph area's width: the graph minus the details overlay (narrow pages)
+  function areaW() { return size().w - covered(); }
+
+  // ---------- the details panel on narrow pages ----------
+  // Below NARROW_W px page width the details are an overlay of at most DETAILS_W px on the right
+  // of the graph, collapsed to a slim tab (TAB_W) by its handle. It starts collapsed and opens by
+  // itself when an item is marked or opened, until the handle was used. Computed from these
+  // numbers, never measured in the page.
+  var NARROW_W = 1200, DETAILS_W = 320, TAB_W = 26, detailsTouched = false;
+  var NARROW = window.matchMedia ? window.matchMedia("(max-width: " + (NARROW_W - 1) + "px)") : { matches: false };
+  function detailsCollapsed() { return $("app").classList.contains("details-collapsed"); }
+  function covered() {
+    if (!NARROW.matches || $("app").classList.contains("wide")) return 0;
+    return detailsCollapsed() ? TAB_W : Math.min(DETAILS_W, Math.max(0, window.innerWidth - 40));
+  }
+  function updateDetailsToggle() {
+    var collapsed = detailsCollapsed(), t = $("detailsToggle");
+    t.innerHTML = "<span>" + (collapsed ? "◂ Details" : "Hide details ▸") + "</span>";
+    t.title = collapsed ? "Show the details panel" : "Collapse the details panel to a tab (the graph gets the space)";
+    t.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    $("offscreen").style.right = covered() + "px";  // the right marker and the toolbar stay beside it
+    $("toolbar").style.right = covered() + 10 + "px";
+  }
+  function setDetails(open, byHand) {
+    if (byHand) detailsTouched = true;
+    if (open === !detailsCollapsed()) return;
+    $("app").classList.toggle("details-collapsed", !open);
+    updateDetailsToggle();
+    scheduleMarkers();
+  }
+  // Opened by itself (narrow pages) for a marked / opened item, unless collapsed by hand
+  function autoOpenDetails() { if (NARROW.matches && !detailsTouched) setDetails(true); }
+  // A marked item under the overlay is moved into the visible area
+  function keepClear(id) {
+    var p = graph && graph.xy[id];
+    if (!p || !graph.nodes[id] || !covered()) return;
+    if (state.tx + (p.x + graph.box[id].w) * state.scale > areaW()) reveal(id);
+  }
+  $("detailsToggle").addEventListener("click", function () {
+    setDetails(detailsCollapsed(), true);
+    if (!detailsCollapsed()) keepClear(state.marked || state.selected);
+  });
+  $("app").classList.add("details-collapsed");
+  updateDetailsToggle();
+
   function apply() {
     viewport.setAttribute("transform", "translate(" + state.tx + "," + state.ty + ") scale(" + state.scale + ")");
     svg.classList.toggle("small-text", state.scale < TEXT_MIN_SCALE);
@@ -1708,8 +2011,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   }
   // Fit: the whole view when it fits with readable text (zoom >= TEXT_MIN_SCALE), else the
   // selected item and its direct neighbours (a group counts as one); focus = other ids to frame
-  // (an expanded group's members, an item jumped to). Never zooms in beyond 1. Bounds and
-  // positions come from the layout: nothing is measured in the page.
+  // (an expanded group's members, an item jumped to). Never zooms in beyond FIT_MAX (labels
+  // about 14 px; + zooms further). Everything is framed in the visible graph area (areaW: the
+  // details overlay left out). Bounds and positions come from the layout: nothing is measured.
   function fit(focus) {
     if (!graph || !graph.bounds) return;
     var whole = scaleFor(graph.bounds);
@@ -1724,7 +2028,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (scale >= TEXT_MIN_SCALE) { frame(box, scale); return; }
     // too many neighbours to read at once: readable text around the item (vertically centred),
     // without empty space left or right of the neighbours (the markers show the rest)
-    var s = TEXT_MIN_SCALE, w = size().w, h = size().h, c = anchor ? { x: anchor.x + size1.w / 2, y: anchor.y + size1.h / 2 }
+    var s = TEXT_MIN_SCALE, w = areaW(), h = size().h, c = anchor ? { x: anchor.x + size1.w / 2, y: anchor.y + size1.h / 2 }
       : { x: box.x + box.width / 2, y: box.y + box.height / 2 };
     function place(mid, lo, hi, from, to) {  // screen offset: centred, kept inside [lo, hi] of the box
       return Math.max(Math.min((from + to) / 2 - mid * s, from + 20 - lo * s), to - 20 - hi * s);
@@ -1744,11 +2048,11 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     apply();
   }
   function scaleFor(box) {
-    return Math.min(1, (size().w - 40) / Math.max(box.width, 1), (size().h - TOP_H - 20) / Math.max(box.height, 1));
+    return Math.min(FIT_MAX, (areaW() - 40) / Math.max(box.width, 1), (size().h - TOP_H - 20) / Math.max(box.height, 1));
   }
   function frame(box, scale) {
     state.scale = scale;
-    state.tx = (size().w - box.width * scale) / 2 - box.x * scale;
+    state.tx = (areaW() - box.width * scale) / 2 - box.x * scale;
     state.ty = TOP_H + (size().h - TOP_H - 10 - box.height * scale) / 2 - box.y * scale;
     apply();
   }
@@ -1779,7 +2083,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function hiddenBySide() {
     var out = { left: [], right: [], top: [], bottom: [] };
     if (!graph) return out;
-    var w = size().w, h = size().h, s = state.scale;
+    var w = areaW(), h = size().h, s = state.scale;
     graph.ids.forEach(function (id) {
       var p = graph.xy[id], x = state.tx + p.x * s, y = state.ty + p.y * s, nw = graph.box[id].w * s, nh = graph.box[id].h * s;
       if (x + nw < 0) out.left.push(id);
@@ -1811,13 +2115,13 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       if (!best || (side === "left" || side === "top" ? v > best : v < best)) best = v;
     });
     if (side === "left") state.tx = 30 - best * s;
-    else if (side === "right") state.tx = size().w - 30 - (best + NODE_MAX_W) * s;
+    else if (side === "right") state.tx = areaW() - 30 - (best + NODE_MAX_W) * s;
     else if (side === "top") state.ty = TOOLBAR_H + 30 - best * s;
     else state.ty = size().h - 30 - (best + nodeHeight(2)) * s;
     apply();
   }
   function zoomBy(factor) {
-    var mx = size().w / 2, my = size().h / 2;
+    var mx = areaW() / 2, my = size().h / 2;
     var s = Math.max(0.05, Math.min(4, state.scale * factor));
     state.tx = mx - (mx - state.tx) * (s / state.scale); state.ty = my - (my - state.ty) * (s / state.scale);
     state.scale = s; apply();
@@ -1831,6 +2135,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   $("everything").addEventListener("click", function () { show({ kind: "all" }); });
   $("panels").addEventListener("click", function () {
     $("app").classList.toggle("wide");
+    updateDetailsToggle();
     requestAnimationFrame(function () { svgSize = null; fit(); });
   });
   svg.addEventListener("wheel", function (e) {
@@ -1863,6 +2168,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   // A new height can change how layers wrap: then the view is laid out again
   window.addEventListener("resize", function () {
     svgSize = null;
+    updateDetailsToggle();
     if (!current()) return;
     if (graph && graph.limit !== wrapLimit()) { renderGraph(); restoreMark(); } else fit();
   });
@@ -1870,7 +2176,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); back(); return; }
     if (e.altKey && e.key === "ArrowRight") { e.preventDefault(); forward(); return; }
     if (e.key !== "Escape") return;
-    if ($("guide").classList.contains("open")) showGuide(false); else $("app").classList.remove("show-details");
+    if ($("guide").classList.contains("open")) showGuide(false); else if (NARROW.matches) setDetails(false, true);
   });
 
   // ---------- guide ----------
@@ -1881,20 +2187,24 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     step.appendChild(dot); step.appendChild(document.createTextNode(TYPE_LABEL[t]));
     $("guideFlow").appendChild(step);
   });
+  // The Guide never opens by itself: a small "New here?" hint shows beside its button until it
+  // has been opened once (remembered per browser; storage can be blocked, e.g. file:// in some
+  // browsers: then the hint shows each time)
+  var GUIDE_KEY = "pbixtractor.lineage.guideSeen";
   function showGuide(open) {
     $("guide").classList.toggle("open", open);
-    if (open) $("guideClose").focus();
+    if (!open) return;
+    $("guideClose").focus();
+    $("guideHint").hidden = true;
+    try { localStorage.setItem(GUIDE_KEY, "1"); } catch (e) { /* no storage */ }
   }
   $("help").addEventListener("click", function () { showGuide(true); });
+  $("guideHint").addEventListener("click", function () { showGuide(true); });
   $("guideClose").addEventListener("click", function () { showGuide(false); });
   $("guide").addEventListener("click", function (e) { if (e.target === $("guide")) showGuide(false); });
-  // Open the guide automatically the first time (storage can be blocked, e.g. file:// in some browsers)
-  try {
-    if (!localStorage.getItem("pbixtractor.lineageGuideSeen")) {
-      showGuide(true);
-      localStorage.setItem("pbixtractor.lineageGuideSeen", "1");
-    }
-  } catch (e) { /* no storage: the Guide button still works */ }
+  var guideSeen = false;
+  try { guideSeen = localStorage.getItem(GUIDE_KEY) === "1"; } catch (e) { /* no storage: the hint shows */ }
+  $("guideHint").hidden = guideSeen;
 
   // ---------- start: the system overview, then the linked item (#<item id>) if any ----------
   // A changed #<item id> (a link, an edited address): an item of the drawn view (also inside a

@@ -180,7 +180,7 @@ def test_big_lineages_are_grouped_and_fit_frames_the_item(doc):
     # Fit: the item and its direct neighbours unless the whole view is readable; never above 1
     fit = script[script.index("function fit(") : script.index("function frame(")]
     assert "whole >= TEXT_MIN_SCALE" in fit and "graph.near[ids[0]]" in fit
-    assert "Math.min(1, " in fit
+    assert "Math.min(FIT_MAX, " in fit
     # Off-screen markers: from layout coordinates, at most one update per animation frame
     assert 'id="offscreen"' in html and html.count('class="btn off"') == 4
     assert "requestAnimationFrame(updateMarkers)" in script
@@ -305,3 +305,76 @@ def test_lineage_across_models(doc):
     assert data["rls"] == ["Alpha", "Beta"]
     html = render_multi_lineage_html([(_entry(doc, "a", "Alpha"), build_viewer_data(doc))])
     assert "<title>Lineage across models</title>" in html and '"multi":true' in html
+
+
+def test_formatted_dax_is_an_extra_field(doc, data):
+    """D13: measures and calculated columns carry dax_formatted next to the DAX as written."""
+    import copy
+
+    nodes = {n["id"]: n for n in data["nodes"]}
+    # A calculated column written over several lines: formatted differently, original kept
+    column = nodes["column:Sales[Is Big]"]
+    assert column["details"]["Expression"].startswith("IF (\n")
+    assert column["dax_formatted"] == "IF ( Sales[Amount] > 100, TRUE ( ) )"
+    # Already formatted: no extra field
+    assert "dax_formatted" not in nodes["measure:Sales[Total Amount]"]
+    # Tables (also calculated ones), pages, visuals: never
+    assert not any("dax_formatted" in n for n in data["nodes"] if n["type"] not in ("measure", "column"))
+
+    other = copy.deepcopy(doc)
+    for table in other["model"]["tables"]:
+        for measure in table["measures"]:
+            if measure["name"] == "Total Amount":
+                measure["expression"] = "sum(Sales[Amount])"
+    measure = next(n for n in build_viewer_data(other)["nodes"] if n["id"] == "measure:Sales[Total Amount]")
+    assert measure["details"]["Expression"] == "sum(Sales[Amount])"  # as written
+    assert measure["dax_formatted"] == "SUM ( Sales[Amount] )"
+
+
+def test_formatted_dax_is_not_given_to_a_calculated_table():
+    from pbixtractor.lineage_html import _formatted_dax
+
+    details = {"Expression": "filter(Sales,Sales[Amount]>1)"}
+    assert _formatted_dax("table", details) is None
+    assert _formatted_dax("measure", details) == "FILTER ( Sales, Sales[Amount] > 1 )"
+    assert _formatted_dax("measure", {}) is None
+
+
+def test_panels_list_details_dax_guide_and_fit(doc):
+    """Ticket 04: the list in view, grouped details, the DAX toggle, the Guide hint, Fit's cap and
+    the narrow details overlay (string checks: no JS test runner)."""
+    import re
+
+    html = render_lineage_html(doc)
+    script = html[html.rindex("<script>") :]
+    # The list: "In this view (N)" with a "Whole model" switch, kept in memory only
+    assert '<div id="listHead" hidden><span id="listTitle"></span><button class="linkbtn" id="listScope">' in html
+    assert '"In this view (" + fmt(graph.itemCount) + ")"' in script
+    assert 'MULTI ? "All models" : "Whole model"' in script
+    assert 'var listScope = "view"' in script  # memory only: never stored
+    assert "listScope" not in "".join(re.findall(r"[^\n]*Storage[^\n]*", script))
+    assert "renderResults();  // \"In this view\": the drawn items and groups" in script
+    # Compact chips with "Only unused" in the same row
+    assert '<div class="chips" id="types"><label class="chip unused is-off"' in html
+    assert ".chip { display: inline-flex; align-items: center; gap: 3px; padding: 0 4px; font-size: 11px;" in html
+    # Details: per type, collapsible, no 200 cap, lazy rows
+    assert "ids.slice(0, 200)" not in script and "SECTION_OPEN = 10" in script
+    assert 'html("details", "sect")' in script and 'byType(pair[0], ids)' in script
+    assert "function lazyLinks(dd, ids, text)" in script
+    # Formatted DAX with its toggle (sessionStorage, try/catch)
+    assert "n.dax_formatted && !daxAsWritten" in script
+    assert '"Show as written"' in script and '"Show formatted"' in script
+    assert 'DAX_KEY = "pbixtractor.lineage.daxAsWritten"' in script
+    # The Guide: never by itself; a hint until opened once (localStorage, every access caught)
+    assert 'var GUIDE_KEY = "pbixtractor.lineage.guideSeen";' in script
+    assert "lineageGuideSeen" not in script
+    assert script.count("showGuide(true)") == 2  # only the Guide button and the hint open it
+    assert 'id="guideHint" hidden' in html and "New here?" in html
+    for access in re.findall(r"[^\n]*localStorage\.[gs]etItem[^\n]*", script):
+        assert access.strip().startswith("try {"), access
+    # Fit: never beyond 0.75, in the visible area (the details overlay left out)
+    assert re.search(r"var FIT_MAX = ([\d.]+);", script).group(1) == "0.75"
+    assert "function areaW() { return size().w - covered(); }" in script
+    assert "var NARROW_W = 1200, DETAILS_W = 320, TAB_W = 26" in script
+    assert "@media (max-width: 1199px)" in html and "#app.details-collapsed #details { width: 26px; }" in html
+    assert 'id="detailsToggle"' in html

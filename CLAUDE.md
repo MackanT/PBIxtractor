@@ -282,7 +282,10 @@ src/pbixtractor/
                     Starts on an overview (source → table → page, or → report when several
                     reports; table feeds it if it is upstream; tables feeding nothing dashed).
                     Toolbar: back/forward history (Alt+←/→), "Up a level" (column/measure →
-                    table, visual → page, page → report, else overview), zoom −/Fit/+, "Panels" (hide side panels), Guide overlay.
+                    table, visual → page, page → report, else overview), zoom −/Fit/+, "Panels" (hide side panels), Guide overlay
+                    (never opens by itself: a "New here?" hint beside "? Guide" until it was
+                    opened once, localStorage pbixtractor.lineage.guideSeen, every access in
+                    try/catch - without storage the hint shows each time).
                     #<node id> in the URL opens that item (kept in sync via replaceState). Left
                     list = graph: click marks (highlight + details, reveal() pans to it),
                     double-click/Enter opens the lineage.
@@ -318,8 +321,9 @@ src/pbixtractor/
                     opening): the whole view when it fits at zoom ≥ TEXT_MIN_SCALE, else the
                     selected item + its direct neighbours (graph.near; groups count as one);
                     when even those need a smaller zoom: TEXT_MIN_SCALE, vertically centred on
-                    the item, no empty space left/right of the neighbours; never above 1;
-                    layout coordinates only. Off-screen markers (#offscreen, contain: strict,
+                    the item, no empty space left/right of the neighbours; never above
+                    FIT_MAX 0.75 (ticket 04: labels ~14 px; + zooms further); layout
+                    coordinates only. Off-screen markers (#offscreen, contain: strict,
                     shown via the class "on" - visibility, cheaper than display): "12 more ←"
                     per edge, counted from graph.xy and the pan/zoom (hiddenBySide), updated
                     in one requestAnimationFrame after apply() and only once the wheel stops;
@@ -349,6 +353,34 @@ src/pbixtractor/
                     character, 1/100 em; others 0.5 em; band headers × 1.04) - no canvas, no
                     DOM measurement. fmt() formats counts with a regex (toLocaleString's first
                     call cost ~25 ms at 4x on load).
+                    Panels (ticket 04): the left list shows "In this view (N)" while a lineage
+                    is open (listInView: the drawn items and groups, the shown item first, then
+                    in flow order; a group row's ▸ (or a search matching its members) lists its
+                    members below it; listGen per drawing is part of listKey) with a "Whole
+                    model" switch ("All models" in MULTI) back to LIST_ORDER - kept in memory
+                    for the tab only; overviews always list the whole model (#listHead hidden).
+                    Type chips + "Only unused" are one row of small toggles (checkbox visually
+                    hidden, class is-off; ≤ 2 lines at 290 px). Details: "Built from" / "Used
+                    by: 42 columns · 512 measures" (byType → sections(): a <details> per type,
+                    more than SECTION_OPEN 10 items start collapsed, links sorted and built on
+                    first open, 100 at a time - lazyLinks, IntersectionObserver / "Show more";
+                    no 200 cap); group details use the same sections (a layer group: per
+                    table/page). Detail links carry data-id, one handler set on #detailsBody:
+                    click = jump (mark, expanding its group), double-click = open; the second
+                    click of a double-click opens what the first marked even when that rebuilt
+                    the rows (firstClick / secondClick, shared with the list). Formatted DAX:
+                    build_viewer_data() adds dax_formatted (dax_format.format_dax, measures and
+                    calculated columns, only when it differs; details "Expression" stays as
+                    written, so JSON / catalog compare / lineage.json keep their meaning); the
+                    panel shows it with a "Show as written" / "Show formatted" toggle (#daxToggle,
+                    sessionStorage pbixtractor.lineage.daxAsWritten, all items). Visible graph
+                    area: areaW() = graph width - covered(); below NARROW_W 1200 px the details
+                    are a fixed overlay (min(DETAILS_W 320, 100vw - 40)) with a handle
+                    (#detailsToggle) collapsing it to a TAB_W 26 px tab; it starts collapsed and
+                    opens by itself on a mark / opened item until the handle was used (Escape
+                    collapses it); Fit, reveal(), the markers (#offscreen and #toolbar get
+                    right = covered) and zoom centre use areaW; a marked item under the overlay
+                    is revealed (keepClear). Computed from these numbers, never measured.
                     Several models (the catalog's lineage.html): build_multi_viewer_data([(entry,
                     build_viewer_data)]) → ids "<key>|<id>", nodes carry m (key) + model (name);
                     same-named sources merged ("source|<name lower, no brackets>", shared = count,
