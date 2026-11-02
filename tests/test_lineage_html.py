@@ -189,6 +189,46 @@ def test_big_lineages_are_grouped_and_fit_frames_the_item(doc):
     assert "#offscreen { position: absolute; inset: 0; z-index: 2; pointer-events: none; contain: strict; }" in html
 
 
+def test_overview_bands_wrapping_and_labels(doc):
+    """Source bands, wrapped layers and sized labels (string checks: no JS test runner)."""
+    import re
+
+    html = render_lineage_html(doc)
+    script = html[html.rindex("<script>") :]
+
+    def number(name):
+        return float(re.search(name + r" = ([\d.]+)", script).group(1))
+
+    # Boxes as wide as the name needs, up to ~320 px; 2 lines, then "…"
+    assert number("NODE_MIN_W") == 210 and number("NODE_MAX_W") == 320
+    assert "function wrapLabel(text, room, font, maxLines)" in script
+    assert 'wrapLabel(n.label, NODE_MAX_W - pads, "l", 2)' in script
+    assert 'truncate(t.sub, s.w - t.pads, "s")' in script  # the sub-line: one line, cut
+    # Widths from a per-character table: never a DOM (or canvas) measurement per node
+    assert "getBBox" not in script and "getComputedTextLength" not in script
+    assert "measureText" not in script
+    table = re.search(r'var CHAR_W = \(("[^;]*)\)\.split', script).group(1)
+    assert len("".join(re.findall(r'"([^"]*)"', table)).split(",")) == 95  # " " .. "~"
+    # Readable text: at the threshold zoom a label is 9-10 px on screen; the CSS matches
+    assert 9 <= number("LABEL_FONT") * number("TEXT_MIN_SCALE") <= 10
+    assert f".node text {{ fill: var(--text); font-size: {number('LABEL_FONT'):g}px;" in html
+    assert f".node .type {{ fill: var(--muted); font-size: {number('SUB_FONT'):g}px; }}" in html
+    assert "svg.small-text .band text, svg.zooming .band text { display: none; }" in html
+    # Tall layers wrap into columns closer together than the layers are
+    assert "function wrapColumns(blocks, gap, limit)" in script
+    assert number("WRAP_GAP") < number("GAP_X")
+    assert "(size().h - TOP_H - 20) / TEXT_MIN_SCALE" in script
+    # Overview: tables in a band per source ("No source" last), one edge per source and band
+    assert '<g id="bands"></g><g id="edges"></g>' in html
+    assert '"No source · "' in script and 'byId[id].label + " · " + tables(' in script
+    assert "draw(ov.ids, ov.up, ov.down, null, ov.unused, feedsNone(ov.top), ov.bands)" in script
+    assert "bandEdges[key]" in script
+    # Fit on a big overview: from the left at the readable zoom (the markers show the rest)
+    assert "function fromLeft(box)" in script and "fromLeft(graph.bounds)" in script
+    # Counts formatted without toLocaleString (its first call is slow)
+    assert "toLocaleString(" not in script
+
+
 def test_html_has_guide(doc):
     html = render_lineage_html(doc)
     assert 'id="help"' in html and 'id="guide"' in html

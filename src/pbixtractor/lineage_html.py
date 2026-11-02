@@ -441,7 +441,7 @@ input[type=search] { width: 100%; padding: 7px 9px; border: 1px solid var(--bord
 .result { padding: 5px 16px; cursor: pointer; display: flex; gap: 8px; align-items: baseline; }
 .result:hover, .result.active { background: var(--bg); }
 .result.marked { background: var(--bg); box-shadow: inset 3px 0 0 var(--attn); }
-.node text.diff { fill: var(--attn); font-weight: 700; font-size: 15px; }
+.node text.diff { fill: var(--attn); font-weight: 700; font-size: 22px; }
 .result .diff, a .diff { color: var(--attn); font-weight: 700; }
 .notice { margin: 10px 0 4px; padding: 6px 9px; border-radius: 8px; font-size: 12px;
   border-left: 3px solid var(--attn); background: var(--bg); }
@@ -468,15 +468,18 @@ main { position: relative; min-width: 0; min-height: 0; }
 svg { width: 100%; height: 100%; display: block; cursor: grab; }
 svg.dragging { cursor: grabbing; }
 .node rect { fill: var(--panel); stroke-width: 1.5; rx: 6; }
-.node text { fill: var(--text); font-size: 12px; pointer-events: none; }
-.node .type { fill: var(--muted); font-size: 10px; }
+.node text { fill: var(--text); font-size: 19px; pointer-events: none; }
+.node .type { fill: var(--muted); font-size: 16px; }
 .node { cursor: pointer; }
 .node.selected rect { stroke-width: 3; }
 .node.marked rect.box { stroke: var(--attn); stroke-width: 3.5; }
 /* A group of columns / measures / visuals: a stack of boxes and a "+" that expands it */
 .node rect.stack { stroke-width: 1.2; }
 .node .expand rect { fill: var(--bg); stroke: var(--border); stroke-width: 1; }
-.node .expand text { fill: var(--accent); font-size: 15px; font-weight: 700; text-anchor: middle; }
+.node .expand text { fill: var(--accent); font-size: 22px; font-weight: 700; text-anchor: middle; }
+/* The overview's source bands: a frame around a source's tables, "<source> · <n> tables" */
+.band rect { fill: var(--panel); fill-opacity: .45; stroke: var(--border); stroke-width: 1.5; rx: 10; }
+.band text { fill: var(--muted); font-size: 19px; font-weight: 600; }
 .edge title { pointer-events: none; }
 /* Off-screen markers: how many items lie beyond each edge of the graph area. Laid out on their
    own (like the details): a changed count never makes the browser lay out the graph again */
@@ -498,6 +501,7 @@ svg.dragging { cursor: grabbing; }
 #viewport.has-mark .node:not(.rel):not(.marked) { opacity: .25; }
 /* Text too small to read (zoomed out) or while the wheel zooms: hidden, shapes stay */
 svg.small-text .node text, svg.zooming .node text { display: none; }
+svg.small-text .band text, svg.zooming .band text { display: none; }
 #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   color: var(--muted); pointer-events: none; }
 /* The details are laid out on their own (absolute + contain): new details then never make the
@@ -582,7 +586,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       <button class="btn" id="help" title="How to read this view">? Guide</button>
       <span id="status"></span>
     </div>
-    <svg id="canvas" aria-label="Lineage graph"><g id="viewport"><g id="edges"></g><g id="nodes"></g></g></svg>
+    <svg id="canvas" aria-label="Lineage graph"><g id="viewport"><g id="bands"></g><g id="edges"></g><g id="nodes"></g></g></svg>
     <div id="empty">Select an item on the left to see its lineage.</div>
     <div id="offscreen">
       <button class="btn off" data-side="left"></button>
@@ -713,15 +717,78 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   var TOP = MULTI || (DATA.stats.report || 0) > 1 ? "report" : "page";
   function plural(top) { return top === "report" ? "reports" : "pages"; }
   function feedsNone(top) { return top === "report" ? "feeds no report" : "feeds no report page"; }
-  var NODE_W = 210, NODE_H = 34, GAP_X = 90, GAP_Y = 12;
+  // Node boxes: as wide as the name needs (NODE_MIN_W..NODE_MAX_W); a longer name wraps onto a
+  // 2nd line, only beyond 2 lines it ends in "…". Wrapped columns of one layer sit WRAP_GAP
+  // apart (closer than GAP_X between layers), source bands BAND_PAD inside their frame.
+  var NODE_MIN_W = 210, NODE_MAX_W = 320, GAP_X = 90, GAP_Y = 12, WRAP_GAP = 30;
+  var BAND_PAD = 12, BAND_GAP = 24;
+  // Font sizes (layout units): at TEXT_MIN_SCALE a label is LABEL_FONT * 0.5 = 9.5 px on screen
+  var LABEL_FONT = 19, SUB_FONT = 16, LINE_H = 23, PAD_L = 14, PAD_R = 12;
   // In a lineage, a kind with more than GROUP_THRESHOLD items in one layer is shown as one group
   // per table (columns, measures) or page (visuals); several models: per model and table
   var GROUP_THRESHOLD = 40, GROUPED = { column: "columns", measure: "measures", visual: "visuals" };
   var TOOLBAR_H = 50;  // the toolbar covers the top of the graph area
-  function fmt(n) { return n.toLocaleString("en-US"); }
-  // Node text is hidden below this zoom (12 px labels would be under ~6 px on screen)
+  var TOP_H = 90;  // ... and with the status line below it: what Fit keeps clear
+  // 1,234: counts only (whole numbers); without toLocaleString, whose first call is slow
+  function fmt(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+  // Node text is hidden below this zoom (labels would be under ~9.5 px on screen)
   var TEXT_MIN_SCALE = 0.5, SEARCH_DELAY = 150, LIST_PAGE = 100;
   var compare = (window.Intl && Intl.Collator ? new Intl.Collator() : { compare: function (a, b) { return a.localeCompare(b); } }).compare;
+
+  // ---------- text sizes ----------
+  // Widths from a table of the page font's (Source Sans 3, embedded) advance widths per
+  // character, in 1/100 em, for " " to "~" (other characters: 0.5 em); the semi-bold band labels
+  // are about 4 % wider. Nothing is measured in the page (no canvas or DOM text measurement).
+  var CHAR_W = ("20,29,43,50,50,82,61,25,30,30,42,50,25,31,25,35,50,50,50,50,50,50,50,50,50,50,25,25,50,50,50,42," +
+    "85,54,59,57,61,53,49,62,65,26,48,58,49,73,65,66,57,66,57,53,54,64,51,79,51,48,54,30,35,30,50,50," +
+    "54,50,55,46,55,50,29,50,54,25,25,49,25,83,55,54,55,55,35,42,34,54,47,72,45,47,42,30,24,30,50").split(",").map(Number);
+  var FONT_PX = { l: LABEL_FONT / 100, s: SUB_FONT / 100, b: LABEL_FONT * 1.04 / 100 };
+  function textWidth(text, font) {
+    var w = 0;
+    for (var i = 0; i < text.length; i++) { var c = text.charCodeAt(i) - 32; w += c >= 0 && c < 95 ? CHAR_W[c] : 50; }
+    return w * FONT_PX[font];
+  }
+  // The longest start of text that fits room with "…" after it (whole text when it fits)
+  function truncate(text, room, font) {
+    if (textWidth(text, font) <= room) return text;
+    var lo = 0, hi = text.length - 1;
+    while (lo < hi) {
+      var mid = Math.ceil((lo + hi) / 2);
+      if (textWidth(text.slice(0, mid) + "…", font) <= room) lo = mid; else hi = mid - 1;
+    }
+    return text.slice(0, lo).replace(/\s+$/, "") + "…";
+  }
+  // A name on at most maxLines lines of room width: broken between words (inside a word only
+  // when one word is too long); the last line ends in "…" when the rest does not fit
+  function wrapLabel(text, room, font, maxLines) {
+    var lines = [], rest = text;
+    while (rest && lines.length < maxLines - 1 && textWidth(rest, font) > room) {
+      var words = rest.split(" "), line = words[0], i = 1;
+      while (i < words.length && textWidth(line + " " + words[i], font) <= room) line += " " + words[i++];
+      if (textWidth(line, font) > room) line = truncate(line, room, font).slice(0, -1) || rest.charAt(0);
+      lines.push(line);
+      rest = rest.slice(line.length).replace(/^\s+/, "");
+    }
+    if (rest) lines.push(truncate(rest, room, font));
+    return lines;
+  }
+  // A node's text and size before its column's width is known: need = the width its name and
+  // sub-line ask for (NODE_MIN_W..NODE_MAX_W), lines = the name wrapped at NODE_MAX_W
+  function nodeText(n) {
+    if (n.sized) return n.sized;
+    var extra = n.isGroup ? 34 : MULTI && DATA.differs[n.id] ? 24 : 0, sub;  // room for "+" / "≠"
+    if (n.isGroup) sub = TYPE_LABEL[n.type] + " group" + (MULTI && n.model ? " · " + n.model : "");
+    else {
+      var place = MULTI && n.model && n.type !== "model" ? n.model + (n.group ? " / " + n.group : "") : n.group;
+      sub = TYPE_LABEL[n.type] + (place ? " · " + place : "");
+    }
+    var pads = PAD_L + PAD_R + extra;
+    var need = Math.max(textWidth(n.label, "l"), textWidth(sub, "s")) + pads;
+    var lines = wrapLabel(n.label, NODE_MAX_W - pads, "l", 2);
+    return (n.sized = { need: Math.max(NODE_MIN_W, Math.min(NODE_MAX_W, Math.ceil(need))), pads: pads,
+                        lines: lines, sub: sub, h: nodeHeight(lines.length) });
+  }
+  function nodeHeight(lines) { return 35 + LINE_H * lines; }
 
   var byId = {}, up = {}, down = {};
   DATA.nodes.forEach(function (n) { byId[n.id] = n; up[n.id] = []; down[n.id] = []; });
@@ -894,10 +961,31 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     return Object.keys(ids);
   }
 
-  // Layered layout: layer = data flow position; order within a layer by barycenter of neighbours
-  function layout(ids, upAdj, downAdj) {
+  // How tall a column may be (layout units): the graph area below the toolbar and the status
+  // line, at the readable zoom
+  function wrapLimit() { return Math.max(400, Math.floor((size().h - TOP_H - 20) / TEXT_MIN_SCALE)); }
+  // Fill blocks ({h}) into columns no taller than limit, keeping their order (column by column,
+  // about equally tall); returns [[block, ...], ...]
+  function wrapColumns(blocks, gap, limit) {
+    var total = blocks.reduce(function (s, b) { return s + b.h + gap; }, -gap);
+    var target = total / Math.max(1, Math.ceil(total / limit)), columns = [], col = null, height = 0;
+    blocks.forEach(function (b) {
+      if (!col || (col.length && (height + gap + b.h > limit || height + (gap + b.h) / 2 > target))) {
+        col = []; columns.push(col); height = -gap;
+      }
+      col.push(b); height += gap + b.h;
+    });
+    return columns;
+  }
+  // Layered layout: layer = data flow position; order within a layer by barycenter of neighbours.
+  // bands (the overview's sources): {list: [{id, label, members}], of: {table id: band id}}; a
+  // banded layer keeps the band order and its source layer the name order. A layer taller than
+  // the graph area at the readable zoom wraps into side-by-side columns (a band inside its
+  // frame); each column is as wide as its widest box. Returns {xy, box (id -> {w, h, ...}),
+  // bands (band id -> {x, y, w, h, lines}), limit}.
+  function layout(ids, upAdj, downAdj, bands) {
     var present = {}; ids.forEach(function (id) { present[id] = true; });
-    var layers = {};
+    var layers = {}, fixed = {};
     ids.forEach(function (id) { var l = N(id).layer; (layers[l] = layers[l] || []).push(id); });
     var keys = Object.keys(layers).map(Number).sort(function (a, b) { return a - b; });
     keys.forEach(function (k) {
@@ -907,10 +995,20 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
                compare(na.group, nb.group) || compare(na.label, nb.label);
       });
     });
+    if (bands) {
+      bands.list.forEach(function (b) { if (b.members.length) fixed[N(b.members[0]).layer] = true; });
+      ids.forEach(function (id) { if (N(id).type === "source") fixed[N(id).layer] = true; });
+      keys.forEach(function (k) {  // a banded layer: the bands in order, then anything else
+        if (!fixed[k] || N(layers[k][0]).type === "source") return;
+        var rest = layers[k].filter(function (id) { return !bands.of[id]; });
+        layers[k] = [].concat.apply([], bands.list.map(function (b) { return b.members; })).concat(rest);
+      });
+    }
     var pos = {};
     function index() { keys.forEach(function (k) { layers[k].forEach(function (id, i) { pos[id] = i; }); }); }
     function sweep(order, neighbours) {
       order.forEach(function (k) {
+        if (fixed[k]) return;
         layers[k].sort(function (a, b) { return bary(a) - bary(b); });
         index();
       });
@@ -922,15 +1020,61 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     }
     index();
     for (var i = 0; i < 2; i++) { sweep(keys.slice(1), upAdj); sweep(keys.slice(0, -1).reverse(), downAdj); }
-    var tallest = Math.max.apply(null, keys.map(function (k) { return layers[k].length; }));
-    var xy = {};
-    keys.forEach(function (k, column) {
-      var offset = (tallest - layers[k].length) * (NODE_H + GAP_Y) / 2;
-      layers[k].forEach(function (id, row) {
-        xy[id] = { x: column * (NODE_W + GAP_X), y: offset + row * (NODE_H + GAP_Y) };
+
+    // blocks per layer: a node, or a band (its members wrapped inside the frame)
+    var limit = wrapLimit(), box = {}, bandBox = {}, bandById = {}, columns = [];
+    if (bands) bands.list.forEach(function (b) { bandById[b.id] = b; });
+    ids.forEach(function (id) { var t = nodeText(N(id)); box[id] = { w: t.need, h: t.h, text: t }; });
+    function bandBlock(b) {
+      var head = BAND_PAD + 2 * LINE_H;  // room for a 2-line header while wrapping
+      var inner = wrapColumns(b.members.map(function (id) { return { id: id, h: box[id].h }; }), GAP_Y, limit - head - BAND_PAD);
+      var widths = inner.map(function (col) { return Math.max.apply(null, col.map(function (c) { return box[c.id].w; })); });
+      var innerW = widths.reduce(function (s, w) { return s + w; }, 0) + WRAP_GAP * (inner.length - 1);
+      var w = Math.max(innerW, Math.min(NODE_MAX_W, Math.ceil(textWidth(b.label, "b")))) + 2 * BAND_PAD;
+      var lines = wrapLabel(b.label, w - 2 * BAND_PAD, "b", 2), top = BAND_PAD + LINE_H * lines.length + 6;
+      var tallest = Math.max.apply(null, inner.map(function (col) { return col.reduce(function (s, c) { return s + box[c.id].h + GAP_Y; }, -GAP_Y); }));
+      return { band: b, inner: inner, widths: widths, lines: lines, top: top, w: w, h: top + tallest + BAND_PAD };
+    }
+    var layerCols = keys.map(function (k) {
+      var blocks = [], seen = {};
+      layers[k].forEach(function (id) {
+        var bid = bands && bands.of[id];
+        if (!bid) { blocks.push({ id: id, w: box[id].w, h: box[id].h }); return; }
+        if (!seen[bid]) { seen[bid] = true; blocks.push(bandBlock(bandById[bid])); }
+      });
+      var cols = wrapColumns(blocks, blocks.some(function (b) { return b.band; }) ? BAND_GAP : GAP_Y, limit);
+      return cols.map(function (col) {
+        var height = col.reduce(function (s, b) { return s + b.h + (b.band ? BAND_GAP : GAP_Y); }, 0) - (col[col.length - 1].band ? BAND_GAP : GAP_Y);
+        return { blocks: col, w: Math.max.apply(null, col.map(function (b) { return b.w; })), h: height };
       });
     });
-    return xy;
+    var tallestCol = 0;
+    layerCols.forEach(function (cols) { cols.forEach(function (c) { tallestCol = Math.max(tallestCol, c.h); }); });
+    var xy = {}, x = 0;
+    layerCols.forEach(function (cols) {
+      cols.forEach(function (c, ci) {
+        if (ci) x += WRAP_GAP;
+        var y = (tallestCol - c.h) / 2;
+        c.blocks.forEach(function (b) {
+          if (!b.band) {  // a column's boxes are as wide as its widest
+            xy[b.id] = { x: x, y: y }; box[b.id].w = c.w;
+            y += b.h + GAP_Y;
+            return;
+          }
+          bandBox[b.band.id] = { x: x, y: y, w: c.w, h: b.h, lines: b.lines, label: b.band.label, n: b.band.members.length };
+          var bx = x + BAND_PAD;
+          b.inner.forEach(function (col, i) {
+            var by = y + b.top;
+            col.forEach(function (m) { xy[m.id] = { x: bx, y: by }; box[m.id].w = b.widths[i]; by += m.h + GAP_Y; });
+            bx += b.widths[i] + WRAP_GAP;
+          });
+          y += b.h + BAND_GAP;
+        });
+        x += c.w;
+      });
+      x += GAP_X;
+    });
+    return { xy: xy, box: box, bands: bandBox, limit: limit };
   }
 
   // ---------- overviews ----------
@@ -979,12 +1123,38 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       if (t === "table" && !feeds[id]) unused[id] = true;
       count[t] = (count[t] || 0) + 1;
     });
+    // Tables grouped under their source (the first by name when several load it), by name;
+    // tables without a source in one "No source" band at the end
+    var bands = { list: [], of: {} }, bandOfSource = {}, loose = [];
+    var sources = ids.filter(function (id) { return byId[id].type === "source"; })
+      .sort(function (a, b) { return compare(byId[a].label, byId[b].label); });
+    var rank = {}; sources.forEach(function (id, i) { rank[id] = i; });
+    var byName = function (a, b) {
+      return compare(byId[a].label, byId[b].label) || compare(byId[a].model || "", byId[b].model || "");
+    };
+    sources.forEach(function (id) { bandOfSource[id] = { id: "band:" + rank[id], source: id, members: [] }; });
+    ids.forEach(function (id) {
+      if (byId[id].type !== "table") return;
+      var first = null;
+      oUp[id].forEach(function (e) { if (rank[e.id] !== undefined && (first === null || rank[e.id] < rank[first])) first = e.id; });
+      if (first === null) loose.push(id); else bandOfSource[first].members.push(id);
+    });
+    function tables(k) { return fmt(k) + (k === 1 ? " table" : " tables"); }
+    sources.forEach(function (id) {
+      var b = bandOfSource[id];
+      if (!b.members.length) return;
+      b.members.sort(byName);
+      b.label = byId[id].label + " · " + tables(b.members.length);
+      bands.list.push(b);
+    });
+    if (loose.length) bands.list.push({ id: "band:none", source: null, members: loose.sort(byName), label: "No source · " + tables(loose.length) });
+    bands.list.forEach(function (b) { b.members.forEach(function (id) { bands.of[id] = b.id; }); });
     var n = Object.keys(unused).length;
     var text = (m ? byId["model|" + m].label + ": " : MULTI ? "Everything: " : "Overview: ") +
       count.source + " sources → " + count.table + " tables → " + (count[top] || 0) + " " + plural(top) +
       (n ? " · " + n + (n === 1 ? " table " : " tables ") + (n === 1 ? feedsNone(top) : feedsNone(top).replace("feeds", "feed")) : "") +
       " · click: details, double-click: lineage";
-    return { ids: ids, up: oUp, down: oDown, unused: unused, top: top, status: text };
+    return { ids: ids, up: oUp, down: oDown, unused: unused, top: top, status: text, bands: bands };
   }
   // Several models, one level up: sources loaded by more than one model -> models -> reports
   function modelOverview() {
@@ -1010,7 +1180,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   // Draw the current view; focus = ids to frame instead of the usual Fit (an expanded group)
   function renderGraph(focus) {
     var edgesG = $("edges"), nodesG = $("nodes");
-    edgesG.textContent = ""; nodesG.textContent = "";
+    edgesG.textContent = ""; nodesG.textContent = ""; $("bands").textContent = "";
     viewport.classList.remove("has-hi", "has-mark");
     graph = null; groupNodes = {};
     var view = current();
@@ -1020,7 +1190,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (view.kind !== "item") {
       var ov = buildOverview(view);
       $("status").textContent = ov.status;
-      draw(ov.ids, ov.up, ov.down, null, ov.unused, feedsNone(ov.top));
+      draw(ov.ids, ov.up, ov.down, null, ov.unused, feedsNone(ov.top), ov.bands);
       fit();
       return;
     }
@@ -1150,73 +1320,102 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function esc(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
-  function draw(ids, upAdj, downAdj, selectedId, unusedSet, unusedText) {
+  function draw(ids, upAdj, downAdj, selectedId, unusedSet, unusedText, bands) {
     var edgesG = $("edges"), nodesG = $("nodes");
     var present = {}; ids.forEach(function (id) { present[id] = true; });
-    var xy = layout(ids, upAdj, downAdj);
+    var placed = layout(ids, upAdj, downAdj, bands), xy = placed.xy, box = placed.box;
     // Built once per drawing: node elements, each node's edge elements and neighbours (marking
     // and highlighting touch only these), and the bounds Fit uses (from the layout)
-    graph = { ids: ids, xy: xy, selected: selectedId, nodes: {}, edges: {}, near: {}, bounds: null, hi: null,
-              memberOf: {} };
+    graph = { ids: ids, xy: xy, box: box, limit: placed.limit, selected: selectedId, nodes: {}, edges: {}, near: {},
+              bounds: null, hi: null, memberOf: {} };
     ids.forEach(function (id) { graph.edges[id] = []; graph.near[id] = [id]; });
-    var edgeHtml = [], edgeEnds = [], nodeHtml = [];
+    var edgeHtml = [], edgeEnds = [], nodeHtml = [], bandHtml = [], bandEdges = {};
+    function path(x1, y1, x2, y2, type, title) {
+      var mid = (x1 + x2) / 2;
+      edgeHtml.push('<path d="M' + x1 + "," + y1 + " C" + mid + "," + y1 + " " + mid + "," + y2 + " " + x2 + "," + y2 +
+                    '" class="edge ' + esc(type) + '"' + (title ? "><title>" + esc(title) + "</title></path>" : "/>"));
+    }
     ids.forEach(function (id) {
+      var a = xy[id], x1 = a.x + box[id].w, y1 = a.y + box[id].h / 2;
       downAdj[id].forEach(function (n) {
         if (!present[n.id]) return;
-        var a = xy[id], b = xy[n.id];
-        var x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
-        var mid = (x1 + x2) / 2;
-        // an edge to or from a group stands for several: their number is its tooltip
-        edgeHtml.push('<path d="M' + x1 + "," + y1 + " C" + mid + "," + y1 + " " + mid + "," + y2 + " " + x2 + "," + y2 +
-                      '" class="edge ' + esc(n.type) + '"' + (n.count > 1 ? "><title>" + fmt(n.count) + " links</title></path>" : "/>"));
-        edgeEnds.push([id, n.id]);
         graph.near[id].push(n.id); graph.near[n.id].push(id);
+        var bid = bands && N(id).type === "source" && bands.of[n.id];
+        if (bid) {  // a source's edge goes to the band of its tables, drawn once
+          var key = id + "\u0000" + bid, ends = bandEdges[key];
+          if (!ends) {
+            var band = placed.bands[bid];
+            ends = bandEdges[key] = [id];
+            ends.at = edgeHtml.length;
+            path(x1, y1, band.x, band.y + BAND_PAD + LINE_H / 2, n.type, null);
+            edgeEnds.push(ends);
+          }
+          ends.push(n.id);
+          return;
+        }
+        var b = xy[n.id];
+        // an edge to or from a group stands for several: their number is its tooltip
+        path(x1, y1, b.x, b.y + box[n.id].h / 2, n.type, n.count > 1 ? fmt(n.count) + " links" : null);
+        edgeEnds.push([id, n.id]);
       });
+    });
+    Object.keys(bandEdges).forEach(function (key) {  // "loads 12 tables" on a band's edge
+      var ends = bandEdges[key];
+      if (ends.length > 2) {
+        edgeHtml[ends.at] = edgeHtml[ends.at].replace("/>", "><title>" + fmt(ends.length - 1) + " tables</title></path>");
+      }
     });
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    function extend(x, y, w, h) {
+      minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x + w); maxY = Math.max(maxY, y + h);
+    }
+    Object.keys(placed.bands).forEach(function (bid) {
+      var b = placed.bands[bid];
+      extend(b.x, b.y, b.w, b.h);
+      bandHtml.push('<g class="band" transform="translate(' + b.x + "," + b.y + ')"><rect width="' + b.w + '" height="' + b.h + '"/>' +
+        b.lines.map(function (line, i) { return '<text x="' + BAND_PAD + '" y="' + (BAND_PAD + 17 + LINE_H * i) + '">' + esc(line) + "</text>"; }).join("") +
+        "<title>" + esc(b.label) + "</title></g>");
+    });
     ids.forEach(function (id) {
-      var n = N(id), p = xy[id];
-      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x + NODE_W); maxY = Math.max(maxY, p.y + NODE_H);
-      if (n.isGroup) { nodeHtml.push(groupMarkup(n, p)); return; }
+      var n = N(id), p = xy[id], s = box[id];
+      extend(p.x, p.y, s.w, s.h);
+      if (n.isGroup) { nodeHtml.push(groupMarkup(n, p, s)); return; }
       var unused = n.unused || !!(unusedSet && unusedSet[id]);
-      var label = n.label.length > 30 ? n.label.slice(0, 29) + "…" : n.label;
-      var sub = MULTI && n.model && n.type !== "model" ? n.model + (n.group ? " / " + n.group : "") : n.group;
       var differs = MULTI && DATA.differs[id];
       nodeHtml.push('<g class="node' + (id === selectedId ? " selected" : "") + (unused ? " unused" : "") +
         '" transform="translate(' + p.x + "," + p.y + ')" tabindex="0" data-id="' + esc(id) + '">' +
-        '<rect class="box" width="' + NODE_W + '" height="' + NODE_H + '" stroke="' + (unused ? "var(--unused)" : color(n.type)) + '"/>' +
-        '<rect width="5" height="' + NODE_H + '" fill="' + color(n.type) + '" stroke="none"/>' +
-        '<text x="12" y="15">' + esc(label) + "</text>" +
-        '<text x="12" y="28" class="type">' + esc(TYPE_LABEL[n.type] + (sub ? " · " + (sub.length > 26 ? sub.slice(0, 25) + "…" : sub) : "")) + "</text>" +
-        (differs ? '<text x="' + (NODE_W - 16) + '" y="16" class="diff">≠</text>' : "") +
+        '<rect class="box" width="' + s.w + '" height="' + s.h + '" stroke="' + (unused ? "var(--unused)" : color(n.type)) + '"/>' +
+        '<rect width="5" height="' + s.h + '" fill="' + color(n.type) + '" stroke="none"/>' + nodeLines(s) +
+        (differs ? '<text x="' + (s.w - 22) + '" y="26" class="diff">≠</text>' : "") +
         "<title>" + esc(TYPE_LABEL[n.type] + ": " + n.label + (where(n) ? "\n" + where(n) : "") +
           (n.unused ? "\nUnused" : unused ? "\n" + unusedText.charAt(0).toUpperCase() + unusedText.slice(1) : "") +
           (differs ? "\n≠ Not the same in another model (see its details)" : "")) + "</title></g>");
     });
     if (ids.length) graph.bounds = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    $("bands").innerHTML = bandHtml.join("");
     edgesG.innerHTML = edgeHtml.join("");
     nodesG.innerHTML = nodeHtml.join("");
     var paths = edgesG.children, gs = nodesG.children;
-    edgeEnds.forEach(function (ends, i) { graph.edges[ends[0]].push(paths[i]); graph.edges[ends[1]].push(paths[i]); });
+    edgeEnds.forEach(function (ends, i) { ends.forEach(function (id) { graph.edges[id].push(paths[i]); }); });
     ids.forEach(function (id, i) { graph.nodes[id] = gs[i]; });
     viewport.classList.remove("has-hi", "has-mark");
   }
+  // A node's name (1 or 2 lines) and its sub-line (type · table, one line, cut to the box)
+  function nodeLines(s) {
+    var t = s.text;
+    return t.lines.map(function (line, i) { return '<text x="' + PAD_L + '" y="' + (26 + LINE_H * i) + '">' + esc(line) + "</text>"; }).join("") +
+      '<text x="' + PAD_L + '" y="' + (26 + LINE_H * (t.lines.length - 1) + 21) + '" class="type">' + esc(truncate(t.sub, s.w - t.pads, "s")) + "</text>";
+  }
   // A group node: two boxes stacked behind its own, "<table> · <n> measures" and a "+"
-  function groupMarkup(n, p) {
-    var tail = " · " + fmt(n.members.length) + " " + GROUPED[n.type];
-    var room = 27 - tail.length, name = n.name.length > room ? n.name.slice(0, Math.max(1, room - 1)) + "…" : n.name;
-    var stroke = color(n.type), box = '" width="' + NODE_W + '" height="' + NODE_H + '" stroke="' + stroke + '"/>';
-    var sub = TYPE_LABEL[n.type] + " group" + (MULTI && n.model ? " · " + n.model : "");
+  function groupMarkup(n, p, s) {
+    var stroke = color(n.type), box = '" width="' + s.w + '" height="' + s.h + '" stroke="' + stroke + '"/>';
     return '<g class="node group" transform="translate(' + p.x + "," + p.y + ')" tabindex="0" data-id="' + esc(n.id) + '">' +
       '<rect class="stack" x="6" y="-6' + box + '<rect class="stack" x="3" y="-3' + box +
       '<rect class="box' + box +
-      '<rect width="5" height="' + NODE_H + '" fill="' + stroke + '" stroke="none"/>' +
-      '<text x="12" y="15">' + esc(name + tail) + "</text>" +
-      '<text x="12" y="28" class="type">' + esc(sub.length > 28 ? sub.slice(0, 27) + "…" : sub) + "</text>" +
-      '<g class="expand"><rect x="' + (NODE_W - 26) + '" y="7" width="20" height="20" rx="4"/>' +
-      '<text x="' + (NODE_W - 16) + '" y="22">+</text></g>' +
+      '<rect width="5" height="' + s.h + '" fill="' + stroke + '" stroke="none"/>' + nodeLines(s) +
+      '<g class="expand"><rect x="' + (s.w - 36) + '" y="' + (s.h / 2 - 14) + '" width="28" height="28" rx="5"/>' +
+      '<text x="' + (s.w - 22) + '" y="' + (s.h / 2 + 8) + '">+</text></g>' +
       "<title>" + esc(TYPE_LABEL[n.type] + " group: " + n.label + (MULTI && n.model ? "\n" + n.model : "") +
         "\nClick: its members · double-click, Enter or +: expand") + "</title></g>";
   }
@@ -1268,9 +1467,10 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (!p || !graph.nodes[id]) return;
     var w = size().w, h = size().h;
     var x = state.tx + p.x * state.scale, y = state.ty + p.y * state.scale;
-    if (x < 0 || y < 50 || x + NODE_W * state.scale > w || y + NODE_H * state.scale > h) {
-      state.tx = w / 2 - (p.x + NODE_W / 2) * state.scale;
-      state.ty = h / 2 - (p.y + NODE_H / 2) * state.scale;
+    var b = graph.box[id];
+    if (x < 0 || y < 50 || x + b.w * state.scale > w || y + b.h * state.scale > h) {
+      state.tx = w / 2 - (p.x + b.w / 2) * state.scale;
+      state.ty = h / 2 - (p.y + b.h / 2) * state.scale;
       apply();
     }
   }
@@ -1514,8 +1714,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (!graph || !graph.bounds) return;
     var whole = scaleFor(graph.bounds);
     var ids = focus || (graph.selected ? [graph.selected] : null);
-    if (!ids || (!focus && whole >= TEXT_MIN_SCALE)) { frame(graph.bounds, whole); return; }
-    var anchor = ids.length === 1 ? graph.xy[ids[0]] : null;
+    if (!focus && whole >= TEXT_MIN_SCALE) { frame(graph.bounds, whole); return; }
+    if (!ids) { fromLeft(graph.bounds); return; }  // an overview too big to read at once
+    var anchor = ids.length === 1 ? graph.xy[ids[0]] : null, size1 = anchor ? graph.box[ids[0]] : null;
     if (ids.length === 1) ids = graph.near[ids[0]] || ids;
     var box = boundsOf(ids);
     if (!box) { frame(graph.bounds, whole); return; }
@@ -1523,30 +1724,40 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     if (scale >= TEXT_MIN_SCALE) { frame(box, scale); return; }
     // too many neighbours to read at once: readable text around the item (vertically centred),
     // without empty space left or right of the neighbours (the markers show the rest)
-    var s = TEXT_MIN_SCALE, w = size().w, h = size().h, c = anchor || { x: box.x + box.width / 2 - NODE_W / 2, y: box.y + box.height / 2 - NODE_H / 2 };
+    var s = TEXT_MIN_SCALE, w = size().w, h = size().h, c = anchor ? { x: anchor.x + size1.w / 2, y: anchor.y + size1.h / 2 }
+      : { x: box.x + box.width / 2, y: box.y + box.height / 2 };
     function place(mid, lo, hi, from, to) {  // screen offset: centred, kept inside [lo, hi] of the box
       return Math.max(Math.min((from + to) / 2 - mid * s, from + 20 - lo * s), to - 20 - hi * s);
     }
     state.scale = s;
-    state.tx = place(c.x + NODE_W / 2, box.x, box.x + box.width, 0, w);
-    state.ty = (TOOLBAR_H + h) / 2 - (c.y + NODE_H / 2) * s;
+    state.tx = place(c.x, box.x, box.x + box.width, 0, w);
+    state.ty = (TOOLBAR_H + h) / 2 - c.y * s;
+    apply();
+  }
+  // The readable zoom, the view's left edge at the left (the markers show the rest); centred
+  // vertically when it fits (wrapped layers do), else from the top
+  function fromLeft(box) {
+    var s = TEXT_MIN_SCALE, room = size().h - TOP_H - 10;
+    state.scale = s;
+    state.tx = 20 - box.x * s;
+    state.ty = TOP_H + Math.max(0, (room - box.height * s) / 2) - box.y * s;
     apply();
   }
   function scaleFor(box) {
-    return Math.min(1, (size().w - 40) / Math.max(box.width, 1), (size().h - 70) / Math.max(box.height, 1));
+    return Math.min(1, (size().w - 40) / Math.max(box.width, 1), (size().h - TOP_H - 20) / Math.max(box.height, 1));
   }
   function frame(box, scale) {
     state.scale = scale;
     state.tx = (size().w - box.width * scale) / 2 - box.x * scale;
-    state.ty = TOOLBAR_H + (size().h - 60 - box.height * scale) / 2 - box.y * scale;
+    state.ty = TOP_H + (size().h - TOP_H - 10 - box.height * scale) / 2 - box.y * scale;
     apply();
   }
   function boundsOf(ids) {
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     ids.forEach(function (id) {
-      var p = graph.xy[id] || graph.xy[graph.memberOf[id]]; if (!p) return;  // or its group
+      var at = graph.xy[id] ? id : graph.memberOf[id], p = graph.xy[at]; if (!p) return;  // or its group
       minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x + NODE_W); maxY = Math.max(maxY, p.y + NODE_H);
+      maxX = Math.max(maxX, p.x + graph.box[at].w); maxY = Math.max(maxY, p.y + graph.box[at].h);
     });
     return minX === Infinity ? null : { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
   }
@@ -1568,9 +1779,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function hiddenBySide() {
     var out = { left: [], right: [], top: [], bottom: [] };
     if (!graph) return out;
-    var w = size().w, h = size().h, s = state.scale, nw = NODE_W * s, nh = NODE_H * s;
+    var w = size().w, h = size().h, s = state.scale;
     graph.ids.forEach(function (id) {
-      var p = graph.xy[id], x = state.tx + p.x * s, y = state.ty + p.y * s;
+      var p = graph.xy[id], x = state.tx + p.x * s, y = state.ty + p.y * s, nw = graph.box[id].w * s, nh = graph.box[id].h * s;
       if (x + nw < 0) out.left.push(id);
       else if (x > w) out.right.push(id);
       else if (y + nh < TOOLBAR_H - 10) out.top.push(id);
@@ -1600,9 +1811,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       if (!best || (side === "left" || side === "top" ? v > best : v < best)) best = v;
     });
     if (side === "left") state.tx = 30 - best * s;
-    else if (side === "right") state.tx = size().w - 30 - (best + NODE_W) * s;
+    else if (side === "right") state.tx = size().w - 30 - (best + NODE_MAX_W) * s;
     else if (side === "top") state.ty = TOOLBAR_H + 30 - best * s;
-    else state.ty = size().h - 30 - (best + NODE_H) * s;
+    else state.ty = size().h - 30 - (best + nodeHeight(2)) * s;
     apply();
   }
   function zoomBy(factor) {
@@ -1649,7 +1860,12 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   // A click on empty space (not a drag) clears the marked item
   svg.addEventListener("click", function () { if (!dragged && state.marked) mark(null); });
   window.addEventListener("mouseup", function () { drag = null; svg.classList.remove("dragging"); });
-  window.addEventListener("resize", function () { svgSize = null; if (current()) fit(); });
+  // A new height can change how layers wrap: then the view is laid out again
+  window.addEventListener("resize", function () {
+    svgSize = null;
+    if (!current()) return;
+    if (graph && graph.limit !== wrapLimit()) { renderGraph(); restoreMark(); } else fit();
+  });
   window.addEventListener("keydown", function (e) {
     if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); back(); return; }
     if (e.altKey && e.key === "ArrowRight") { e.preventDefault(); forward(); return; }

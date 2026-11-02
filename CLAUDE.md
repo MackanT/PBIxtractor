@@ -325,6 +325,30 @@ src/pbixtractor/
                     in one requestAnimationFrame after apply() and only once the wheel stops;
                     a click pans (same zoom) until the nearest hidden item on that side is in
                     view (panToward).
+                    Readable overview and labels (ticket 03): the overview (flowOverview: one
+                    model, MULTI's model view and "Show everything") groups tables in a band
+                    per source ("<source> · <n> tables", tables by name; a table with several
+                    sources under the first by name; "No source · n tables" last), drawn as a
+                    frame in #bands; a source's edges go to the band header, once per band
+                    (bandEdges, tooltip "<n> tables"; highlighting still per table); tables
+                    stay single nodes. layout(ids, up, down, bands): banded and source layers
+                    keep that order (no barycenter sweep); a layer (or a band inside its frame)
+                    taller than wrapLimit() = the graph area below toolbar + status (TOP_H 90)
+                    at TEXT_MIN_SCALE wraps into side-by-side columns (wrapColumns: order kept,
+                    column by column, about equally tall), WRAP_GAP 30 apart (< GAP_X 90);
+                    each column as wide as its widest box; graph.box[id] = {w, h}; a resize
+                    that changes wrapLimit lays the view out again. Fit on an overview: the
+                    whole when readable (frame keeps TOP_H clear), else fromLeft() at
+                    TEXT_MIN_SCALE (markers show the rest). Labels (nodeText, cached as
+                    n.sized): boxes NODE_MIN_W 210..NODE_MAX_W 320 wide from the name and the
+                    sub-line; a longer name wraps to 2 lines (wrapLabel, between words), then
+                    "…" (truncate); the sub-line (type · table) one line, cut to the box; group
+                    labels and band headers the same; <title> = full name + where. Fonts:
+                    LABEL_FONT 19 / SUB_FONT 16 (9.5 px on screen at zoom 0.5, below it hidden
+                    as before). Widths from CHAR_W (Source Sans 3 advance widths per ASCII
+                    character, 1/100 em; others 0.5 em; band headers × 1.04) - no canvas, no
+                    DOM measurement. fmt() formats counts with a regex (toLocaleString's first
+                    call cost ~25 ms at 4x on load).
                     Several models (the catalog's lineage.html): build_multi_viewer_data([(entry,
                     build_viewer_data)]) → ids "<key>|<id>", nodes carry m (key) + model (name);
                     same-named sources merged ("source|<name lower, no brackets>", shared = count,
