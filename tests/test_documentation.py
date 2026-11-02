@@ -140,6 +140,20 @@ def test_highlight_dax_keeps_names_that_look_like_placeholders():
     assert "&& " in text and "|| " in text
 
 
+def test_highlight_dax_keeps_leading_spaces():
+    """D28: a line's indent stays as it is; inner spacing is per token as before."""
+    formats = {k: k for k in ("comment", "quote", "var", "varname", "measure", "function", "return")}
+    formats["para"] = [f"para{i}" for i in range(15)]
+    dax = 'SUM (\n    Sales[Amount]\n)\n        // note\nVAR  x =  "a\n  b"'
+    segments = highlight_dax(dax, formats, ["SUM"])
+    text = _plain(segments, formats)
+    assert text.startswith("SUM ( \n    Sales[Amount]")
+    assert "\n        // note" in text
+    assert "VAR x = " in text  # inner double spaces: one per token, as before
+    assert "    " in segments  # one segment per indent
+    assert "\ue004" not in "".join(text)  # no placeholder left, also inside a string
+
+
 def test_highlight_dax_survives_deep_nesting_and_a_trailing_var():
     formats = {k: k for k in ("comment", "quote", "var", "varname", "measure", "function", "return")}
     formats["para"] = [f"para{i}" for i in range(15)]
@@ -237,9 +251,13 @@ def test_workbooks_end_to_end(tmp_path):
     for sheet in ("Sample Common", "Sales", "Pages", "model tables", "model columns"):
         assert f'name="{sheet}"' in workbook
     assert 'name="Detail"' in workbook  # pages without visuals get a sheet too
-    assert "model quality" not in workbook  # BPA not run
+    # The Python BPA runs without Tabular Editor too
+    assert 'name="model quality summary"' in workbook and 'name="model quality"' in workbook
     with zipfile.ZipFile(output / "Sample.xlsx") as main:
         main_strings = main.read("xl/sharedStrings.xml").decode()
+    assert "Model quality" in main_strings  # the column on the common/model sheets
+    assert "Rules not checked" in main_strings and "needs statistics" in main_strings
+    assert "DAX rule (ticket 04)" not in main_strings
     assert "Depends On" in main_strings and "Dependants" not in main_strings
     assert "Calculated Column" in main_strings  # calculated columns are listed with their DAX
     assert "(no visuals, buttons or page filters on this page)" in main_strings
@@ -461,7 +479,7 @@ def _xlsx_rows(path, sheet: str) -> list[list[str]]:
 
 
 def _violation(object_type, object_name, rule, severity):
-    from pbixtractor.tabular_editor import BpaViolation
+    from pbixtractor.bpa import BpaViolation
 
     return BpaViolation(
         object_type=object_type, object_name=object_name, rule=rule, severity=severity
@@ -511,6 +529,28 @@ def test_parse_bpa_object_name(name, expected):
     from pbixtractor.model_sheets import parse_bpa_object_name
 
     assert parse_bpa_object_name(name) == expected
+
+
+def test_bpa_by_object_reads_tabular_editors_shapes():
+    """D24: measures as [M] (matched by name), tables as 'T' with their mode in the type."""
+    from pbixtractor.model_sheets import bpa_by_object, bpa_cell
+
+    cells = bpa_by_object([
+        _violation("Measure", "[Net]]Total]", "[Naming] Odd name", "Low"),
+        _violation("Table (Import)", "'O''Brien'", "[Model] Import rule", "High"),
+        _violation("Table (DQ over AS)", "'Dates'", "[Model] Lake rule", "Medium"),
+        _violation("Calculated Table", "'Calc'", "[Model] Calc rule", "Low"),
+        _violation("Calculation Group Table", "'Time'", "[Model] Group rule", "Low"),
+        _violation("Table Permission", "Sales", "[Security] Not a table", "Low"),
+        _violation("Column", "'Sales'[Amount]", "[Formatting] Column rule", "Low"),
+    ])  # fmt: skip
+    assert bpa_cell(cells, "O'Brien", "Net]Total") == "Low: [Naming] Odd name"
+    assert bpa_cell(cells, "O'Brien") == "High: [Model] Import rule"
+    assert bpa_cell(cells, "Dates") == "Medium: [Model] Lake rule"
+    assert bpa_cell(cells, "Calc") == "Low: [Model] Calc rule"
+    assert bpa_cell(cells, "Time") == "Low: [Model] Group rule"
+    assert bpa_cell(cells, "Sales") == ""  # a table permission is no table finding
+    assert bpa_cell(cells, "Sales", "Amount") == "Low: [Formatting] Column rule"
 
 
 def test_bpa_by_object_sorts_and_skips_other_types():
@@ -611,3 +651,47 @@ def test_model_quality_column_absent_without_bpa_and_empty_without_findings(tmp_
     assert columns and set(columns.values()) == {""}
     common = _xlsx_rows(main, "Sample Common")
     assert any(row[len(OBJECT_COLUMNS) :] == ["Model quality"] for row in common)
+
+
+def test_definition_cells_are_formatted_while_the_json_keeps_the_dax(tmp_path):
+    from copy import deepcopy
+
+    bim = deepcopy(BIM)
+    sales = next(t for t in bim["model"]["tables"] if t["name"] == "Sales")
+    sales["measures"].append(
+        {"name": "Online", "expression": "calculate([Total Amount],all(Sales),all(Dates))"}
+    )
+    write_sample_pbix(tmp_path / "Sample.pbix")
+    (tmp_path / "Sample.bim").write_text(json.dumps(bim), encoding="utf-8")
+    output = tmp_path / "output"
+    result = run_extraction(
+        ExtractionOptions(
+            report_path=tmp_path / "Sample.pbix",
+            model_path=tmp_path / "Sample.bim",
+            output_dir=output,
+            tabular_editor_analysis=False,
+            write_log_file=False,
+        )
+    )
+    assert result.ok, result.message
+
+    definition = OBJECT_COLUMNS.index("Definition")
+    for path, sheet in ((output / "Sample.xlsx", "Sample Common"),
+                        (output / "Sample_data.xlsx", "common")):  # fmt: skip
+        name = OBJECT_COLUMNS.index("Name")
+        rows = {row[name]: row for row in _xlsx_rows(path, sheet) if len(row) > definition}
+        # highlight_dax() spaces the tokens; the layout (lines, 4-space indents, casing) is the
+        # formatter's
+        online = rows["Online"][definition]
+        assert online.startswith("CALCULATE ( \n    [")
+        assert "\t" not in online
+        assert "ALL ( Sales )" in online and "\n)" in online
+        is_big = rows["Is Big"][definition]  # calculated column: four lines in the model
+        assert "\n" not in is_big and "TRUE ( )" in is_big
+
+    data = json.loads((output / "Sample.json").read_text(encoding="utf-8"))
+    tables = {t["name"]: t for t in data["model"]["tables"]}
+    measures = {m["name"]: m["expression"] for m in tables["Sales"]["measures"]}
+    columns = {c["name"]: c["expression"] for c in tables["Sales"]["columns"]}
+    assert measures["Online"] == "calculate([Total Amount],all(Sales),all(Dates))"
+    assert columns["Is Big"] == "IF (\n    Sales[Amount] > 100,\n    TRUE()\n)"

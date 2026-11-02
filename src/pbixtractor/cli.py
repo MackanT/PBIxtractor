@@ -15,6 +15,9 @@ from typing import Callable, Optional
 from . import __version__
 
 TENANT_HELP = "Entra tenant (id or domain) for the active account; default: the active entry's"
+BPA_RULES_HELP = (
+    "custom model quality rules (YAML; default: ~/.pbixtractor/bpa_rules.yaml if it exists)"
+)
 
 EXAMPLES = """
 Examples:
@@ -24,7 +27,7 @@ Examples:
   pbixtractor account list                        The entries; * = the one in use
   pbixtractor account use 2                       Switch (number, user or tenant name)
   pbixtractor extract C:/Reports/Sales.pbix       Document a report (model: Sales.bim next to it)
-  pbixtractor extract Sales.pbix --model Model.bim -o out/Sales --no-tabular-editor
+  pbixtractor extract Sales.pbix --model Model.bim -o out/Sales
   pbixtractor extract C:/Reports/Sales.pbip       PBIP project (model.bim or TMDL, found via
                                                   the report's definition.pbir)
   pbixtractor extract Sales.pbix --model Sales.SemanticModel/definition     TMDL model
@@ -127,17 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--output", type=Path, help="output folder (default: output/<name>)"
     )
     extract.add_argument("--name", help="base name of the output files (default: report name)")
-    extract.add_argument(
-        "--no-tabular-editor",
-        action="store_true",
-        help="skip the Tabular Editor analysis (BPA, exact dependencies, live statistics)",
-    )
-    extract.add_argument(
-        "--tabular-editor-tsv",
-        action="store_true",
-        help="use Tabular Editor's TSV export (formats DAX via daxformatter.com - sends DAX online)",
-    )
+    # Old options, still accepted so old scripts keep working: they only print a note
+    extract.add_argument("--no-tabular-editor", action="store_true", help=argparse.SUPPRESS)
+    extract.add_argument("--tabular-editor-tsv", action="store_true", help=argparse.SUPPRESS)
     extract.add_argument("--description-tag", help="delimiter of descriptions embedded in DAX")
+    extract.add_argument("--bpa-rules", type=Path, metavar="FILE", help=BPA_RULES_HELP)
     extract.add_argument("--no-log-file", action="store_true", help="do not write logs/*.txt")
     extract.add_argument("-q", "--quiet", action="store_true", help="only print the result")
 
@@ -252,10 +249,10 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_add.add_argument(
         "-o", "--output", type=Path, help="root of the models' output folders (default: output)"
     )
-    catalog_add.add_argument("--no-tabular-editor", action="store_true",
-                             help="skip the Tabular Editor analysis (faster)")
+    catalog_add.add_argument("--no-tabular-editor", action="store_true", help=argparse.SUPPRESS)
     catalog_add.add_argument("--no-service-statistics", action="store_true",
                              help="do not read row counts / distinct values from the Power BI service")
+    catalog_add.add_argument("--bpa-rules", type=Path, metavar="FILE", help=BPA_RULES_HELP)
     catalog_add.add_argument("--no-log-file", action="store_true", help="do not write logs/*.txt")
     catalog_add.add_argument("--tenant", help=TENANT_HELP)
     catalog_add.add_argument("-q", "--quiet", action="store_true", help="only print the result")
@@ -290,6 +287,14 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--port", type=int, default=8081, help="port (default: 8081)")
     web.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
     return parser
+
+
+def _tabular_editor_note(args: argparse.Namespace) -> None:
+    """Print one note when an old Tabular Editor option is used (they do nothing now)."""
+    if getattr(args, "no_tabular_editor", False) or getattr(args, "tabular_editor_tsv", False):
+        from .pipeline import TABULAR_EDITOR_NOTE
+
+        print(f"Note: {TABULAR_EDITOR_NOTE}.", file=sys.stderr)
 
 
 def _fabric_client(args: argparse.Namespace):
@@ -441,6 +446,7 @@ def run_catalog_add(args: argparse.Namespace) -> int:
     )
     from .devops import parse_devops_url, parse_version
 
+    _tabular_editor_note(args)
     if sum(bool(x) for x in (args.files, args.fabric_workspace, args.devops)) != 1:
         print("Give one of: report files, --fabric-workspace or --devops.", file=sys.stderr)
         return 2
@@ -510,9 +516,9 @@ def run_catalog_add(args: argparse.Namespace) -> int:
         BatchSettings(
             output_root=output_root,
             catalog_dir=args.folder,
-            tabular_editor_analysis=not args.no_tabular_editor,
             service_statistics=not args.no_service_statistics,
             write_log_file=not args.no_log_file,
+            bpa_rules=args.bpa_rules,
         ),
         progress=progress,
     )
@@ -636,6 +642,7 @@ def run_extract(args: argparse.Namespace) -> int:
 
     connected: list[FetchedModel] = []  # a published model fetched for a live-connected report
 
+    _tabular_editor_note(args)
     if sum(bool(x) for x in (args.report, args.fabric, args.devops)) != 1:
         print(
             "Give one of: a report path, --fabric WORKSPACE/REPORT or --devops URL.",
@@ -700,13 +707,12 @@ def run_extract(args: argparse.Namespace) -> int:
         model_path=model,
         output_dir=args.output or Path("output") / name,
         name=name,
-        tabular_editor_analysis=not args.no_tabular_editor,
-        tabular_editor_tsv=args.tabular_editor_tsv,
         write_log_file=not args.no_log_file,
         extra_reports=extra_reports,
         not_included=not_included,
         service_statistics=not args.no_service_statistics,
         catalog_dir=args.catalog,
+        bpa_rules=args.bpa_rules,
         service_model=(
             ServiceModel(connected[-1].workspace_id, connected[-1].model_id, connected[-1].model)
             if connected
@@ -730,13 +736,41 @@ def run_extract(args: argparse.Namespace) -> int:
     for kind, path in result.files.items():
         print(f"  {kind:14} {path}")
     if result.status == "warnings" and not args.quiet:
-        warnings = result.logs.strip().splitlines()
+        warnings = warning_messages(result.logs)
         print(f"\n{len(warnings)} warning(s):")
-        for line in warnings[:20]:
-            print(f"  {line}")
+        for message in warnings[:20]:
+            print("  " + message.replace("\n", "\n  "))
         if len(warnings) > 20:
             print(f"  ... see {result.files.get('log', 'the log file')}")
     return 0
+
+
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def warning_messages(logs: str) -> list[str]:
+    """
+    The WARNING-or-worse records of a run's log text, one string per record.
+
+    Args:
+        logs: ExtractionResult.logs ("LEVEL: message" lines; a message may span several lines)
+
+    Returns:
+        Each warning/error record (its continuation lines joined with newlines); INFO and DEBUG
+        notes are left out
+    """
+    records: list[list[str]] = []
+    for line in logs.strip().splitlines():
+        level = line.split(":", 1)[0]
+        if level in _LOG_LEVELS or not records:
+            records.append([line])
+        else:
+            records[-1].append(line)
+    return [
+        "\n".join(lines)
+        for lines in records
+        if lines[0].split(":", 1)[0] not in ("DEBUG", "INFO")
+    ]
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -2,12 +2,12 @@
 
 ## Project Overview
 PBIxtractor generates documentation for Power BI reports. It reads a `.pbix` (report
-layout) plus the semantic model (`.bim` or TMDL folder, read directly; Tabular Editor 2
-optional) and writes
+layout) plus the semantic model (`.bim`, TMDL folder or the .pbix itself, read directly in
+Python on any OS) and writes
 Excel workbooks
 with a visual inventory per page, filters, colour-coded DAX, relationships (PNG graph),
 measure dependencies, unused columns/measures, model tables/columns (sources, storage mode),
-Best Practice Analyzer results, and row counts/sizes when the report is open in Desktop.
+Best Practice Analyzer results, and row counts/sizes from the .pbix or the Power BI service.
 
 Owner reviews and commits everything — **never run `git commit` / `git push`**.
 
@@ -18,13 +18,20 @@ Owner reviews and commits everything — **never run `git commit` / `git push`**
   The DearPyGUI desktop UI (extractor.py, --ui/--test) was removed on 2026-09-29.
 - pandas, xlsxwriter (rich-text cells), networkx + matplotlib (relationship PNG)
 - pydantic for row models (the jsonpath-ng dependency was removed 2026-09-30: nothing used it)
-- Optional: Tabular Editor 2 CLI (Windows-only, ≥2.29), called via `subprocess`:
-  - Tabular Editor analysis (default on; `--no-tabular-editor`): Best Practice Analyzer (a `-S`
-    script calling the Analyzer, not `-A`), exact DAX dependencies (`-S` script using
-    `DependsOn`) and live statistics — all local/offline.
-  - TSV export (default off; `--tabular-editor-tsv`): TE writes `documentation.tsv` itself (and the
-    dataset is read from it); runs FormatDax, which sends DAX to daxformatter.com. Without it the
-    same file is written offline by semantic_model.write_documentation_tsv() (DAX unformatted).
+- regex (PyPI) for custom rules' `matches` only: a timeout per search (bpa_custom.MATCH_TIMEOUT);
+  the built-in rules keep `re`
+- All analysis is Python, on every OS: the Best Practice Analyzer is bpa.py (all 71 rules of
+  data/BPARules.json), exact DAX dependencies dax_parser.py, `documentation.tsv` is written by
+  semantic_model.write_documentation_tsv() (DAX formatted offline by dax_format.py: measures and
+  calculated columns). Statistics come from the .pbix or the Power BI service (statistics.py).
+  A run never uses Tabular Editor or Power BI Desktop (removed 2026-10-30, python-analysis
+  ticket 08). The old options `--no-tabular-editor` / `--tabular-editor-tsv` and
+  ExtractionOptions.tabular_editor_analysis / .tabular_editor_tsv are still accepted (hidden from
+  `--help`) and only print / log one note (pipeline.TABULAR_EDITOR_NOTE).
+- Developer check only (optional): Tabular Editor 2 CLI (≥2.29; Windows, or Wine on Linux - the
+  steps are in tools/compare_tabular_editor.py's docstring), via tabular_editor.py: used by
+  tools/compare_tabular_editor.py and the tests marked `tabular_editor` (skipped when TE is not
+  found), never by the program.
 - sqlglot (native SQL in partitions), msal + msal-extensions (Fabric / DevOps browser sign-in,
   account list, token cache), azure-identity (only EnvironmentCredential: a service principal)
 
@@ -36,7 +43,7 @@ git reflog writes).
 ```powershell
 uv run --frozen pbixtractor             # web UI (NiceGUI) on :8081, opens the browser
 uv run --frozen pbixtractor web --port 8090 --no-browser
-uv run --frozen pbixtractor extract "C:\...\Sales.pbix" [--model X.bim] [-o out] [--no-tabular-editor]
+uv run --frozen pbixtractor extract "C:\...\Sales.pbix" [--model X.bim] [-o out]
 uv run --frozen --extra dev pytest -q   # tests (`--with pytest` does NOT work here: å in path)
 .venv\Scripts\python.exe -m pytest -q -m "not tabular_editor"   # without the slow real-TE tests
 # Plain `uv sync` removes pytest/ruff from the venv: always `uv sync --extra dev`
@@ -53,16 +60,13 @@ TMDL `definition/`. A live-connected .pbix (no model inside) gets its published 
 Fabric (pbix_model.live_connection → fabric.fetch_connected_model; sign-in, Contributor on the
 model). `extract` exits 2
 when there is none. The model is read from the `.bim` / TMDL on every run; a
-`documentation.tsv` is written on every run (TE2 ExportProperties format, DAX as in the model);
-`--tabular-editor-tsv` (ExtractionOptions.tabular_editor_tsv) only changes who writes it: Tabular
-Editor, with FormatDax'ed DAX, and then the dataset is read from that file.
+`documentation.tsv` is written on every run (TE2 ExportProperties format; measures and
+calculated columns formatted offline by dax_format.py, everything else as in the model).
 Real test reports are local only (never commit; this PC's list: `CLAUDE.local.md`; on another
 machine, list its reports in `Input/regression.json`, see "Refactoring safety net").
-Tabular Editor 2 is usually installed at `C:\Program Files (x86)\Tabular Editor\`
-(`tabular_editor.find_tabular_editor()`; extra folders in `Input/TabularEditorLocations.txt`,
-written by `add_tabular_editor_location()` / the web UI's "Tabular Editor 2 folder" field).
-Power BI Desktop is the Microsoft Store version: workspaces under
-`%USERPROFILE%\Microsoft\Power BI Desktop Store App\AnalysisServicesWorkspaces`.
+For the developer check only: Tabular Editor 2 is usually installed at
+`C:\Program Files (x86)\Tabular Editor\` (`tabular_editor.find_tabular_editor()`; extra folders in
+`Input/TabularEditorLocations.txt`); under Wine, see tools/compare_tabular_editor.py's docstring.
 
 Git: only read-only commands (status/diff/log). **No commit, push or `git stash`** — the owner
 reviews and commits everything. Compare against baselines with `tools/regress.py` instead.
@@ -88,29 +92,51 @@ src/pbixtractor/
                     [--ref branch|tag:x|commit:x] [-o]`;
                     `extract [report | --fabric WS/REPORT | --devops URL [--ref]] [--tenant] [--model] [-o] [--name]
                     [--all-reports] [--all-workspaces] [--also REPORT] [--catalog FOLDER]
-                    [--no-service-statistics] [--no-tabular-editor] [--tabular-editor-tsv]
-                    [--description-tag] [--no-log-file] [-q]` (exit 0 ok/warnings, 1 error,
+                    [--no-service-statistics]
+                    [--description-tag] [--bpa-rules FILE] [--no-log-file] [-q]` (exit 0
+                    ok/warnings, 1 error,
                     2 no model/bad args); `fabric list [WS]`, `fabric fetch WS/REPORT [-o]`
                     (default download folder output/_fabric/<ws>; with extract -o: <o>/source);
                     `catalog list|remove|rebuild FOLDER [KEY]`; `catalog add FOLDER [FILE ...] |
                     --fabric-workspace WS [...] [--all-workspaces] | --devops REPO_URL [--ref]
-                    [--only NAME ...] [--list] [-o ROOT] [--no-tabular-editor]
-                    [--no-service-statistics] [--no-log-file] [-q]` (batch.py; .bim files among
+                    [--only NAME ...] [--list] [-o ROOT]
+                    [--no-service-statistics] [--bpa-rules FILE] [--no-log-file] [-q]`
+                    (batch.py; BatchSettings.bpa_rules; .bim files among
                     FILE are models; a ?path= in the repo URL limits it to a folder; --only =
                     batch.select (model or report name, wildcards); --list = plan only; exit 1 if
                     any model failed). `--ref` was `--version` (still
                     accepted); top-level `pbixtractor --version` prints the program version.
                     Fetch errors (ApiError/ValueError/OSError) → "ERROR: ..." + exit 1; anything
                     else keeps its traceback on purpose (a bug).
+                    Old options, hidden (help=argparse.SUPPRESS), still accepted: extract
+                    --no-tabular-editor / --tabular-editor-tsv, catalog add --no-tabular-editor;
+                    each prints "Note: <pipeline.TABULAR_EDITOR_NOTE>." on stderr, changes
+                    nothing (exit codes as before). Neither EXAMPLES nor the help names Tabular
+                    Editor.
   pipeline.py       The orchestration, no globals: run_extraction(ExtractionOptions,
                     progress(step, fraction), on_log(level, msg)) → ExtractionResult(status
                     success|warnings|error, message, files {workbook, data_workbook, json,
                     lineage, graph, tsv[, model, log]}, logs, documentation, report_json,
                     seconds). tsv = <out>/documentation.tsv on every run (write failure → warning).
-                    Steps: model → TE analysis (BPA, deps, live stats) → dataset →
+                    Steps: model → exact DAX dependencies (dax_parser.model_dependencies,
+                    always; a crash = a bug → warning + None = text matching) → statistics
+                    (the service's when service_model / fabric_source.json apply, else the
+                    .pbix's, else none; measure data types from the .pbix metadata) → Python BPA
+                    (bpa.run_bpa on every run, using those statistics, plus
+                    the custom rules of ExtractionOptions.bpa_rules (None = bpa_custom.
+                    USER_RULES_PATH if it exists; a given file that is missing → warning; each
+                    RuleFile error → one WARNING "Custom model quality rule <id>: <problem>") →
+                    (violations, not_checked) → build_documentation(bpa_violations=,
+                    bpa_not_checked=); a crash → warning + (None, [])) →
+                    dataset →
                     ReportExtractor → build_documentation → graph → workbooks → JSON + lineage.
-                    One run at a time (_RUN_LOCK: shared logger/TE/Excel); any captured log
-                    record → "warnings" (+ logs/log_data_<date>_<time>.txt, never overwritten).
+                    No Tabular Editor, no subprocess, no process scan (tested with subprocess.run
+                    and find_tabular_editor raising). ExtractionOptions.tabular_editor_analysis=
+                    False / tabular_editor_tsv=True (old options, D8) only log one INFO
+                    TABULAR_EDITOR_NOTE. BatchSettings keeps both fields, unused.
+                    One run at a time (_RUN_LOCK: shared logger/Excel); any captured WARNING
+                    or worse → "warnings" (+ logs/log_data_<date>_<time>.txt, never
+                    overwritten); INFO notes only go into result.logs.
                     ReportReadError (encrypted/unreadable report) → error without traceback.
                     report_name(), find_model_for_report(), model_name().
   report_extractor.py CONFIG = config.load_config() (RuntimeError on failure; importing never
@@ -118,15 +144,17 @@ src/pbixtractor/
                     ReportExtractor (readers.read_report → ReportContext + PageExtractor);
                     extract_reports(paths) for model mode.
   web_config.py     How the web UI is hosted: WebConfig(prefix, output_root, storage_prefix,
-                    local_machine, embedded) in web_config.CONFIG (read it via the module - configure()
+                    local_machine, embedded, access, bpa_rules) in web_config.CONFIG (read it via the module - configure()
                     replaces it); url(), output_root(), stored_choices() (app.storage.general behind
                     a key prefix). Stand-alone = defaults; web_ui.register() sets the embedded ones.
+                    bpa_rules = the custom rules file every run from the page passes as
+                    ExtractionOptions.bpa_rules (None: the server account's user file).
   web_ui.py         NiceGUI app, stand-alone and embeddable (docs/EMBEDDING.md):
                     register(prefix="/pbixtractor", output_root, storage_prefix="pbixtractor.",
-                    local_machine=False) for a host app, then build_page() inside the host's page
+                    local_machine=False, access, bpa_rules=None) for a host app, then build_page() inside the host's page
                     (no header/rail/theme/host check of ours; routes under the prefix; a catalog
                     link on the page). local_machine=False hides everything acting on the server's
-                    machine: path inputs + PathPicker, Tabular Editor folder, Desktop detection,
+                    machine: path inputs + PathPicker,
                     output/catalog folder inputs (and never stores catalog_dir), "Open folder";
                     uploads fill the hidden inputs. _THEME_SYNC script: embedded lineage iframes
                     follow body.body--dark by postMessage (any host). Stand-alone: start() →
@@ -134,7 +162,8 @@ src/pbixtractor/
                     index() = apply_theme + _build_shell() (pine header + 60px icon rail, menu toggles
                     labels, light/dark toggle remembered in stored_choices; Catalog rail entry
                     once a catalog exists) + build_page() (report/model/output inputs, server-side
-                    PathPicker dialog, options, TE/Desktop status) → run_extraction in
+                    PathPicker dialog, options: service statistics, log file, catalog,
+                    description tag) → run_extraction in
                     run.io_bound; progress/log via a queue drained by ui.timer. Results:
                     stat cards, download buttons, tabs Lineage (iframe of <name>_lineage.html
                     served by /files/{token}/{name}; token → output folder, 404 outside it),
@@ -182,10 +211,46 @@ src/pbixtractor/
                     build_page makes one web_sources.AccountState(busy=_JOB_LOCK.locked) for
                     both panels (embedded: none, no control); register() calls
                     azure_auth.allow_browser_login(False) (only a service principal signs in
-                    there), start() leaves it allowed. Power BI Desktop detection runs in
-                    run.io_bound (psutil takes seconds), debounced 0.5 s while typing a path.
+                    there), start() leaves it allowed. No Tabular Editor or Power BI Desktop
+                    parts (removed in python-analysis ticket 08b: no folder field, no TE
+                    switches, no found/Desktop status card): runs and batches leave
+                    tabular_editor_analysis / _tsv at their defaults, so no TABULAR_EDITOR_NOTE;
+                    choices an older version stored for them are ignored, never written.
                     Catalog option (switch + folder, default output/_catalog, remembered via
                     stored_choices()); header link "Catalog" → /catalog/.
+                    Rules page (stand-alone only; start() → register_app_pages() adds
+                    ui.page("/rules") = rules_index() (not register_routes: NiceGUI's test
+                    teardown unloads every page function's module, so tests register a wrapper) = theme + _build_shell(active="/rules") +
+                    web_rules.build_rules_page(); rail entry "Model quality rules" (icon rule,
+                    marker nav_rules); embedded: no route, no entry). Every run passes
+                    web_config.CONFIG.bpa_rules (single: ExtractionOptions, batch: BatchSettings).
+                    After each successful run (in its thread: _run_and_remember; batch: per
+                    outcome) web_rules remembers the model for "Test".
+  web_rules.py      The "Model quality rules" page (build_rules_page): error banner when
+                    load_rule_file reports problems (a save while the file has them asks "This
+                    removes the rules that could not be read"), the 71 built-ins with a search and
+                    a switch "On" each (off = id under disabled, saved at once), custom rules with
+                    Add / edit / delete (confirmed) and a form dialog (id, name, category, severity,
+                    description, scope; condition rows + optional any group: property choices =
+                    bpa_custom.PROPERTIES for the scope, ops = OPS, value hidden for ops without
+                    one, comma list for `in`). Save = validate_rule + unique id (form_errors),
+                    then save(change) (D31): apply_change() reads the file fresh and applies only
+                    this one Change - add_rule (refused if the id exists now), replace_rule(id)
+                    (re-added if deleted meanwhile; refused onto another rule's id),
+                    delete_rule_id (gone = nothing to do), switch_builtin(id, on) (already so =
+                    nothing to do) - then save_rule_file(USER_RULES_PATH) and show() re-renders
+                    from the file (other tabs' saves and hand edits are kept). Cancel on the
+                    confirmation = show() from the file, which puts the switch back; the change
+                    event that emits finds the file in that state already (no save, no second
+                    dialog; no "reverting" flag: NiceGUI runs async handlers later). Embedded
+                    (web_config.CONFIG.embedded) web_ui remembers no model (D27). "Test" = evaluate_rule on the
+                    form's unsaved rule in run.io_bound against the last run (remember_run(name,
+                    model, statistics) / remember_model_file(name, path): batch outcomes carry no
+                    model, so it is read again from its file - service statistics are then
+                    missing); disabled with "Run a documentation first" before any run; shows
+                    "N findings on <model>" + the first 50 objects. Bound selects must not
+                    refresh their own container in on_change (a rebuilt bound select fires it
+                    again: endless loop) - visibility is toggled instead.
   theme.py          Visual style ("field-station", shared with the data-platform web UI that
                     PBIxtractor will be embedded in): colour tokens (sap accent, copper = the one
                     primary action/attention, rust/lichen/glacier status, bone/bark grounds),
@@ -245,8 +310,44 @@ src/pbixtractor/
                     ReportDefinition (ReportExtractor.report) for page/bookmark details.
                     Also parse_tsv_object_name,
                     button_target_and_label, field_description.
-  dax.py            find_functions/find_measures/find_columns, text_dependencies() (fallback
-                    when no exact deps), highlight_dax() → rich-text segments.
+  dax.py            find_functions/find_measures/find_columns, text_dependencies() (only
+                    used when the dax_parser analysis crashed: exact deps None), highlight_dax()
+                    → rich-text segments: tokens re-spaced one space each, except a line's
+                    leading spaces, kept as one segment (the formatter's 4-space indent, D28).
+  dax_parser.py     tokenize(dax) → [Token(kind, text, position)], lossless ("".join(texts) ==
+                    input; the formatter relies on it), never raises: whitespace, comment (//,
+                    --, /* */; unclosed → end), string ("" escape), quoted_name ('' escape),
+                    bracket_name (]] escape), number, identifier (dotted function names such as
+                    PERCENTILE.INC are one token), operator, punctuation, unknown; Token.name
+                    unquotes. model_dependencies(model) → Dependency rows (defined here) like
+                    TE's DependsOn: sources measures (+ dynamic format string), calculated
+                    columns, calculated tables, RLS TablePermission (name = role), calculation
+                    items; case-insensitive: T[X] → column, else measure of T (unknown T:
+                    nothing); [X] in TE's order (D23, FormulaFixup.cs; _ModelIndex.unqualified):
+                    a column of the expression's own table (measures, calc columns, RLS, calc
+                    items), else a measure of that table, else a measure in any table (first in
+                    model order), else nothing; a calculated table has no own table (measures
+                    only); bare table name (not before "(" or "[") →
+                    Table, unless a VAR of that name is in scope (to the end of its RETURN
+                    block); "RETURN [X]" is no qualified ref. Comments/strings never count.
+                    Targets once per source; drop_redundant_table_refs applied.
+  dax_format.py     format_dax(dax) → daxformatter.com "long line" style, offline (D3/D12 of
+                    the python-analysis spec; close, not byte-identical): tokenize → tree (atoms,
+                    calls, ( ) / { } groups, VAR blocks, comments with line-break-before/after
+                    flags; comments on the "(" / "," / "=" / RETURN line stay there) → layout:
+                    "SUM ( x )", "F ( )", spaces around binary operators (none after a unary
+                    sign), a call inline when it fits LINE_LENGTH (120) at its column AND has ≤1
+                    nested function call (groups/{ } do not count), else one argument per line
+                    (INDENT 4) and ")" on its own line; VAR value on the VAR line when it renders
+                    on one line, else on the next one deeper; RETURN alone, its expression one
+                    deeper; functions (identifier before "(") and KEYWORDS upper case; names,
+                    strings, numbers, comments as written. Unparseable (unbalanced brackets,
+                    unclosed string/name/comment, unknown character, VAR without RETURN) or a
+                    changed _signature() (tokens without whitespace, function/keyword case
+                    ignored) → the input unchanged, logged at DEBUG only. Idempotent. Used by
+                    write_documentation_tsv() and the Common sheets' Definition cells only:
+                    JSON, lineage viewer, catalog, dependencies and text matching keep the DAX
+                    as written (D4/D11).
   excel_report.py   create_formats(), write_main_workbook(), write_data_workbook(); shared
                     helpers per sheet type (_write_relations, _write_objects, _write_page_sheet,
                     _write_pages_sheet, _write_dependencies_sheet). _Workbook/_Worksheet: text
@@ -256,6 +357,10 @@ src/pbixtractor/
                     Main workbook only, when the BPA ran: Common sheets get "Model quality"
                     after OBJECT_COLUMNS (QUALITY_INDEX; OBJECT_COLUMNS itself does not grow,
                     the data workbook's "common" is unchanged); _write_objects(quality=).
+                    _write_objects: the Definition cell of a Measure / Calculated Column
+                    (FORMATTED_TYPES) shows format_dax() output (its 4-space indents as they are:
+                    highlight_dax keeps leading spaces; no tabs since D28) in both workbooks;
+                    Depends On / text matching use the original Definition.
   relationship_graph.py save_relationship_graph() → PNG (networkx spring layout).
   m_sources.py      m_sources(M, queries, name) → (connector, source objects): Schema/Item,
                     Name (single-db connectors), Lakehouse Id/ItemKind, native SQL
@@ -373,8 +478,7 @@ src/pbixtractor/
                     columns empty); those would need the XMLA endpoint, which is NOT planned (a
                     report may live in a Pro workspace). Pipeline uses it when
                     options.service_model is set or <report>.fabric_source.json lies next to the
-                    report; it then replaces Desktop statistics (a downloaded report only matches
-                    a Desktop model by name, possibly another copy). DirectQuery tables are
+                    report; it then replaces the .pbix statistics. DirectQuery tables are
                     found with SemanticModel.partition_mode() (partition "default" → the
                     model's defaultMode).
   Report level      Every page/bookmark knows its report (PageDefinition.report/.title,
@@ -548,35 +652,53 @@ src/pbixtractor/
                     batch.py: the model once + the given reports (each bound byPath, with its
                     fabric_source.json; failures → skipped; all failed → FabricError); shares
                     _fetch_bound_report() with fetch_report's all_reports loop.
-  pbix_model.py     The model inside a .pbix (no .bim, Desktop or TE needed): PBIXRay (MIT dep)
+  pbix_model.py     The model inside a .pbix (no .bim or other program needed): PBIXRay (MIT dep)
                     unpacks DataModel → metadata.sqlitedb (TOM tables) → database_from_metadata()
                     builds the TMSL dict (TOM enum codes → TMSL names; skips internal H$/R$/U$
                     tables (SystemFlags bit 1 - bit 2 marks calculated tables such as DATATABLE
-                    or field parameters, which are kept) and rowNumber columns; carries annotations, so TE's BPA ignore rules survive, and
-                    isAvailableInMdx). compatibilityLevel 1567, or 1601 when a measure has a
-                    dynamic format string (TE 2.29 refuses a property newer than the level:
-                    "Unrecognized JSON property: formatStringDefinition" - BPA and exact
-                    dependencies would silently fall back). Verified on a real .pbix vs its exported .bim: only the known
+                    or field parameters, which are kept) and rowNumber columns; carries annotations, so BPA ignore rules survive, and
+                    isAvailableInMdx; perspectives with their tables/columns/measures/hierarchies
+                    (Perspective* TOM tables; without a PerspectiveTable table the model gets the
+                    annotation PERSPECTIVE_OBJECTS_UNKNOWN and the BPA leaves
+                    PERSPECTIVES_WITH_NO_OBJECTS "not checked"), alternateOf (AlternateOf) and
+                    defaultPowerBIDataSourceVersion (0/1/3 → powerBI_V1/V2/V3, from memory of the
+                    TOM enum; other values left out) when the metadata has them).
+                    compatibilityLevel 1567, or 1601 when a measure has a dynamic format string:
+                    this matters for loading the generated .bim in Tabular Editor (the comparison
+                    tool, tools/compare_tabular_editor.py) - TE 2.29 refuses a property newer than
+                    the level ("Unrecognized JSON property: formatStringDefinition") - not for the
+                    pipeline's BPA, which is Python. Verified on a real .pbix vs its exported .bim: only the known
                     version differences; TE BPA 125 = 125 findings. statistics_from_metadata():
                     rows (row-number column), distinct values ONLY for hash dictionaries
                     (DictionaryStorage.Type 1; value encoding stores a range), sizes via PBIXRay.
-                    The pipeline writes <name>_model.bim (TE input + download; never <name>.bim)
-                    and uses the .pbix statistics when neither Desktop nor the service gives any.
+                    The pipeline writes <name>_model.bim (a download; never <name>.bim)
+                    and uses the .pbix statistics when the service gives none.
                     has_embedded_model() (zip listing only), live_connection() (Connections file
                     → model id, workspace name if the connection string has it).
   semantic_model.py model_source(path) → the .bim file or TMDL definition folder (accepts
-                    .SemanticModel folders and model.tmdl too; the pipeline passes it to
-                    Tabular Editor, which loads both). read_model(path) → SemanticModel
+                    .SemanticModel folders and model.tmdl too; Tabular Editor (the developer
+                    check) loads both). read_model(path) → SemanticModel
                     (tables, columns,
                     measures, hierarchies+levels, partitions incl. Direct Lake entity, relationships
                     with cardinality/direction/active, shared expressions, roles/RLS).
+                    For the BPA also: annotations (dict) on model/tables/columns/measures/
+                    hierarchies/partitions/relationships/roles/expressions, Column
+                    is_available_in_mdx / alternate_of, Level/Partition/Role description,
+                    Partition.data_source, Role.members, Table.calculation_group (an empty
+                    group too) + is_calculated, SemanticModel model_name, data_sources
+                    (DataSource name/type), perspective_tables, default_powerbi_datasource_version,
+                    variation_columns (variation defaultColumn targets). tmdl.py fills the same
+                    (annotation nodes, alternateOf, variation, member, perspectiveTable,
+                    dataSource); pbix_model.py fills them from the .pbix metadata too.
                     model_to_dataset() → DataFrame identical to TE's TSV (verified on a real model:
                     all 459 objects match; only DAX whitespace differs; levels follow each
                     hierarchy - the workbooks read that order). write_documentation_tsv(model,
                     path) → documentation.tsv exactly like TE2 ExportProperties + SaveFile (header
                     Object+properties, \n-joined, no trailing newline, \n/\r/tab escaped, empty
                     cells, no quoting, UTF-8 no BOM; documentation_tsv_rows() = TE's order: all
-                    hierarchies, then all levels). structurally_used_columns():
+                    hierarchies, then all levels); the Expression of measures and calculated
+                    columns goes through dax_format.format_dax() (imported in the function:
+                    dax_format → dax_parser imports semantic_model), the rest as in the model. structurally_used_columns():
                     relationship keys, sort-by and hierarchy-level columns. Hierarchy levels are
                     sorted by `ordinal` (the .bim array order is not the level order).
   tmdl.py           TMDL folder → TMSL dict (same shape as a .bim) → parse_model(), so
@@ -588,22 +710,27 @@ src/pbixtractor/
                     (0 differences) and a real model: only calculated columns with an inferred
                     type lack dataType in TMDL (DataType "Unknown"). Test fixture:
                     tests/sample_tmdl.py (TE export of the sample BIM).
-  tabular_editor.py find_tabular_editor(); run_script() (write C# script with %FOLDER%, run
+  tabular_editor.py Developer-only: used by tools/compare_tabular_editor.py and its tests (and the
+                    `tabular_editor` tests), not by the program. Re-exports the names that moved
+                    out (BpaViolation/SEVERITIES/DEFAULT_BPA_RULES → bpa.py, Dependency/
+                    drop_redundant_table_refs → dax_parser.py, LiveStatistics/ColumnStatistics/
+                    statistics_from_rows → statistics.py), so old imports work.
+                    find_tabular_editor() (+ Input/TabularEditorLocations.txt,
+                    add_tabular_editor_location()); run_script() (write C# script with %FOLDER%, run
                     TE2 -S, collect output files); run_best_practice_analyzer() runs TE's
                     Analyzer in a script → (violations, rule errors) with rules from
                     data/BPARules.json (Microsoft, MIT, see BPARules.LICENSE). Do NOT use the
                     "-A" console output: it is truncated unpredictably (112 of 125 findings).
                     export_dependencies() runs a C# script (DependsOn) →
                     Dependency rows (measures, calc columns/tables, RLS TablePermission);
-                    drop_redundant_table_refs() removes 'T' when T[col] is also referenced.
                     export_documentation_tsv() = the old TabularScript.cs TSV export.
-  live_model.py     find_local_instances() (psutil: msmdsrv listening port + parent
-                    PBIDesktop cmdline = .pbix path); collect_live_statistics() picks the
-                    instance for the report (path match, else table-name Jaccard ≥ 0.8) and
-                    runs TE2 "localhost:<port>" "" -S script with ExecuteReader on
-                    INFO.STORAGETABLES/STORAGETABLECOLUMNS/STORAGETABLECOLUMNSEGMENTS,
-                    COLUMNSTATISTICS() + TOM measure DataType; build_statistics() aggregates
-                    like VertiPaq Analyzer (dictionary + data + H$ hierarchy per column).
+  statistics.py     LiveStatistics (tables, table_rows, table_sizes, columns, measure_types,
+                    errors; has_sizes, model_size), ColumnStatistics (distinct values,
+                    dictionary/data/hierarchy size), statistics_from_rows() (INFO.*-shaped rows
+                    → statistics, aggregated like VertiPaq Analyzer: dictionary + data + H$
+                    hierarchy per column), used by service_stats.py; pbix_model.py fills
+                    LiveStatistics itself. (live_model.py, the Desktop detection, was removed
+                    2026-10-30.)
   model_sheets.py   add_model_sheets() (model tables/columns/roles/parameters, optional live
                     stats columns; bpa= adds a last "Model quality" column to tables/columns -
                     main workbook only) and add_bpa_sheets() (model quality summary + findings).
@@ -611,6 +738,85 @@ src/pbixtractor/
                     High/Medium/Low/other, then rule name), bpa_cell(cells, table, name=None);
                     matched case-insensitively by ObjectType (Measure, *Column → 'Table'[Name];
                     *Table → name; others ignored) via parse_bpa_object_name() ('' and ]] escapes).
+                    add_bpa_sheets(not_checked=[(rule ID, reason)], a plain list; excel_report
+                    passes Documentation.bpa_not_checked): after the rule
+                    table on "model quality summary" (both workbooks) a "Rules not checked"
+                    block lists each rule not checked (severity, category, name, "Not checked",
+                    reason; not_checked_rows()), so "missing" never reads as "passed".
+  bpa.py            Python Best Practice Analyzer (D16: the only BPA a run uses). run_bpa(model,
+                    statistics=None, rules_path=DEFAULT_BPA_RULES, custom=None, disabled=(),
+                    dependencies=None) (D29: the pipeline computes model_dependencies once per
+                    run and passes it here; None = computed when a rule needs it)
+                    (custom = bpa_custom CustomRules, checked after the built-ins by
+                    rule_findings(); disabled = built-in ids skipped: neither findings nor
+                    "not checked"; a raising custom rule → not_checked "error: ..." + warning)
+                    → (violations [BpaViolation
+                    (defined here, with SEVERITIES and DEFAULT_BPA_RULES), most severe first], not_checked [(rule ID, reason)]).
+                    Rule metadata from data/BPARules.json (load_rules / rule_by_id, BpaRule);
+                    each check is a hand port of the rule's Expression (quoted in a comment),
+                    registered by rule ID in CHECKS via @check(id, requires=..., reason=...).
+                    Objects per TE scope (iter_objects → BpaObject), named as TE does (D24,
+                    GetTypeName / DaxObjectFullName): Model ("Model"), "Table (<mode>)" /
+                    "Calculated Table" / "Calculation Group Table" ('Table', ' doubled; mode by
+                    table_mode(): an entity partition → "DQ over AS", else the partitions' mode
+                    (defaultMode for "default"), all equal → that mode, mixed → "Hybrid"), every
+                    column "Column" ('Table'[Name], ] as ]]), Measure ([Name], ] as ]]),
+                    Hierarchy ('Table'[Name], ] NOT escaped), Level, partitions
+                    (partition_type_name: "Partition (M - <mode>)", "(Legacy - <mode>)", "(DQ
+                    over AS)", "(Policy Range)"), Calculation Item, Relationship (te_name),
+                    Perspective, Role, Table Permission (name = its table), "Data Source (Power
+                    Query)" (structured), "Data Source (Legacy)" (provider), "Expression" (shared
+                    expression; all three as Tabular Editor's GetTypeName).
+                    "Table (DirectQuery)" in a rule = table_mode DirectQuery (a Hybrid table is
+                    not). _Context.referenced_by builds its index locally and caches it only
+                    when complete (a crash = that rule's "not checked", the next rule retries).
+                    D26: the high-cardinality rule skips columns without a distinct count;
+                    "needs statistics" only when no column has one. A rule the model's ignore
+                    annotation lists is dropped before the statistics check (never "not
+                    checked"). All 71 rules have a check. The 21 DAX_RULES: regexes run on the
+                    expression text like TE's RegEx.IsMatch (comments and strings included, same
+                    (?i) flags; names TE pastes into a regex are re.escape'd); DependsOn /
+                    ReferencedBy (and ReferencedBy.AllMeasures, transitive) come from
+                    dax_parser.model_dependencies; FullyQualified from
+                    dax_parser.reference_occurrences (D23 order; a calculated table has no own
+                    table); object-level security is not read
+                    (UNNECESSARY_COLUMNS takes it as unset). not_checked reasons:
+                    "needs statistics" (row counts/cardinality from LiveStatistics, else
+                    Vertipaq_* / LongLengthRowCount / DateTimeWithHourMinSec annotations; RI
+                    violations only via annotation), "not supported offline" (a rule without a
+                    check, e.g. from another rules file), "error: ..." (a check raised: warning,
+                    never a failed run). Rules above the model's compatibility level are skipped
+                    silently (as TE). BestPracticeAnalyzer_IgnoreRules annotations ({"RuleIDs":
+                    [...]}) on an object or the model (= every object) suppress findings. KPIs
+                    are not modelled (their scope is never checked; no "[M].KPI" names).
+                    model_sheets.parse_bpa_object_name / bpa_by_object read [M] (matched by
+                    measure name) and 'T' / "Table (<mode>)" as well as the older shapes.
+  bpa_custom.py     Custom model quality rules (D6, D17, D18): a YAML file defined by
+                    PBIxtractor, USER_RULES_PATH = azure_auth.AUTH_DIR / "bpa_rules.yaml" (tests:
+                    conftest points it at a temp folder) or --bpa-rules FILE. `version: 1`,
+                    `disabled: [built-in ids]`, `rules: [{id ([A-Za-z0-9_-]+, unique, not a
+                    built-in's), name, category (default Custom), severity Low|Medium|High,
+                    description, scope, conditions (all hold), any (one holds)}]`, condition
+                    {property, op, value}. SCOPES: Measure, Column (every column), CalculatedColumn,
+                    Table (also calculated / calculation group), Relationship, Model; PROPERTIES
+                    name, table, description, format_string, data_type (TE spelling, e.g. Double),
+                    display_folder, hidden, expression (measures + calculated columns), dependants
+                    (ReferencedBy count from model_dependencies), each with the scopes it exists on
+                    (another scope = validation error); OPS equals / not_equals / contains / in
+                    (a list) case-insensitive, matches = a `regex`-package search, case-sensitive
+                    unless the pattern has (?i) (D25, as .NET Regex.IsMatch; compiled once,
+                    lru_cache), timeout MATCH_TIMEOUT = 2.0 s per object (D32): a TimeoutError =
+                    no match, breaks() logs one WARNING per rule and run ("Custom model quality
+                    rule <id>: the pattern took longer than 2 s on <object>; skipped", kept in
+                    _Context.custom_timeouts) and the run goes on; validate_rule compiles with
+                    `regex` too; is_empty / not_empty (no value); hidden/dependants compare
+                    values. load_rule_file(path) →
+                    RuleFile(rules, disabled, errors "<id | rule #n | file X>: <problem>"), never
+                    raises for content: bad YAML → no rules; a bad rule is dropped; unknown
+                    disabled ids named. validate_rule(dict), rule_from_dict / rule_to_dict,
+                    save_rule_file(path, rules, disabled) (temp file + os.replace, key order as
+                    above), evaluate_rule(rule, model, statistics=None) (for the web UI's
+                    "Test"; ignore annotations apply). Findings use iter_objects' names/types.
   readers.py        read_report(path): .pbix (legacy Report/Layout or PBIR Report/definition/),
                     .pbip, or <name>.Report folder → ReportDefinition → PageDefinition →
                     VisualDefinition (fields as FieldBinding(role, expr, query_ref,
@@ -682,23 +888,23 @@ src/pbixtractor/
    column, sometimes level). documentation.resolve_hierarchy_columns() maps level → column
    from the model (level "Year" → column "Year Number").
 3. `run_extraction()` always reads the model with `read_model(model_path)`. The measures/columns
-   dataset comes from `model_to_dataset(model)` (and is written as `documentation.tsv`), or from
-   Tabular Editor's `documentation.tsv` with `--tabular-editor-tsv` (columns: Object, Name, Description, SourceColumn, Expression,
+   dataset comes from `model_to_dataset(model)` (and is written as `documentation.tsv`; columns: Object, Name, Description, SourceColumn, Expression,
    FormatString, DataType, DisplayFolder; Object names `Model.T.<Table>`, `.C.<Col>`, `.M.`,
    `.H.`, `.P.`, `Relationship.<guid>`). Relationships (sheet columns Type, Child, Direction,
    Parent, Child Column, Parent Column, Cardinality, Active) and the table list always come
    from the model. Unused detection first drops `structurally_used_columns()`, then (with
-   exact dependencies) everything any DAX references by (table, name); without Tabular Editor
-   it falls back to DAX text matching of measures and calculated columns (misses unqualified
-   refs, matches text in comments). Measures stay "unused" unless a visual, filter or other DAX
+   exact dependencies, from dax_parser.model_dependencies() on every run) everything any DAX
+   references by (table, name); only if that analysis crashes it falls back to DAX text
+   matching of measures and calculated columns (misses unqualified refs, matches text in
+   comments). Measures stay "unused" unless a visual, filter or other DAX
    uses them — listed separately as "Measures not used in this report".
-   The TSV path garbles format strings starting with `"` (CSV quoting) — the .bim path doesn't.
 4. Writes `<name>.xlsx` (Common + one tab per report page, also empty pages + Pages + model
    sheets) and
    `<name>_data.xlsx` (pages, common, relationships, unused measures [Type column],
    dependencies [MeasureName, Dependent, Object Type, Dependent Type], model tables,
    model columns, model roles/parameters if any, model quality summary, model quality).
-   Live stats fill Rows/Size/% columns and measure DataType; otherwise they stay empty.
+   Statistics (.pbix / service) fill Rows/Size/% columns (the service has no sizes) and the
+   .pbix metadata the measure DataType; otherwise they stay empty.
    Both workbooks also get "report pages", "bookmarks" (if any) and "report filters"
    sheets; the Interactivity column holds hidden state, sync group and changed interactions.
    Workbooks are created with strings_to_formulas=False (conditions like "= Grey" used to
@@ -723,11 +929,13 @@ src/pbixtractor/
   cross-highlight selections (`visualContainers.*.highlight`) and drill state. With "Selected
   visuals", page/report filters are still listed (assumed applied - not verified in Desktop).
 - Old `Input/*.csv` files (from the removed DearPyGUI "User Input" tab) are not read; only
-  `Input/TabularEditorLocations.txt` is.
+  `Input/TabularEditorLocations.txt` is, and only by the developer check
+  (tabular_editor.find_tabular_editor()).
 - Text-matching dependency fallback order is set-based (not stable across runs). The data
   workbook's "dependencies" sheet headers (MeasureName, Dependent, ...) are unchanged on purpose
   (possible downstream consumers).
-- Windows-only: Tabular Editor 2 and Power BI Desktop detection (the rest is portable).
+- Nothing in a run is Windows-only (Tabular Editor and Desktop detection are gone); only the
+  Tabular Editor developer check needs Windows or Wine.
 - Editing tip: shell heredocs/sed mangle backslash escapes (\t, \n, \x00) in Python/C# code —
   write patch scripts with the file tool instead. Line endings: .gitattributes `text=auto`
   (LF in the repo, CRLF in the Windows checkout).
@@ -830,7 +1038,8 @@ Regression runs (`tools/regress.py`, `Input/regression.json`) use live reports: 
 `MANUAL_TESTS.md`.
 - `uv` is not on PATH in PowerShell: use `~\.local\bin\uv.exe`. `uv sync` error 396 = the uv cache
   holds cloud placeholders → `uv cache clean <packages from uv.lock>`, then sync again.
-- Tabular Editor must be ≥2.29 (2.21 failed the BPA script and TMDL loading).
+- Tabular Editor (developer check only) must be ≥2.29 (2.21 failed the BPA script and TMDL
+  loading).
 - Many client .pbix files are **Purview-encrypted** (start with `.pfile`): they cannot be read; the run fails with a clear ReportReadError (no traceback).
   Use Fabric or DevOps for those.
 
@@ -864,7 +1073,14 @@ pipeline and CLI on the anonymised sample data.
 - Don't commit anything in `output/` or `Input/` (both gitignored; regression config and
   baselines live there and may contain client data).
 - `tools/` holds developer scripts (not part of the package): regress.py, compare_xlsx.py,
-  compare_models.py.
+  compare_models.py, compare_tabular_editor.py (`MODEL [--tabular-editor PATH] [-o OUT.xlsx]`:
+  the Python BPA + dax_parser dependencies vs Tabular Editor 2's on one .bim / TMDL / .pbix model;
+  prints per-rule and dependency differences, writes compare_tabular_editor.xlsx with sheets
+  summary, bpa differences, dependency differences, object types; exit 2 = no TE or model, 1 = TE
+  failed. Python side gets no statistics, so statistics rules are "not checked" there),
+  compare_quality.py (`OLD_data.xlsx NEW_data.xlsx`: only the "model quality" and "dependencies"
+  sheets of two data workbooks - e.g. an old Tabular Editor run vs a new Python run of the same
+  model; case/space-insensitive; exit 0 same, 1 different, 2 bad arguments; zipfile, no openpyxl).
 
 ## Branches
 - `main`: legacy single-file `PB-Ixtractor.py` (has working button/bookmark logic).

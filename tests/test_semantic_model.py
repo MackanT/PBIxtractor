@@ -6,6 +6,7 @@ import json
 import pandas as pd
 import pytest
 
+from pbixtractor.dax_format import format_dax
 from pbixtractor.model_sheets import model_column_rows, model_table_rows
 from pbixtractor.semantic_model import (
     DATASET_COLUMNS,
@@ -345,9 +346,9 @@ def test_documentation_tsv_follows_tabular_editor_format(model, tmp_path):
 
     table_row = next(line for line in lines if line.startswith("Model.T.Sales\t"))
     assert table_row.split("\t")[2] == ""  # missing description: empty cell
-    # The multi-line calculated column stays on one line
-    column_row = next(line for line in lines if "IF (" in line)
-    assert "IF (\\n    Sales[Amount] > 100," in column_row
+    # The calculated column, formatted offline (it was written over four lines)
+    column_row = next(line for line in lines if line.startswith("Model.T.Sales.C.Is Big\t"))
+    assert "\tIF ( Sales[Amount] > 100, TRUE ( ) )\t" in column_row
 
 
 def test_documentation_tsv_escapes_line_breaks_and_tabs(tmp_path):
@@ -355,6 +356,9 @@ def test_documentation_tsv_escapes_line_breaks_and_tabs(tmp_path):
         "name": "T",
         "columns": [{"name": "C", "dataType": "string"}],
         "measures": [{"name": "M", "expression": "SUM (\r\n\tT[C]\n)", "description": "a\tb"}],
+        "partitions": [
+            {"name": "P", "source": {"type": "calculated", "expression": "ROW (\r\n\t\"x\", 1\n)"}}
+        ],
         "hierarchies": [
             {"name": "H1", "levels": [{"name": "L1", "ordinal": 0, "column": "C"}]},
             {"name": "H2", "levels": [{"name": "L2", "ordinal": 0, "column": "C"}]},
@@ -365,7 +369,9 @@ def test_documentation_tsv_escapes_line_breaks_and_tabs(tmp_path):
     lines = path.read_text(encoding="utf-8").split("\n")
 
     measure = next(line for line in lines if line.startswith("Model.T.T.M.M\t")).split("\t")
-    assert measure[DATASET_COLUMNS.index("Expression")] == "SUM (\\r\\n\\tT[C]\\n)"
+    assert measure[DATASET_COLUMNS.index("Expression")] == "SUM ( T[C] )"  # formatted
+    partition = next(line for line in lines if line.startswith("Model.T.T.P.P\t")).split("\t")
+    assert partition[DATASET_COLUMNS.index("Expression")] == 'ROW (\\r\\n\\t"x", 1\\n)'
     assert measure[DATASET_COLUMNS.index("Description")] == "a\\tb"
     assert len(lines) == len(model_to_dataset(model)) + 1
     # All hierarchies first, then all levels (model_to_dataset keeps levels after each one)
@@ -387,8 +393,47 @@ def test_documentation_tsv_round_trip(model, tmp_path):
         lambda column: column.str.replace(r"\\[nrt]", lambda m: unescape[m.group(0)], regex=True)
     )
     expected = documentation_tsv_rows(model)
+    dax = expected["Object"].str.contains(r"\.(?:M\.|C\.Is Big$)")  # measures + calculated column
+    expected.loc[dax, "Expression"] = expected.loc[dax, "Expression"].map(format_dax)
 
     assert list(read.columns) == DATASET_COLUMNS
     assert read.fillna("").values.tolist() == expected.fillna("").values.tolist()
     # Only the order of hierarchies and levels differs from model_to_dataset
     assert sorted(expected["Object"]) == sorted(model_to_dataset(model)["Object"])
+
+
+def test_documentation_tsv_formats_measures_and_calculated_columns_only(tmp_path):
+    table = {
+        "name": "T",
+        "columns": [
+            {"name": "C", "dataType": "int64", "sourceColumn": "C"},
+            {"name": "Big", "type": "calculated", "expression": "if(T[C]>1,1,0)"},
+        ],
+        "measures": [
+            {"name": "M", "expression": "calculate(sum(T[C]),all(T),T[C]=1)"},
+            {"name": "Odd", "expression": "SUM ( T[C]"},  # unparseable: left as written
+        ],
+    }
+    calculated = {
+        "name": "CT",
+        "columns": [{"name": "x", "type": "calculatedTableColumn", "sourceColumn": "[x]"}],
+        "partitions": [
+            {"name": "CT", "source": {"type": "calculated", "expression": "row(\"x\",sum(T[C]))"}}
+        ],
+    }
+    model = parse_model({"model": {"tables": [table, calculated]}})
+    path = write_documentation_tsv(model, tmp_path / "documentation.tsv")
+    rows = {
+        line.split("\t")[0]: line.split("\t")[DATASET_COLUMNS.index("Expression")]
+        for line in path.read_text(encoding="utf-8").split("\n")[1:]
+    }
+
+    assert rows["Model.T.T.M.M"] == (
+        "CALCULATE (\\n    SUM ( T[C] ),\\n    ALL ( T ),\\n    T[C] = 1\\n)"
+    )
+    assert rows["Model.T.T.C.Big"] == "IF ( T[C] > 1, 1, 0 )"
+    assert rows["Model.T.T.M.Odd"] == "SUM ( T[C]"
+    assert rows["Model.T.CT.P.CT"] == 'row("x",sum(T[C]))'  # calculated table: as written
+    # The dataset the workbooks and JSON are built from keeps the DAX as written
+    dataset = model_to_dataset(model).set_index("Object")
+    assert dataset.loc["Model.T.T.M.M", "Expression"] == "calculate(sum(T[C]),all(T),T[C]=1)"

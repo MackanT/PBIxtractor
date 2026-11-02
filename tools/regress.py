@@ -52,9 +52,8 @@ def main() -> int:
     parser.add_argument(
         "--save-baseline", action="store_true", help="store this run as the new baseline"
     )
-    parser.add_argument(
-        "--no-tabular-editor", action="store_true", help="skip BPA/dependencies/live statistics"
-    )
+    # Old option (Tabular Editor is no longer used): accepted, does nothing
+    parser.add_argument("--no-tabular-editor", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--only", help="run only the report with this name")
     args = parser.parse_args()
 
@@ -81,7 +80,6 @@ def main() -> int:
                 model_path=model,
                 output_dir=out,
                 name=name,
-                tabular_editor_analysis=not args.no_tabular_editor,
                 write_log_file=False,
             )
         )

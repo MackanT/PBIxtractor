@@ -12,7 +12,7 @@ os.environ["NICEGUI_STORAGE_PATH"] = tempfile.mkdtemp(prefix="pbixtractor_nicegu
 import msal  # noqa: E402
 import pytest  # noqa: E402
 
-from pbixtractor import azure_auth  # noqa: E402
+from pbixtractor import azure_auth, bpa_custom  # noqa: E402
 
 _real_create_connection = socket.create_connection
 
@@ -28,8 +28,8 @@ def _local_only_connection(address, *args, **kwargs):
 @pytest.fixture(autouse=True)
 def no_real_sign_in(monkeypatch, tmp_path_factory):
     """No real credential, no personal access token and no network beyond 127.0.0.1. The
-    account list and token cache live in a temp folder (never ~/.pbixtractor or the OS
-    keyring), and no MSAL app or browser sign-in can start (tests pass fake MSAL apps)."""
+    account list, token cache and custom rule file live in a temp folder (never ~/.pbixtractor
+    or the OS keyring), and no MSAL app or browser sign-in can start (tests pass fake MSAL apps)."""
 
     def refuse(*args, **kwargs):
         raise azure_auth.ApiError("Real sign-in is disabled in tests")
@@ -39,7 +39,10 @@ def no_real_sign_in(monkeypatch, tmp_path_factory):
 
     monkeypatch.setattr(azure_auth, "get_credential", refuse)
     monkeypatch.setattr(azure_auth, "default_credential", refuse)
-    monkeypatch.setattr(azure_auth, "AUTH_DIR", tmp_path_factory.mktemp("pbixtractor_auth"))
+    auth_dir = tmp_path_factory.mktemp("pbixtractor_auth")
+    monkeypatch.setattr(azure_auth, "AUTH_DIR", auth_dir)
+    # The user's custom model quality rules: never the real ~/.pbixtractor/bpa_rules.yaml
+    monkeypatch.setattr(bpa_custom, "USER_RULES_PATH", auth_dir / "bpa_rules.yaml")
     monkeypatch.setattr(azure_auth, "_new_app", refuse)
     monkeypatch.setattr(azure_auth, "_encrypted_persistence", no_keyring)
     monkeypatch.setattr(azure_auth, "_browser_login_allowed", True)

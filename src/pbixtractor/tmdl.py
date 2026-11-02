@@ -20,7 +20,8 @@ Syntax handled (https://learn.microsoft.com/analysis-services/tmdl/tmdl-overview
         partition Sales = m              partition source type after "="
             source =                     expression property (no name)
     ref table Sales                      table order (model.tmdl)
-Annotations, lineage tags, cultures and similar metadata are read but not used.
+Annotations are kept (the Best Practice Analyzer reads its ignore settings from them); lineage
+tags, cultures and similar metadata are read but not used.
 """
 
 import re
@@ -218,7 +219,21 @@ def parse_tmdl(text: str) -> list[TmdlNode]:
 def _with_description(data: dict, node: TmdlNode) -> dict:
     if node.description:
         data["description"] = node.description
+    return _with_annotations(data, node)
+
+
+def _with_annotations(data: dict, node: TmdlNode) -> dict:
+    """annotation Name = value children -> TMSL "annotations": [{"name", "value"}]."""
+    annotations = [{"name": a.name, "value": a.value or ""} for a in node.all("annotation")]
+    if annotations:
+        data["annotations"] = annotations
     return data
+
+
+def _qualified(reference) -> dict:
+    """'Sales'.Amount -> {"table": "Sales", "column": "Amount"}."""
+    table, column = split_qualified(str(reference))
+    return {"table": table, "column": column}
 
 
 def _measure(node: TmdlNode) -> dict:
@@ -240,6 +255,17 @@ def _column(node: TmdlNode, calculated_table: bool) -> dict:
         data["type"] = "calculatedTableColumn"
     if "sortByColumn" in data:
         data["sortByColumn"] = unquote_name(data["sortByColumn"])
+    alternate = node.child("alternateOf")
+    if alternate is not None:
+        data["alternateOf"] = dict(alternate.properties) or {"summarization": "default"}
+    variations = []
+    for variation in node.all("variation"):
+        found = {"name": variation.name, **variation.properties}
+        if isinstance(found.get("defaultColumn"), str):
+            found["defaultColumn"] = _qualified(found["defaultColumn"])
+        variations.append(found)
+    if variations:
+        data["variations"] = variations
     return _with_description(data, node)
 
 
@@ -252,7 +278,7 @@ def _partition(node: TmdlNode) -> dict:
         for key, value in source_node.properties.items():
             source[key] = unquote_name(value) if isinstance(value, str) else value
     data = {"name": node.name, **node.properties, "source": source}
-    return data
+    return _with_description(data, node)
 
 
 def _table(node: TmdlNode) -> dict:
@@ -294,7 +320,7 @@ def _relationship(node: TmdlNode) -> dict:
         reference = data.get(f"{side}Column")
         if isinstance(reference, str):
             data[f"{side}Table"], data[f"{side}Column"] = split_qualified(reference)
-    return data
+    return _with_annotations(data, node)
 
 
 def _role(node: TmdlNode) -> dict:
@@ -306,6 +332,7 @@ def _role(node: TmdlNode) -> dict:
                 {"name": p.name, "filterExpression": p.value or "", **p.properties}
                 for p in node.all("tablePermission")
             ],
+            "members": [{"memberName": m.name, **m.properties} for m in node.all("member")],
         },
         node,
     )
@@ -335,6 +362,7 @@ def to_tmsl(nodes: list[TmdlNode]) -> dict:
         return [objects[name] for name in order]
 
     model = {
+        "name": model_node.name,
         **model_node.properties,
         "tables": [_table(n) for n in in_model_order("table")],
         "relationships": [_relationship(n) for n in nodes if n.keyword == "relationship"],
@@ -346,8 +374,16 @@ def to_tmsl(nodes: list[TmdlNode]) -> dict:
             if n.keyword == "expression"
         ],
         "roles": [_role(n) for n in in_model_order("role")],
-        "perspectives": [{"name": n.name} for n in nodes if n.keyword == "perspective"],
+        "perspectives": [
+            {"name": n.name, "tables": [{"name": t.name} for t in n.all("perspectiveTable")]}
+            for n in nodes
+            if n.keyword == "perspective"
+        ],
+        "dataSources": [
+            {"name": n.name, **n.properties} for n in nodes if n.keyword == "dataSource"
+        ],
     }
+    _with_annotations(model, model_node)
     result = {"name": database.name or model_node.name, **database.properties, "model": model}
     level = result.get("compatibilityLevel")
     if isinstance(level, str) and level.isdigit():

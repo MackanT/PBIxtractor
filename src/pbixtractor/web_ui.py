@@ -32,10 +32,9 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from nicegui import app, background_tasks, events, run, ui
 
-from . import __version__, azure_auth, batch, fabric, web_config, web_sources
+from . import __version__, azure_auth, batch, fabric, web_config, web_rules, web_sources
 from .azure_auth import ApiError
 from .data import DATA_DIR
-from .live_model import find_local_instances
 from .pbix_model import LiveConnection, live_connection
 from .pipeline import (
     REPORT_SUFFIXES,
@@ -47,7 +46,6 @@ from .pipeline import (
     run_extraction,
 )
 from .service_stats import ServiceModel
-from .tabular_editor import add_tabular_editor_location, find_tabular_editor
 from .theme import apply_theme, card_header, page_title, serve_fonts, stat_tile
 from .web_config import output_root, stored_choices, url
 from .web_sources import DevOpsPanel, FabricPanel
@@ -148,6 +146,13 @@ def register_routes() -> None:
     app.add_api_route(url("/catalog/{path:path}"), _serve_catalog_file, methods=["GET"])
 
 
+def register_app_pages() -> None:
+    """The stand-alone app's pages besides the root (index): /rules. Never embedded: the rules
+    page edits this PC's rule file (D22). Called by start() only (NiceGUI's test teardown
+    unloads the module of every page function, so tests register their own wrapper)."""
+    ui.page("/rules", title="Model quality rules - PBIxtractor")(rules_index)
+
+
 def register(
     prefix: str = "/pbixtractor",
     *,
@@ -155,6 +160,7 @@ def register(
     storage_prefix: str = "pbixtractor.",
     local_machine: bool = False,
     access: Optional[Callable[[], bool]] = None,
+    bpa_rules: Optional[Path] = None,
 ) -> None:
     """
     Embed PBIxtractor in another NiceGUI app: call once at startup (before ui.run), then call
@@ -168,10 +174,13 @@ def register(
         output_root: Where documentation, uploads and downloads go (default <cwd>/output)
         storage_prefix: Prefix of PBIxtractor's keys in app.storage.general
         local_machine: True only if every user's browser runs on the server's own PC - it
-            allows browsing the server's disk, server paths, Power BI Desktop detection, ...
+            allows browsing the server's disk, server paths, opening the output folder, ...
         access: The host's sign-in/role check, called for every request to the file routes
             (they are plain HTTP routes, outside the host's page login); False → 403. Show
             the page itself only to the same users.
+        bpa_rules: The custom model quality rules file (bpa_custom.py) of every run started
+            from the page; None = the server account's ~/.pbixtractor/bpa_rules.yaml. There
+            is no rules page embedded: the host manages the file.
     """
     web_config.configure(
         prefix=prefix.rstrip("/"),
@@ -180,6 +189,7 @@ def register(
         local_machine=local_machine,
         embedded=True,
         access=access,
+        bpa_rules=Path(bpa_rules) if bpa_rules else None,
     )
     # A browser sign-in would open on the server: only a service principal from the
     # environment signs in (else Fabric/DevOps calls fail with an error naming its variables)
@@ -314,7 +324,7 @@ def _log_text(logs: str) -> None:
 
 
 def _log_count(logs: str) -> int:
-    """Number of log messages (a message can span several lines, e.g. Tabular Editor output)."""
+    """Number of log messages (a message can span several lines, e.g. a traceback)."""
     return len(re.findall(r"^(?:DEBUG|INFO|WARNING|ERROR|CRITICAL): ", logs or "", re.MULTILINE))
 
 
@@ -404,8 +414,7 @@ def _render_result(container: ui.element, result: ExtractionResult, options: Ext
             with ui.tab_panel(quality_tab):
                 if doc["quality"] is None:
                     ui.label(
-                        "Best Practice Analyzer did not run (Tabular Editor analysis off or "
-                        "Tabular Editor 2 not found)."
+                        "The model quality check did not run (see the log)"
                     ).classes("text-grey-7")
                 else:
                     counts = Counter(v["rule"] for v in doc["quality"])
@@ -716,11 +725,14 @@ def _catalog_ready() -> bool:
     return _CATALOG["dir"] is not None and (Path(_CATALOG["dir"]) / "catalog.html").is_file()
 
 
-def _build_shell():
+def _build_shell(active: str = "/"):
     """Stand-alone app shell: header + slim icon rail (one continuous brand band).
 
     The menu button toggles the rail between icons and icons + labels; it never hides it.
     Returns the rail's refresh function (the Catalog entry appears once a catalog exists).
+
+    Args:
+        active: The app page shown ("/" documentation, "/rules" model quality rules)
     """
     remembered = stored_choices()
     dark = ui.dark_mode(bool(remembered.get("dark_mode", False)))  # light is the default
@@ -757,21 +769,32 @@ def _build_shell():
 
     @ui.refreshable
     def nav() -> None:
-        entries = [("description", "Document a report", None, "nav_document")]
+        # (icon, label, app page or None, generated page (new tab) or None, marker)
+        entries = [
+            ("description", "Document a report", "/", None, "nav_document"),
+            ("rule", "Model quality rules", "/rules", None, "nav_rules"),
+        ]
         if _catalog_ready():
-            entries.append(("menu_book", "Catalog", "/catalog/catalog.html", "nav_catalog"))
+            entries.append(("menu_book", "Catalog", None, "/catalog/catalog.html", "nav_catalog"))
             if (Path(_CATALOG["dir"]) / "lineage.html").is_file():
-                entries.append(("hub", "Lineage across models", "/catalog/lineage.html", "nav_cross_lineage"))
-        for icon, label, page, marker in entries:
+                entries.append(
+                    ("hub", "Lineage across models", None, "/catalog/lineage.html", "nav_cross_lineage")
+                )
+        for icon, label, app_page, page, marker in entries:
+            current = app_page == active
+            if page:
+                on_click = lambda p=page: ui.navigate.to(_themed(p), new_tab=True)  # noqa: E731
+            elif not current:
+                on_click = lambda p=app_page: ui.navigate.to(p)  # noqa: E731
+            else:
+                on_click = None
             button = ui.button(
-                label if rail["expanded"] else "",
-                icon=icon,
-                on_click=(lambda p=page: ui.navigate.to(_themed(p), new_tab=True)) if page else None,
+                label if rail["expanded"] else "", icon=icon, on_click=on_click
             ).props(f'flat color=white aria-label="{label}"')
             button.classes(
                 ("rail-btn-x" if rail["expanded"] else "rail-btn")
                 + " nav-btn"
-                + ("" if page else " nav-active")
+                + (" nav-active" if current else "")
             ).mark(marker)
             if not rail["expanded"]:
                 button.tooltip(label + (" (opens in a new tab)" if page else ""))
@@ -799,6 +822,43 @@ def index() -> None:
     build_page(on_catalog_change=refresh_nav)
 
 
+def rules_index() -> None:
+    """The stand-alone app's "Model quality rules" page (/rules): theme, shell and the page."""
+    apply_theme()
+    _build_shell(active="/rules")
+    web_rules.build_rules_page()
+
+
+def _remember_for_rules(result: ExtractionResult, options: ExtractionOptions) -> None:
+    """Keep a successful run's model for the rules page's "Test" (web_rules). Embedded there is
+    no rules page, so no model is kept in memory (D27)."""
+    documentation = result.documentation
+    if web_config.CONFIG.embedded or not result.ok or documentation is None:
+        return
+    web_rules.remember_run(
+        options.name if options.extra_reports else model_name(options.model_path),
+        documentation.model,
+        documentation.live_statistics,
+        report=options.name,
+    )
+
+
+def _run_and_remember(options: ExtractionOptions, progress, on_log) -> ExtractionResult:
+    """run_extraction, then keep its model for "Test" (in the run's thread: also when the tab
+    that started it is gone)."""
+    result = run_extraction(options, progress, on_log)
+    _remember_for_rules(result, options)
+    return result
+
+
+def _remember_outcome_for_rules(outcome: batch.JobOutcome) -> None:
+    """Keep a successful batch model for "Test" (read again from its file when tested)."""
+    options = outcome.options
+    if not web_config.CONFIG.embedded and outcome.ok and options is not None:
+        name = options.name if options.extra_reports else model_name(options.model_path)
+        web_rules.remember_model_file(name, options.model_path, report=options.name)
+
+
 def build_page(
     on_catalog_change: Optional[Callable[[], None]] = None, *, title: Optional[bool] = None
 ) -> None:
@@ -817,7 +877,6 @@ def build_page(
     """
     embedded = web_config.CONFIG.embedded
     local = web_config.CONFIG.local_machine
-    tabular_editor = find_tabular_editor()
     # Sent as JavaScript once the page is live: a host switching sections client-side
     # (ui.sub_pages) builds this after the first load, when added <body> HTML never arrives
     ui.timer(0.01, lambda: ui.run_javascript(_THEME_SYNC), once=True)
@@ -853,7 +912,7 @@ def build_page(
             on_catalog_change = catalog_link.refresh
         with ui.row().classes("w-full gap-4 items-stretch"):
             # ---------------- inputs ----------------
-            # basis-0: long help texts wrap instead of pushing the Environment card down
+            # basis-0: long help texts wrap instead of widening the card
             with ui.card().classes("grow basis-0 min-w-[420px]"):
                 with ui.row().classes("w-full items-center no-wrap gap-2"):
                     card_header(
@@ -1063,16 +1122,6 @@ def build_page(
                 output_input.set_visibility(local)  # a server path: output_root()/<name> otherwise
 
                 with ui.expansion("Options", icon="tune").classes("w-full") as options_box:
-                    te_analysis = ui.switch(
-                        "Tabular Editor analysis: Best Practice Analyzer, exact DAX dependencies, "
-                        "live statistics (runs locally)",
-                        value=tabular_editor is not None,
-                    )
-                    te_tsv = ui.switch(
-                        "Use Tabular Editor TSV export (formats DAX via daxformatter.com - "
-                        "sends DAX online)",
-                        value=False,
-                    )
                     service_stats = ui.switch(
                         "Row counts and distinct values from the Power BI service (reports "
                         "downloaded from Fabric; read-only DAX queries)",
@@ -1105,88 +1154,6 @@ def build_page(
                     description_tag = ui.input(
                         "Description tag in DAX", value=ExtractionOptions.description_tag
                     ).classes("w-48")
-
-            # ---------------- environment ----------------
-            with ui.card().classes("w-[380px] max-w-full"):
-                with ui.row().classes("w-full items-center no-wrap gap-2"):
-                    card_header(
-                        "settings_suggest",
-                        "Environment",
-                        "What this PC adds to a run" if local else "What the server adds to a run",
-                    )
-                with ui.row().classes("items-center no-wrap"):
-                    if tabular_editor:
-                        ui.icon("check_circle", color="positive")
-                        ui.label("Tabular Editor 2 found").tooltip(str(tabular_editor))
-                    else:
-                        ui.icon("cancel", color="negative")
-                        ui.label(
-                            "Tabular Editor 2 not found - BPA, exact dependencies and live "
-                            "statistics are unavailable"
-                        ).classes("text-sm")
-                if not tabular_editor and local:
-
-                    def save_location() -> None:
-                        if add_tabular_editor_location(te_folder.value or ""):
-                            ui.navigate.reload()
-                        else:
-                            ui.notify("No TabularEditor.exe in that folder.", type="warning")
-
-                    with ui.row().classes("w-full items-center no-wrap"):
-                        te_folder = (
-                            ui.input("Tabular Editor 2 folder", placeholder=r"C:\Tools\TabularEditor")
-                            .classes("grow")
-                            .mark("te_folder")
-                        )
-                        ui.button("Save", on_click=save_location).props("flat dense")
-                desktop_box = ui.column().classes("gap-1")
-
-                refresh_state = {"seq": 0}
-
-                async def refresh_desktop(delay: float = 0.0) -> None:
-                    """Scan for Power BI Desktop off the event loop (psutil can take seconds);
-                    while typing, only the last change within `delay` seconds scans."""
-                    refresh_state["seq"] += 1
-                    seq = refresh_state["seq"]
-                    if delay:
-                        await asyncio.sleep(delay)
-                        if seq != refresh_state["seq"]:
-                            return
-                    instances = await run.io_bound(find_local_instances)
-                    if seq != refresh_state["seq"] or desktop_box.is_deleted:
-                        return  # a newer scan runs, or the page is gone
-                    desktop_box.clear()
-                    selected = Path(report_input.value) if report_input.value else None
-                    with desktop_box:
-                        if not instances:
-                            with ui.row().classes("items-center no-wrap"):
-                                ui.icon("info", color="grey")
-                                ui.label(
-                                    "No report open in Power BI Desktop (open it to add row "
-                                    "counts, sizes and measure types)"
-                                ).classes("text-sm text-grey-8")
-                        for instance in instances:
-                            name = instance.report_path.name if instance.report_path else "?"
-                            match = bool(
-                                selected
-                                and instance.report_path
-                                and os.path.normcase(instance.report_path)
-                                == os.path.normcase(selected)
-                            )
-                            with ui.row().classes("items-center no-wrap"):
-                                ui.icon(
-                                    "monitoring", color="positive" if match else "grey"
-                                ).classes("flex-none")
-                                ui.label(
-                                    f"Desktop: {name} (port {instance.port})"
-                                    + (" - live statistics will be included" if match else "")
-                                ).classes("text-sm")
-
-                if local:  # Power BI Desktop on the server is no use to a remote user
-                    ui.button(
-                        "Refresh", icon="refresh", on_click=lambda: refresh_desktop()
-                    ).props("flat dense")
-                    ui.timer(0.05, lambda: refresh_desktop(), once=True)  # after the page is sent
 
         # ---------------- run ----------------
         batch_stop: dict[str, Optional[threading.Event]] = {"event": None}  # the running batch's
@@ -1258,8 +1225,6 @@ def build_page(
             auto_model["value"] = model_input.value or None
         output_input.value = auto_output["value"] = str(output_root() / report_name(path))
         selection.refresh()  # typing another report leaves a drop's other reports out
-        if local:
-            background_tasks.create(refresh_desktop(delay=0.5), name="refresh_desktop")
 
     auto_model = {"value": None}  # the model value on_report_change filled in last
     auto_output = {"value": None}  # the output folder on_report_change suggested last
@@ -1328,11 +1293,10 @@ def build_page(
         settings = batch.BatchSettings(
             output_root=output_root(),
             catalog_dir=catalog_dir,
-            tabular_editor_analysis=te_analysis.value,
-            tabular_editor_tsv=te_tsv.value,
             service_statistics=service_stats.value,
             write_log_file=log_file.value,
             description_tag=description_tag.value or ExtractionOptions.description_tag,
+            bpa_rules=web_config.CONFIG.bpa_rules,
         )
         if catalog_input.value and local:  # a server path: only remembered when chosen locally
             stored_choices()["catalog_dir"] = catalog_input.value
@@ -1367,7 +1331,10 @@ def build_page(
                 settings,
                 lambda step, fraction: events.put(("progress", step, fraction)),
                 lambda level, message: events.put(("log", level, message)),
-                lambda index, outcome: events.put(("outcome", index, outcome)),
+                lambda index, outcome: (
+                    _remember_outcome_for_rules(outcome),
+                    events.put(("outcome", index, outcome)),
+                ),
                 stop.is_set,
             )
         except Exception as error:  # UI boundary: never let a click end without any message
@@ -1482,14 +1449,13 @@ def build_page(
             output_dir=Path(output_input.value or output_root() / (name or report_name(report))),
             name=name,
             description_tag=description_tag.value or ExtractionOptions.description_tag,
-            tabular_editor_analysis=te_analysis.value,
-            tabular_editor_tsv=te_tsv.value,
             write_log_file=log_file.value,
             extra_reports=extra_reports,
             not_included=not_included,
             service_statistics=service_stats.value,
             catalog_dir=Path(catalog_input.value) if add_catalog.value and catalog_input.value else None,
             service_model=service_model,
+            bpa_rules=web_config.CONFIG.bpa_rules,
         )
         remembered = stored_choices()
         remembered["catalog_enabled"] = add_catalog.value
@@ -1516,7 +1482,7 @@ def build_page(
         timer = ui.timer(0.2, drain)
         try:
             result: ExtractionResult = await run.io_bound(
-                run_extraction,
+                _run_and_remember,
                 options,
                 lambda step, fraction: events.put(("progress", step, fraction)),
                 lambda level, message: events.put(("log", level, message)),
@@ -1559,6 +1525,7 @@ def start(port: int = 8081, open_browser: bool = True, host: Optional[str] = Non
     """
     web_config.configure()  # stand-alone: no prefixes, this PC's own disk (local_machine)
     register_routes()
+    register_app_pages()
     add_host_check(port)
     if open_browser:
         connected = asyncio.Event()

@@ -1,25 +1,22 @@
-"""Tests for live statistics (row counts, sizes, distinct values) from Power BI Desktop."""
+"""Tests for model statistics (statistics.py): row counts, sizes, distinct values."""
 
-from pathlib import Path
+import csv
+import io
 
-from pbixtractor.live_model import (
-    LocalInstance,
-    build_statistics,
-    find_instance_for_report,
-    tables_match,
-)
 from pbixtractor.model_sheets import model_column_rows, model_table_rows
 from pbixtractor.semantic_model import parse_model
+from pbixtractor.statistics import LiveStatistics, statistics_from_rows
 
 from .test_semantic_model import BIM
 
 
-def _tsv(*rows: str) -> str:
-    return "\n".join(rows) + "\n"
+def _tsv(*rows: str) -> list[dict]:
+    text = "\n".join(rows) + "\n"
+    return list(csv.DictReader(io.StringIO(text), delimiter="\t", quoting=csv.QUOTE_NONE))
 
 
-# Shaped like the real INFO.* output captured from Power BI Desktop (Adventure Works)
-FILES = {
+# Shaped like the real INFO.* output (Adventure Works)
+ROWS = {
     "tables": _tsv("Table", "Sales", "Dates"),
     "measures": _tsv("Table\tMeasure\tDataType", "Sales\tTotal Amount\tDecimal"),
     "storage_tables": _tsv(
@@ -52,8 +49,8 @@ FILES = {
 }
 
 
-def test_build_statistics():
-    stats = build_statistics(FILES)
+def test_statistics_from_rows():
+    stats = statistics_from_rows(ROWS)
 
     assert stats.tables == {"Sales", "Dates"}
     assert stats.table_rows == {"Sales": 1000, "Dates": 365}  # H$ storage tables ignored
@@ -70,37 +67,15 @@ def test_build_statistics():
     assert stats.model_size == stats.table_sizes["Sales"] + 3000 + 200
 
 
-def test_build_statistics_tolerates_missing_queries():
-    stats = build_statistics({"tables": FILES["tables"]})
+def test_statistics_from_rows_tolerates_missing_queries():
+    stats = statistics_from_rows({"tables": ROWS["tables"]})
     assert stats.tables == {"Sales", "Dates"}
     assert stats.columns == {} and stats.table_rows == {}
 
 
-def test_tables_match():
-    assert tables_match({"Sales", "Dates"}, {"Sales", "Dates"})
-    assert tables_match({"A", "B", "C", "D", "E"}, {"A", "B", "C", "D", "E", "F"})  # 5/6
-    assert not tables_match({"Sales", "Dates"}, {"Customers", "Dates"})
-    assert not tables_match(set(), {"Sales"})
-
-
-def test_find_instance_for_report(tmp_path):
-    report = tmp_path / "Report.pbix"
-    instances = [
-        LocalInstance(1111, tmp_path / "Other.pbix", 1),
-        LocalInstance(2222, Path(str(report).upper()), 2),  # paths compare case-insensitively
-        LocalInstance(3333, None, 3),  # opened via File > Open: report unknown
-    ]
-    exact, unknown = find_instance_for_report(report, instances)
-    assert exact.port == 2222
-    assert [i.port for i in unknown] == [3333]
-
-    exact, unknown = find_instance_for_report(tmp_path / "Missing.pbix", instances)
-    assert exact is None and [i.port for i in unknown] == [3333]
-
-
 def test_model_sheet_rows_with_statistics():
     model = parse_model(BIM)
-    stats = build_statistics(FILES)
+    stats = statistics_from_rows(ROWS)
 
     tables = {row[0]: row for row in model_table_rows(model, stats)}
     # ..., Rows, Size (MB), % of Model, Description
@@ -114,3 +89,17 @@ def test_model_sheet_rows_with_statistics():
 
     # Without statistics the columns are simply empty
     assert model_table_rows(model)[0][9:12] == [None, None, None]
+
+
+def test_moved_names_still_import_from_tabular_editor():
+    """The shared types moved out of tabular_editor.py (developer-only), which re-exports them."""
+    from pbixtractor import bpa, dax_parser, statistics, tabular_editor
+
+    assert tabular_editor.BpaViolation is bpa.BpaViolation
+    assert tabular_editor.SEVERITIES is bpa.SEVERITIES
+    assert tabular_editor.DEFAULT_BPA_RULES == bpa.DEFAULT_BPA_RULES
+    assert tabular_editor.Dependency is dax_parser.Dependency
+    assert tabular_editor.drop_redundant_table_refs is dax_parser.drop_redundant_table_refs
+    assert tabular_editor.LiveStatistics is statistics.LiveStatistics is LiveStatistics
+    assert tabular_editor.ColumnStatistics is statistics.ColumnStatistics
+    assert tabular_editor.statistics_from_rows is statistics.statistics_from_rows

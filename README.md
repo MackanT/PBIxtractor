@@ -19,7 +19,8 @@ offline HTML lineage viewer, with:
 - 📈 **Relationship Diagrams** - NetworkX-powered visualization of table relationships
 - 🎯 **Filter Documentation** - Page-level and visual-level filter tracking
 - 🔗 **Dependency Tracking** - Shows which measures use which columns/tables
-- ⚡ **Tabular Editor Integration** - Leverages TE2 for deep semantic model analysis
+- ⚡ **Model Analysis in Python** - Best Practice Analyzer, exact DAX dependencies and DAX
+  formatting on every OS, offline, with no other program to install
 
 ## Installation
 
@@ -73,6 +74,15 @@ page shows the lineage viewer inline, the Best Practice Analyzer findings, unuse
 bookmarks, row-level security roles (flagged, so protected reports are shared with care) and
 download links for all output files. Everything runs locally.
 
+The rail's **Model quality rules** page lists the built-in Best Practice Analyzer rules (search
+them, switch any off) and your own custom rules: add, edit or delete one with a form (scope,
+severity, conditions on name, description, DAX, ...). "Test" runs the rule in the form on the
+model of the last documentation run in the app, without saving it. Every change is saved at
+once to `~/.pbixtractor/bpa_rules.yaml`, the same file every run on this PC uses (see "Custom
+model quality rules" below). Each save reads the file again and applies only that one change,
+so changes made in another tab or by hand in the file are kept. If the file has rules that
+cannot be read, the page lists them and asks before a save rewrites the file without them.
+
 Fabric and Azure DevOps use one sign-in account, shown at the top of both panels ("Signed in as
 <user> · <tenant>"). Choose another one from the list (one entry per tenant of each user you
 signed in with), or remove any entry with the icon next to it in the list. "Add account" opens
@@ -91,7 +101,7 @@ used.
 
 ```powershell
 pbixtractor extract C:\Reports\Sales.pbix                  # model: the one inside the .pbix
-pbixtractor extract Sales.pbix --model Model.bim -o out\Sales --no-tabular-editor
+pbixtractor extract Sales.pbix --model Model.bim -o out\Sales
 pbixtractor extract Sales.pbip                              # PBIP: model.bim or TMDL
 pbixtractor extract --help
 
@@ -122,8 +132,43 @@ Reports with an encrypting sensitivity label cannot be downloaded from Fabric (a
 Output (default `output\<report name>\`): `<name>.xlsx`, `<name>_data.xlsx`, `<name>.json`,
 `<name>_lineage.html` (offline lineage viewer), `<name>_Relationships.png` and
 `documentation.tsv` (every table, column, hierarchy, level, measure, relationship and partition,
-in Tabular Editor 2's export format; DAX as in the model - with `--tabular-editor-tsv` Tabular
-Editor writes it instead, with DAX formatted by daxformatter.com).
+one row per object with its name, description, expression, format string, data type and
+display folder; measures and calculated columns formatted offline in daxformatter.com's style,
+the rest as in the model).
+
+### Custom model quality rules
+
+Every run checks the model against Microsoft's Best Practice Analyzer rules. Add your own, or
+switch built-in ones off, in `~/.pbixtractor/bpa_rules.yaml` (used by every run on this PC), or
+point a run at another file with `--bpa-rules FILE` (`extract` and `catalog add`). Findings show
+on the model quality sheets and in the "Model quality" column like any other.
+
+```yaml
+version: 1
+disabled: [AVOID_FLOATING_POINT_DATA_TYPES]   # built-in rule ids switched off
+rules:
+  - id: MEASURES_IN_FOLDERS                   # unique; letters, digits, _ and -
+    name: Measures should be in a display folder
+    category: Custom                          # optional, default "Custom"
+    severity: Medium                          # Low | Medium | High
+    description: Put every measure in a display folder.   # optional
+    scope: Measure       # Measure | Column | CalculatedColumn | Table | Relationship | Model
+    conditions:          # all must hold
+      - {property: display_folder, op: is_empty}
+    any:                 # optional: at least one must hold
+      - {property: name, op: matches, value: "^[a-z]"}   # starts with a lower-case letter
+```
+
+Properties: `name`, `table`, `description`, `format_string`, `data_type`, `display_folder`,
+`hidden`, `expression` (measures and calculated columns) and `dependants` (how many objects'
+DAX reference it). Ops: `equals`, `not_equals`, `contains`, `is_empty`, `not_empty` and `in` (a
+list); `equals`, `not_equals`, `contains` and `in` ignore case. `matches` is a regular
+expression and, as in .NET, case-sensitive: `"^[a-z]"` finds `sales` but not `Sales`;
+start the pattern with `(?i)` to ignore case (`"(?i)^[a-z]"` finds both). A pattern gets 2
+seconds per object: one that takes longer (for example `(a+)+$` on a long expression) counts as
+no match for that object, the run logs a warning naming the rule and the object, and goes on. A
+broken rule never stops a run: it is left out with a warning naming it, and the built-in rules
+still run.
 
 ### From Python
 
@@ -143,9 +188,9 @@ print(result.status, result.files)  # "success" | "warnings" | "error", {"workbo
 ## Requirements
 
 - **Python 3.11+**
-- Optional: **Tabular Editor 2** ([download](https://github.com/TabularEditor/TabularEditor/releases))
-  for the Best Practice Analyzer, exact DAX dependencies and live statistics (Windows). Found in
-  Program Files automatically; otherwise set its folder in the web UI.
+
+Row counts, distinct values and sizes come from the .pbix itself, or from the Power BI service
+for reports downloaded from Fabric.
 
 ## Project Structure
 
@@ -183,9 +228,13 @@ syntax highlighting. See `docs/ADD_VISUAL_TYPES.md`.
 ```powershell
 uv sync --extra dev
 uv run --frozen pytest -q
-uv run --frozen pytest -q -m "not tabular_editor"   # skip the tests that run Tabular Editor 2
+uv run --frozen pytest -q -m "not tabular_editor"   # skip the developer comparison tests
 uv run --frozen pytest --cov=pbixtractor --cov-report=html
 ```
+
+Optional developer check: `tools/compare_tabular_editor.py MODEL` compares the Python Best
+Practice Analyzer and DAX dependencies with Tabular Editor 2's on one model (Windows, or Wine on
+Linux; documentation runs never need it).
 
 ### Code Formatting
 
@@ -212,9 +261,9 @@ uv run --frozen ruff check src/ tests/
 
 - Bookmarks: cross-highlight selections and drill state are not listed.
 - Tooltip/drillthrough page detection is not yet tested on real reports.
-- Without Tabular Editor 2, DAX dependencies come from text matching (can miss unqualified
-  references and match text in comments).
-- Tabular Editor 2 and Power BI Desktop detection are Windows-only.
+- DAX dependencies come from PBIxtractor's own DAX parser on every run (unqualified references
+  resolved to a column of the same table first, then a measure; comments and strings ignored).
+  Text matching is only the fallback should that analysis crash.
 
 ## License
 

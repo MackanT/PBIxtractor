@@ -269,8 +269,11 @@ def test_cli_catalog_add_files(files, capsys):
               str(files / "A.bim"), str(files / "B.bim"), "-o", str(files / "out"),
               "--no-tabular-editor", "--no-service-statistics"])
     assert exit_info.value.code == 0
-    printed = capsys.readouterr().out
+    captured = capsys.readouterr()
+    printed = captured.out
     assert "2 models to document" in printed and "2 of 2 models documented" in printed
+    # --no-tabular-editor: still accepted, does nothing but print a note
+    assert captured.err.count("Tabular Editor is no longer used") == 1
     assert len(list_entries(files / "catalog")) == 2
 
 

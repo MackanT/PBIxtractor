@@ -117,7 +117,7 @@ def is_excel_open_with_file(file_path: str) -> bool:
     overwritten.
 
     Excel locks open workbooks against writing, so trying to open the file for writing is
-    enough. (Listing the open files of every process with psutil took ~35 s per call.)
+    enough, and fast.
 
     Args:
         file_path: Path to Excel file

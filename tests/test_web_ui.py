@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import threading
 from pathlib import Path
 
@@ -157,13 +158,11 @@ class Notifications(UserNotify):
 
 @pytest.fixture
 def sample(tmp_path, monkeypatch):
-    """Sample.pbix + Sample.bim; no Tabular Editor and no Power BI Desktop; signed in as ALICE
-    (a test that needs other accounts makes its own FakeAccounts)."""
+    """Sample.pbix + Sample.bim; signed in as ALICE (a test that needs other accounts makes its
+    own FakeAccounts)."""
     write_sample_pbix(tmp_path / "Sample.pbix")
     (tmp_path / "Sample.bim").write_text(json.dumps(BIM), encoding="utf-8")
     FakeAccounts(monkeypatch, ALICE, active=ALICE.key)
-    monkeypatch.setattr(web_ui, "find_tabular_editor", lambda: None)
-    monkeypatch.setattr(web_ui, "find_local_instances", lambda: [])
     # The catalog in use is module state: another test's catalog must not show up (its rail
     # entries would, e.g. "Lineage across models" - and "Lineage" is what tests wait for)
     monkeypatch.setitem(web_ui._CATALOG, "dir", None)
@@ -186,9 +185,85 @@ def test_page_renders(sample):
     async def scenario(user):
         await user.open("/")
         await user.should_see("Create documentation")
-        await user.should_see("Tabular Editor 2 not found", retries=1)
 
     _simulate(scenario)
+
+
+def _page_texts(user) -> str:
+    """Every label, switch, input and button text of the page (also hidden ones), lower case."""
+    texts = []
+    for element in user.client.elements.values():
+        for attribute in ("text", "label"):
+            texts.append(str(getattr(element, attribute, "") or ""))
+        texts.append(str(element.props.get("label", "") or ""))
+        texts.append(str(element.props.get("placeholder", "") or ""))
+    return "\n".join(texts).lower()
+
+
+def test_page_has_no_tabular_editor_or_desktop_parts(sample):
+    """Tabular Editor and Power BI Desktop detection are gone (D21, D33): no folder field,
+    no switches, no found/not-found status and no "open in Power BI Desktop" line."""
+
+    async def scenario(user):
+        await user.open("/")
+        await user.should_see("Create documentation")
+        user.find(marker="report").type(str(sample / "Sample.pbix"))
+        await asyncio.sleep(0.7)  # past the old debounce of the Desktop scan
+        await user.should_not_see(marker="te_folder")
+        texts = _page_texts(user)
+        assert "create documentation" in texts and "row counts and distinct values" in texts
+        for gone in ("tabular editor", "daxformatter", "power bi desktop", "live statistics"):
+            assert gone not in texts, gone
+        assert not hasattr(web_ui, "find_local_instances")
+        assert not hasattr(web_ui, "find_tabular_editor")
+
+    _simulate(scenario)
+
+
+def test_old_stored_choices_for_removed_options_are_ignored(sample):
+    """Choices remembered by an older version (Tabular Editor folder, switches) neither break
+    the page nor reach a run, and are never written again."""
+    old = {"te_folder": r"C:\Tools\TabularEditor", "tabular_editor_analysis": False,
+           "tabular_editor_tsv": True, "te_analysis": False, "te_tsv": True}
+
+    async def scenario(user):
+        web_ui.stored_choices().update(old)
+        await user.open("/")
+        await user.should_see("Create documentation")
+        assert "tabular editor" not in _page_texts(user)
+        choices = web_ui.stored_choices()
+        assert {key: choices.get(key) for key in old} == old  # left alone, not rewritten
+
+    _simulate(scenario)
+
+
+def test_run_passes_no_tabular_editor_option_and_logs_no_note(sample, monkeypatch, caplog):
+    from pbixtractor import pipeline
+
+    seen = []
+    real = web_ui.run_extraction
+
+    def recording(options, progress, on_log):
+        seen.append(options)
+        return real(options, progress, on_log)
+
+    monkeypatch.setattr(web_ui, "run_extraction", recording)
+    caplog.set_level(logging.INFO, logger="pbixtractor")
+
+    async def scenario(user):
+        web_ui.stored_choices().update({"tabular_editor_analysis": False, "te_tsv": True})
+        await user.open("/")
+        user.find(marker="report").type(str(sample / "Sample.pbix"))
+        user.find("Create documentation").click()
+        await _wait_for(lambda: bool(seen) and (sample / "output" / "Sample" / "Sample.xlsx").is_file(),
+                        timeout=60)
+        await user.should_see("Lineage")
+
+    _simulate(scenario)
+    assert len(seen) == 1
+    assert seen[0].tabular_editor_analysis is pipeline.ExtractionOptions.tabular_editor_analysis
+    assert seen[0].tabular_editor_tsv is pipeline.ExtractionOptions.tabular_editor_tsv
+    assert pipeline.TABULAR_EDITOR_NOTE not in caplog.text
 
 
 def test_report_path_fills_model_and_output(sample):
@@ -295,25 +370,6 @@ def test_unknown_hosts_are_refused():
     assert asyncio.run(status("127.0.0.1:8081")) == 200
     assert asyncio.run(status("localhost:8081")) == 200
     assert asyncio.run(status("evil.example:8081")) == 421
-
-
-def test_tabular_editor_folder_can_be_set(sample):
-    exe = sample / "TE2" / "TabularEditor.exe"
-    exe.parent.mkdir()
-    exe.write_bytes(b"")
-
-    async def scenario(user):
-        await user.open("/")
-        user.find(marker="te_folder").type(str(sample / "wrong"))
-        user.find("Save").click()
-        await user.should_see("No TabularEditor.exe in that folder.")
-
-        user.find(marker="te_folder").clear().type(str(exe.parent))
-        user.find("Save").click()
-        locations = sample / "Input" / "TabularEditorLocations.txt"
-        assert locations.read_text().splitlines() == [str(exe.parent)]
-
-    _simulate(scenario)
 
 
 def test_missing_report_warns(sample):

@@ -25,7 +25,6 @@ dependencies = [
     "xlsxwriter>=3.2.0",
     "matplotlib>=3.8.0",
     "networkx>=3.0.0",
-    "psutil>=5.9.0",
     "pyyaml>=6.0.3",
     "pydantic>=2.0.0",
     "nicegui>=3.0",
@@ -35,6 +34,7 @@ dependencies = [
     "msal>=1.30",  # browser sign-in, accounts (azure_auth.py)
     "msal-extensions>=1.2",  # token cache: OS-encrypted, else a 0600 file
     "pbixray>=0.15",  # reads the model inside a .pbix (MIT; native wheels for Windows + Linux)
+    "regex>=2024.11.6",  # custom rules: matches with a timeout (bpa_custom.py)
 ]
 
 [project.optional-dependencies]

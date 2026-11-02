@@ -94,11 +94,13 @@ class BatchSettings:
 
     output_root: Path  # each model's documentation goes to <root>/<name>
     catalog_dir: Path  # every model is added to this catalog
+    # Old Tabular Editor options, kept so old callers keep working; unused
     tabular_editor_analysis: bool = True
     tabular_editor_tsv: bool = False
     service_statistics: bool = True
     write_log_file: bool = True
     description_tag: str = ExtractionOptions.description_tag
+    bpa_rules: Optional[Path] = None  # custom model quality rules (None: the user's file)
 
 
 # ============================================================================
@@ -565,8 +567,6 @@ def _run_job(
         output_dir=Path(settings.output_root) / name,
         name=name,
         description_tag=settings.description_tag,
-        tabular_editor_analysis=settings.tabular_editor_analysis,
-        tabular_editor_tsv=settings.tabular_editor_tsv,
         write_log_file=settings.write_log_file,
         extra_reports=prepared.report_paths[1:],
         not_included=prepared.not_included,
@@ -574,6 +574,7 @@ def _run_job(
         service_statistics=settings.service_statistics,
         catalog_dir=settings.catalog_dir,
         catalog_rebuild=False,  # once, after the last model (run_batch)
+        bpa_rules=settings.bpa_rules,
     )
     result = run_extraction(
         options,

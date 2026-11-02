@@ -9,23 +9,22 @@ Used by the command line (cli.py) and the web UI (web_ui.py).
 """
 
 import json
-import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-import pandas as pd
-
+from . import bpa_custom
 from .azure_auth import ApiError
+from .bpa import run_bpa
 from .catalog import add_to_catalog
 from .constants import DESCRIPT_TAG
+from .dax_parser import model_dependencies
 from .documentation import Documentation, build_documentation
 from .excel_report import write_data_workbook, write_main_workbook
 from .json_report import documentation_to_dict, write_json_data
 from .lineage_html import write_lineage_html
-from .live_model import collect_live_statistics
 from .logger import capture_logs, get_logger
 from .pbix_model import has_embedded_model, read_pbix_model
 from .readers import ReportReadError
@@ -47,21 +46,20 @@ from .semantic_model import (
     write_documentation_tsv,
 )
 from .service_stats import ServiceModel, read_service_statistics, service_model_for_report
-from .tabular_editor import (
-    drop_redundant_table_refs,
-    export_dependencies,
-    export_documentation_tsv,
-    find_tabular_editor,
-    run_best_practice_analyzer,
-)
 from .utils import is_excel_open_with_file
 
 logger = get_logger("pbixtractor")
 
-# One extraction at a time: runs share the logger and Tabular Editor/Excel files
+# One extraction at a time: runs share the logger and the output/Excel files
 _RUN_LOCK = threading.Lock()
 
 REPORT_SUFFIXES = (".pbix", ".pbip")
+
+# Logged (INFO) when a run sets one of the old Tabular Editor options, which do nothing now
+TABULAR_EDITOR_NOTE = (
+    "Tabular Editor is no longer used: documentation.tsv is always written, with DAX formatted "
+    "offline, and statistics come from the .pbix or the Power BI service"
+)
 
 
 @dataclass
@@ -73,8 +71,10 @@ class ExtractionOptions:
     output_dir: Path  # all output files go here
     name: str = ""  # base name of the output files (default: report file name)
     description_tag: str = DESCRIPT_TAG  # delimiter of descriptions embedded in DAX
-    tabular_editor_analysis: bool = True  # BPA, exact dependencies, live statistics
-    tabular_editor_tsv: bool = False  # use TE's TSV export (formats DAX via daxformatter.com)
+    # Old Tabular Editor options, still accepted so old callers keep working: they do nothing
+    # but log TABULAR_EDITOR_NOTE when set to a non-default value
+    tabular_editor_analysis: bool = True
+    tabular_editor_tsv: bool = False
     write_log_file: bool = True  # save warnings to <output_dir>/logs/
     # Model mode: more reports on the same model, documented together with report_path (pages
     # become "<report> › <page>"; "unused" then means unused by all of them)
@@ -89,6 +89,9 @@ class ExtractionOptions:
     # Also add the result to this catalog folder (catalog.py): one searchable page for many models
     catalog_dir: Optional[Path] = None
     catalog_rebuild: bool = True  # rebuild its pages now (a batch rebuilds once, at the end)
+    # Custom model quality rules (bpa_custom.py); None = ~/.pbixtractor/bpa_rules.yaml if it
+    # exists. A given file that is missing is a warning.
+    bpa_rules: Optional[Path] = None
 
     def __post_init__(self):
         self.report_path = Path(self.report_path)
@@ -96,6 +99,7 @@ class ExtractionOptions:
         self.output_dir = Path(self.output_dir)
         self.extra_reports = [Path(p) for p in self.extra_reports]
         self.catalog_dir = Path(self.catalog_dir) if self.catalog_dir else None
+        self.bpa_rules = Path(self.bpa_rules) if self.bpa_rules else None
         if not self.name:
             self.name = report_name(self.report_path)
 
@@ -178,62 +182,78 @@ def find_model_for_report(report_path: str | Path) -> Optional[Path]:
     return None
 
 
-def _tabular_editor_analysis(model, source: Path, options: ExtractionOptions, progress):
+def _dax_dependencies(model, progress):
     """
-    Optional, local Tabular Editor analysis: Best Practice Analyzer and exact DAX dependencies on
-    the model (source: .bim file or TMDL folder, both loaded by Tabular Editor 2), plus live
-    statistics if the report is open in Power BI Desktop.
+    Exact DAX dependencies from the Python analysis (dax_parser), on every run.
 
     Returns:
-        (bpa_violations, exact_dependencies, live_statistics); each None when unavailable
+        The dependencies, or None (text matching) if the analysis crashed - a bug, logged as
+        a warning, never a failed run
     """
-    bpa_violations = exact_dependencies = live_statistics = None
-    if not options.tabular_editor_analysis:
-        return bpa_violations, exact_dependencies, live_statistics
-
-    tabular_editor = find_tabular_editor()
-    if tabular_editor is None:
-        logger.warning(
-            "Tabular Editor analysis skipped: Tabular Editor 2 not found. Add its folder to "
-            "Input/TabularEditorLocations.txt or disable the Tabular Editor analysis."
-        )
-        return bpa_violations, exact_dependencies, live_statistics
-
-    progress("Best Practice Analyzer", 0.2)
+    progress("Exact DAX dependencies", 0.15)
     try:
-        bpa_violations, rule_errors = run_best_practice_analyzer(tabular_editor, source)
-        if rule_errors:
-            logger.warning(
-                f"{len(rule_errors)} Best Practice Analyzer rule(s) could not be evaluated: "
-                + "; ".join(error[:150] for error in rule_errors[:5])
-            )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"Best Practice Analyzer failed: {e}")
+        return model_dependencies(model)
+    except Exception as e:  # a bug in the analysis must not fail the run
+        logger.warning(f"DAX dependency analysis failed, using DAX text matching: {e!r}")
+        return None
 
-    progress("Exact DAX dependencies", 0.35)
+
+def _custom_rules(path: Optional[Path]) -> bpa_custom.RuleFile:
+    """
+    The custom model quality rules of a run: the given file, else the user's file if it exists.
+    Each problem of the file is one warning (the built-in rules run regardless).
+    """
+    if path is None:
+        path = bpa_custom.USER_RULES_PATH
+        if not path.is_file():
+            return bpa_custom.RuleFile()
+    elif not path.is_file():
+        logger.warning(f"Custom model quality rule file not found: {path}")
+        return bpa_custom.RuleFile()
+    rule_file = bpa_custom.load_rule_file(path)
+    for error in rule_file.errors:
+        logger.warning(f"Custom model quality rule {error}")
+    logger.debug(
+        f"Custom model quality rules from {path}: {len(rule_file.rules)} rule(s), "
+        f"{len(rule_file.disabled)} built-in rule(s) switched off"
+    )
+    return rule_file
+
+
+def _best_practice_analyzer(
+    model, statistics, progress, rules_file: Optional[Path] = None, dependencies=None
+) -> tuple[Optional[list], list]:
+    """
+    The Python Best Practice Analyzer (bpa.py) on every run, plus the custom rules (bpa_custom.py) of rules_file / the user's rule file.
+
+    Args:
+        dependencies: The run's model_dependencies(), computed once per run and shared with
+            the documentation; None when that step crashed - the BPA then tries itself, and a
+            crash there only makes the rules that need them "not checked"
+
+    Returns:
+        (violations, [(rule ID, reason)] for the rules not checked); violations is None when
+        the analysis itself crashed (a bug: logged as a warning, never a failed run)
+    """
+    progress("Best Practice Analyzer", 0.48)
     try:
-        exact_dependencies = drop_redundant_table_refs(
-            export_dependencies(tabular_editor, source)
+        rules = _custom_rules(rules_file)
+        violations, not_checked = run_bpa(
+            model,
+            statistics,
+            custom=rules.rules,
+            disabled=rules.disabled,
+            dependencies=dependencies,
         )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"Exact dependency export failed, using DAX text matching: {e}")
-
-    progress("Live statistics (Power BI Desktop)", 0.45)
-    try:
-        live_statistics, live_note = collect_live_statistics(
-            tabular_editor, options.report_path, {table.name for table in model.tables}
+    except Exception as e:  # a bug in the engine must not fail the run
+        logger.warning(f"Best Practice Analyzer failed: {e!r}")
+        return None, []
+    if not_checked:
+        logger.debug(
+            f"{len(not_checked)} Best Practice Analyzer rule(s) not checked: "
+            + "; ".join(f"{rule} ({reason})" for rule, reason in not_checked)
         )
-        # Debug only: not having the report open in Desktop is the normal case
-        logger.debug(f"Live statistics: {live_note}")
-        if live_statistics and live_statistics.errors:
-            logger.warning(
-                "Some live statistics are missing (Power BI Desktop too old?): "
-                + "; ".join(f"{k}: {v[:150]}" for k, v in live_statistics.errors.items())
-            )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"Reading live statistics from Power BI Desktop failed: {e}")
-
-    return bpa_violations, exact_dependencies, live_statistics
+    return violations, not_checked
 
 
 def _service_statistics(model, options: ExtractionOptions, progress):
@@ -275,11 +295,19 @@ def run_extraction(
         on_log: Called with (level name, message) for every log record of this run
 
     Returns:
-        ExtractionResult; status "warnings" when anything was logged (see result.logs)
+        ExtractionResult; status "warnings" when a warning or error was logged (see result.logs,
+            which also holds INFO notes)
     """
     progress = progress or (lambda step, fraction: None)
     started = time.monotonic()
-    with _RUN_LOCK, capture_logs(callback=on_log) as capture:
+    records: list[tuple[str, str]] = []
+
+    def forward(level: str, message: str) -> None:
+        records.append((level, message))
+        if on_log is not None:
+            on_log(level, message)
+
+    with _RUN_LOCK, capture_logs(callback=forward) as capture:
         try:
             result = _run(options, progress)
         except ReportReadError as e:  # expected and explained, e.g. an encrypted .pbix
@@ -290,7 +318,11 @@ def run_extraction(
             result = ExtractionResult("error", f"Extraction failed: {e}")
         result.logs = capture.get_logs()
 
-    if result.ok and result.logs:
+    # INFO notes stay in result.logs only; a warning or worse makes the run "warnings", and
+    # only those go into the log file
+    warnings = [f"{level}: {message}" for level, message in records
+                if level not in ("DEBUG", "INFO")]  # fmt: skip
+    if result.ok and warnings:
         result.status = "warnings"
         if options.write_log_file:
             log_dir = options.output_dir / "logs"
@@ -302,7 +334,7 @@ def run_extraction(
             while log_file.exists():
                 log_file = log_dir / f"log_data_{stamp}_{counter}.txt"
                 counter += 1
-            log_file.write_text(result.logs, encoding="utf-8")
+            log_file.write_text("\n".join(warnings) + "\n", encoding="utf-8")
             result.files["log"] = log_file
     result.seconds = round(time.monotonic() - started, 1)
     progress("Done" if result.ok else "Failed", 1.0)
@@ -326,8 +358,11 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         if not path.exists():
             return ExtractionResult("error", f"Report not found: {path}")
 
-    # 1. Model: always read from the .bim (relationships, sort-by and hierarchy columns come
-    #    from here, even when Tabular Editor provides the TSV)
+    if not options.tabular_editor_analysis or options.tabular_editor_tsv:
+        logger.info(TABULAR_EDITOR_NOTE)
+
+    # 1. Model: read from the .bim / TMDL / .pbix (relationships, sort-by and hierarchy columns
+    #    come from here)
     for missing in options.not_included:
         logger.warning(f"Not included in this documentation ('unused' may be incomplete): {missing}")
 
@@ -338,10 +373,10 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         if source.suffix.lower() == ".pbix":
             pbix = read_pbix_model(source)
             model, pbix_statistics = parse_model(pbix.database), pbix.statistics
-            # Tabular Editor reads a .bim, not a .pbix: hand it the model as one (also an
-            # output file; "_model" so it never overwrites a .bim next to the report)
-            source = files["model"] = out / f"{options.name}_model.bim"
-            source.write_text(
+            # The model as a .bim, an output file to download ("_model" so it never
+            # overwrites a .bim next to the report)
+            files["model"] = out / f"{options.name}_model.bim"
+            files["model"].write_text(
                 json.dumps(pbix.database, indent=2, ensure_ascii=False), encoding="utf-8"
             )
         else:
@@ -349,43 +384,32 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
     except (OSError, ValueError) as e:
         return ExtractionResult("error", f"Could not read the model {options.model_path}: {e}")
 
-    bpa_violations, exact_dependencies, live_statistics = _tabular_editor_analysis(
-        model, source, options, progress
-    )
-    service_statistics = _service_statistics(model, options, progress)
-    if service_statistics is not None:
-        # The model as published wins: a downloaded report is never open in Desktop by its
-        # own path, so Desktop statistics here come from a name-similarity match - possibly a
-        # different (e.g. dev) copy of the model
-        if live_statistics is not None:
-            logger.debug("Using Power BI service statistics instead of a matching Desktop model")
-        live_statistics = service_statistics
-    if live_statistics is None and pbix_statistics is not None:
-        # Not open in Desktop: the statistics saved in the .pbix (as of its last refresh)
+    exact_dependencies = _dax_dependencies(model, progress)
+    # Statistics: the model as published, else the ones saved in the .pbix (as of its last
+    # refresh), else none
+    live_statistics = _service_statistics(model, options, progress)
+    if live_statistics is None:
         live_statistics = pbix_statistics
 
-    # Measure data types are only known by a live model (the .bim usually lacks them)
+    # Measure data types: a .bim usually lacks them, the .pbix metadata has them (the service
+    # gives none)
     if live_statistics:
         for measure in model.all_measures:
             measure.data_type = live_statistics.measure_types.get(
                 (measure.table, measure.name), measure.data_type
             )
 
-    if options.tabular_editor_tsv:
-        progress("Tabular Editor TSV export", 0.5)
-        tabular_editor = find_tabular_editor()
-        if tabular_editor is None:
-            return ExtractionResult("error", "Tabular Editor 2 not found (needed for the TSV export).")
-        tsv_path = export_documentation_tsv(tabular_editor, source, out / "documentation.tsv")
-        dataset = pd.read_csv(tsv_path, sep="\t", header=0)
-        files["tsv"] = tsv_path
-    else:
-        dataset = model_to_dataset(model)
-        # Always left in the output folder, as the old program did (DAX as in the model)
-        try:
-            files["tsv"] = write_documentation_tsv(model, out / "documentation.tsv")
-        except OSError as e:
-            logger.warning(f"Could not write {out / 'documentation.tsv'}: {e}")
+    bpa_violations, bpa_not_checked = _best_practice_analyzer(
+        model, live_statistics, progress, options.bpa_rules, exact_dependencies
+    )
+
+    dataset = model_to_dataset(model)
+    # Always left in the output folder, as the old program did (measures and calculated
+    # columns with formatted DAX)
+    try:
+        files["tsv"] = write_documentation_tsv(model, out / "documentation.tsv")
+    except OSError as e:
+        logger.warning(f"Could not write {out / 'documentation.tsv'}: {e}")
 
     # 2. Report(s)
     if options.extra_reports:
@@ -415,6 +439,7 @@ def _run(options: ExtractionOptions, progress) -> ExtractionResult:
         bpa_violations=bpa_violations,
         live_statistics=live_statistics,
         report=report_definition,
+        bpa_not_checked=bpa_not_checked,
     )
 
     # 4. Output

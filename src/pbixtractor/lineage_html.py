@@ -649,14 +649,14 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       <li><b>Middle</b>: the graph. Drag to move, scroll to zoom, hover an item to highlight its
         lines; click to mark, double-click to open.</li>
       <li><b>Right</b>: details of the marked (or shown) item - DAX, data type, storage mode,
-        rows/size when the report was open in Power BI Desktop - and "Built from" / "Used by"
+        rows/size when the .pbix or the Power BI service had statistics - and "Built from" / "Used by"
         lists; clicking an entry there opens its lineage.</li>
     </ul>
 
     <h3>Worth knowing</h3>
     <ul>
       <li><b>⚠</b> before a button: it points to a bookmark or page that no longer exists.</li>
-      <li>"dependencies by text matching" at the top left: Tabular Editor was not used, so
+      <li>"dependencies by text matching" at the top left: the DAX analysis failed, so
         dependencies are found by searching the DAX text and can be incomplete.</li>
       <li>Very large lineages show only the nearest 600 items (the status bar says so).</li>
       <li>Relationships between tables are not drawn here - see the relationships sheet in the workbook.</li>

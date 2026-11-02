@@ -64,10 +64,34 @@ def test_run_extraction(sample):
     assert result.files["tsv"] == sample / "out" / "documentation.tsv"
     assert result.files["tsv"].read_text(encoding="utf-8").startswith("Object\tName\t")
     assert result.report_json["report"]["name"] == "Sample"
-    assert result.report_json["quality"] is None  # BPA not run
+    # The Python BPA runs on every run, also without Tabular Editor
+    quality = result.report_json["quality"]
+    assert quality and any(
+        q["rule"] == "[Error Prevention] Relationship columns should be of the same data type"
+        for q in quality
+    )
+    assert result.documentation.bpa_not_checked  # the rules needing statistics
     assert steps == sorted(steps) and steps[-1] == 1.0
     if result.status == "warnings":
         assert result.logs and "log" in result.files
+    # Exact dependencies from the Python DAX analysis, also without Tabular Editor
+    assert result.report_json["dependencies_exact"] is True
+    assert result.documentation.depends_on("Sales", "Dynamic") == ["Sales[Total Amount]"]
+    assert result.documentation.depends_on("Sales", "Is Big") == ["Sales[Amount]"]
+
+
+def test_a_crash_in_the_dax_analysis_falls_back_to_text_matching(sample, monkeypatch):
+    def broken(model):
+        raise ValueError("bug")
+
+    monkeypatch.setattr("pbixtractor.pipeline.model_dependencies", broken)
+    result = run_extraction(ExtractionOptions(
+        report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+        output_dir=sample / "out", tabular_editor_analysis=False, write_log_file=False,
+    ))
+    assert result.status == "warnings", result.message
+    assert "DAX dependency analysis failed" in result.logs
+    assert result.report_json["dependencies_exact"] is False
 
 
 def _detail_report(folder):
@@ -245,9 +269,131 @@ def test_cli_extract(sample, capsys):
     assert "Done" in capsys.readouterr().out
 
 
+def test_cli_extract_with_custom_rules(sample, capsys):
+    rules = sample / "rules.yaml"
+    rules.write_text(
+        "version: 1\n"
+        "rules:\n"
+        "  - id: NO_AMOUNT\n"
+        "    name: Columns called Amount\n"
+        "    severity: Low\n"
+        "    scope: Column\n"
+        "    conditions:\n"
+        "      - {property: name, op: equals, value: amount}\n",
+        encoding="utf-8",
+    )
+    output = sample / "cli_rules"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", str(sample / "Sample.pbix"), "-o", str(output), "--bpa-rules",
+              str(rules), "-q"])
+    assert exit_info.value.code == 0
+    quality = json.loads((output / "Sample.json").read_text(encoding="utf-8"))["quality"]
+    assert {"Columns called Amount"} == {
+        q["rule"] for q in quality if q["rule"] == "Columns called Amount"
+    }
+
+
 def test_cli_extract_without_model(tmp_path, capsys):
     write_sample_pbix(tmp_path / "Lonely.pbix")
     with pytest.raises(SystemExit) as exit_info:
         main(["extract", str(tmp_path / "Lonely.pbix")])
     assert exit_info.value.code == 2
     assert "--model" in capsys.readouterr().err
+
+
+def test_dax_dependencies_are_computed_once_per_run(sample, monkeypatch):
+    """D29: one model_dependencies() per run, shared by the documentation and the BPA."""
+    from pbixtractor import bpa, pipeline
+    from pbixtractor.dax_parser import model_dependencies
+
+    calls = []
+
+    def counted(model):
+        calls.append(1)
+        return model_dependencies(model)
+
+    monkeypatch.setattr(pipeline, "model_dependencies", counted)
+    monkeypatch.setattr(bpa, "model_dependencies", lambda model: pytest.fail("computed again"))
+    result = run_extraction(ExtractionOptions(
+        report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+        output_dir=sample / "out", tabular_editor_analysis=False, write_log_file=False,
+    ))  # fmt: skip
+    assert result.ok, result.message
+    assert calls == [1]
+    assert result.documentation.bpa_violations
+
+
+def test_warning_messages_leave_out_info_notes():
+    from pbixtractor.cli import warning_messages
+
+    logs = "INFO: a note\nWARNING: first\nERROR: second\n  more of it\nDEBUG: detail\nINFO: x"
+    assert warning_messages(logs) == ["WARNING: first", "ERROR: second\n  more of it"]
+    assert warning_messages("") == []
+
+
+def test_cli_counts_and_logs_only_warnings(sample, capsys, monkeypatch):
+    from pbixtractor import pipeline
+
+    def service_statistics(model, options, progress):
+        pipeline.logger.info("A note that is no warning")
+        pipeline.logger.warning("A real warning")
+        return None
+
+    monkeypatch.setattr(pipeline, "_service_statistics", service_statistics)
+    output = sample / "cli_warn"
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", str(sample / "Sample.pbix"), "-o", str(output)])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    listed = out.split(" warning(s):\n", 1)
+    count = int(listed[0].rsplit("\n", 1)[-1])
+    assert count == len([line for line in listed[1].splitlines() if line.startswith("  WARNING")])
+    assert "WARNING: A real warning" in out
+    assert "A note that is no warning" not in out
+    (log_file,) = (output / "logs").glob("log_data_*.txt")
+    text = log_file.read_text(encoding="utf-8")
+    assert "A real warning" in text and "A note that is no warning" not in text
+
+
+# ---------------------------------------------------------------- old Tabular Editor options
+
+
+@pytest.mark.parametrize(
+    "old_option", [{"tabular_editor_analysis": False}, {"tabular_editor_tsv": True}]
+)
+def test_old_tabular_editor_options_only_log_a_note(sample, old_option):
+    from pbixtractor.pipeline import TABULAR_EDITOR_NOTE
+
+    def run(folder, **options):
+        return run_extraction(ExtractionOptions(
+            report_path=sample / "Sample.pbix", model_path=sample / "Sample.bim",
+            output_dir=sample / folder, write_log_file=False, **options,
+        ))  # fmt: skip
+
+    default, old = run("default"), run("old", **old_option)
+    assert old.status == default.status and old.ok
+    assert old.logs.count(TABULAR_EDITOR_NOTE) == 1 and TABULAR_EDITOR_NOTE not in default.logs
+    assert f"INFO: {TABULAR_EDITOR_NOTE}" in old.logs
+    # Nothing else changes: the same warnings, and the TSV is always written offline
+    assert old.logs.replace(f"INFO: {TABULAR_EDITOR_NOTE}\n", "") == default.logs
+    assert old.files["tsv"].read_bytes() == default.files["tsv"].read_bytes()
+
+
+@pytest.mark.parametrize("old_option", ["--no-tabular-editor", "--tabular-editor-tsv"])
+def test_cli_accepts_the_old_tabular_editor_options_with_a_note(sample, capsys, old_option):
+    from pbixtractor.pipeline import TABULAR_EDITOR_NOTE
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["extract", str(sample / "Sample.pbix"), "-o", str(sample / "old"), old_option, "-q"])
+    assert exit_info.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.err.count(TABULAR_EDITOR_NOTE) == 1
+    assert (sample / "old" / "documentation.tsv").is_file()
+
+
+@pytest.mark.parametrize("command", [["extract"], ["catalog", "add"], []])
+def test_help_mentions_no_tabular_editor(capsys, command):
+    with pytest.raises(SystemExit):
+        main(command + ["--help"])
+    text = capsys.readouterr().out
+    assert "tabular" not in text.lower() and "desktop" not in text.lower()
