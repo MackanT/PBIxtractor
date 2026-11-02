@@ -269,42 +269,158 @@ def _entry(doc: dict, key: str, name: str) -> dict:
     return {**entry, "documented": "2026-10-06", "rls": ["Nordics"]}
 
 
-def test_lineage_across_models(doc):
+def _two_models(doc):
+    """The sample as two models, Alpha and Beta; Beta's "Dynamic" measure has other DAX."""
     import copy
 
-    other = copy.deepcopy(doc)  # the same model again, with one measure changed
+    other = copy.deepcopy(doc)
     for table in other["model"]["tables"]:
         for measure in table["measures"]:
             if measure["name"] == "Dynamic":
                 measure["expression"] = "[Total Amount] * 3"
-    data = build_multi_viewer_data(
-        [(_entry(doc, "a", "Alpha"), build_viewer_data(doc)), (_entry(other, "b", "Beta"), build_viewer_data(other))]
-    )
-    nodes = {n["id"]: n for n in data["nodes"]}
+    return [(_entry(doc, "a", "Alpha"), build_viewer_data(doc)), (_entry(other, "b", "Beta"), build_viewer_data(other))]
+
+
+def _unpacked(data: dict) -> dict:
+    """The multi data as the template unpacks it: model key / name per node, edges by id, and
+    the former "same" (id -> [[other id, identical?, what differs]]) and "differs" maps."""
+    ids = [n["id"] for n in data["nodes"]]
+    nodes = {}
+    for n in data["nodes"]:
+        model = data["models"][n["mi"]] if "mi" in n else {"key": "", "name": ""}
+        nodes[n["id"]] = {**n, "m": model["key"], "model": model["name"], "unused": n.get("unused", False)}
+    same, differs = {}, {}
+    for group in data["same"]:
+        apart = {(a, b): names for a, b, names in group["apart"]}
+        apart.update({(b, a): names for (a, b), names in list(apart.items())})
+        for i, mine in zip(group["nodes"], group["versions"]):
+            same[ids[i]] = [
+                [ids[j], other == mine, apart.get((mine, other), [])]
+                for j, other in zip(group["nodes"], group["versions"])
+                if j != i
+            ]
+            if len(set(group["versions"])) > 1:
+                differs[ids[i]] = True
+    return {
+        "nodes": nodes,
+        "edges": [[ids[a], ids[b], kind] for a, b, kind in data["edges"]],
+        "model_edges": [[ids[a], ids[b], kind] for a, b, kind in data["model_edges"]],
+        "same": same,
+        "differs": differs,
+    }
+
+
+def _former_same(models: list[tuple[dict, dict]], known: set[str]) -> tuple[dict, dict]:
+    """The "same" / "differs" maps as build_multi_viewer_data wrote them before ticket 05: one
+    list per member repeating every other member."""
+    from pbixtractor.compare import compare_entries, differences
+
+    same, differs = {}, {}
+    groups = compare_entries([entry for entry, _ in models])
+    for kind in ("measure", "column", "table"):
+        for group in groups[kind]:
+            ids = [f"{m['entry']}|{kind}:{m['id']}" for m in group["members"]]
+            for member, node_id in zip(group["members"], ids):
+                if node_id not in known:
+                    continue
+                pairs = [
+                    [other_id, not differences(member, other), differences(member, other)]
+                    for other, other_id in zip(group["members"], ids)
+                    if other is not member and other_id in known
+                ]
+                if pairs:
+                    same[node_id] = pairs
+                    if any(not pair[1] for pair in pairs):
+                        differs[node_id] = True
+    return same, differs
+
+
+def test_lineage_across_models(doc):
+    data = build_multi_viewer_data(_two_models(doc))
+    unpacked = _unpacked(data)
+    nodes = unpacked["nodes"]
     assert data["multi"] and data["stats"]["model"] == 2
     # Each model keeps its own items; one source loaded by both is one item
     assert nodes["a|table:Dates"]["model"] == "Alpha" and nodes["b|table:Dates"]["model"] == "Beta"
     source = nodes["source|gold.dim_date"]
     assert source["shared"] == 2 and source["details"]["Models"] == "Alpha, Beta"
-    assert ["source|gold.dim_date", "a|table:Dates", "loads_from"] in data["edges"]
-    assert ["source|gold.dim_date", "b|table:Dates", "loads_from"] in data["edges"]
+    assert source["m"] == "" and "mi" not in data["nodes"][list(nodes).index(source["id"])]
+    assert ["source|gold.dim_date", "a|table:Dates", "loads_from"] in unpacked["edges"]
+    assert ["source|gold.dim_date", "b|table:Dates", "loads_from"] in unpacked["edges"]
     # Model nodes, linked only for the overviews (not in the lineage edges)
     model = nodes["model|a"]
     assert (model["type"], model["group"], model["link"]) == ("model", "File", "models/a/Alpha_lineage.html")
-    assert ["source|gold.dim_date", "model|a", "loads_from"] in data["model_edges"]
-    report = next(n["id"] for n in data["nodes"] if n["type"] == "report" and n["m"] == "a")
-    assert ["model|a", report, "contains"] in data["model_edges"]
-    assert not any("model|" in e[0] or "model|" in e[1] for e in data["edges"])
+    assert ["source|gold.dim_date", "model|a", "loads_from"] in unpacked["model_edges"]
+    report = next(n["id"] for n in nodes.values() if n["type"] == "report" and n["m"] == "a")
+    assert ["model|a", report, "contains"] in unpacked["model_edges"]
+    assert not any("model|" in e[0] or "model|" in e[1] for e in unpacked["edges"])
     # The same measure / column / table elsewhere: identical, or what differs
-    assert data["same"]["a|measure:Sales[Total Amount]"] == [["b|measure:Sales[Total Amount]", True, []]]
-    assert data["same"]["a|measure:Sales[Dynamic]"] == [["b|measure:Sales[Dynamic]", False, ["DAX"]]]
-    assert data["same"]["a|table:Dates"] == [["b|table:Dates", True, []]]
-    assert data["differs"] == {"a|measure:Sales[Dynamic]": True, "b|measure:Sales[Dynamic]": True}
+    assert unpacked["same"]["a|measure:Sales[Total Amount]"] == [["b|measure:Sales[Total Amount]", True, []]]
+    assert unpacked["same"]["a|measure:Sales[Dynamic]"] == [["b|measure:Sales[Dynamic]", False, ["DAX"]]]
+    assert unpacked["same"]["a|table:Dates"] == [["b|table:Dates", True, []]]
+    assert unpacked["differs"] == {"a|measure:Sales[Dynamic]": True, "b|measure:Sales[Dynamic]": True}
     # One layering: the same type in the same column for every model
-    assert {n["layer"] for n in data["nodes"] if n["type"] == "report"} == {nodes[report]["layer"]}
+    assert {n["layer"] for n in nodes.values() if n["type"] == "report"} == {nodes[report]["layer"]}
     assert data["rls"] == ["Alpha", "Beta"]
     html = render_multi_lineage_html([(_entry(doc, "a", "Alpha"), build_viewer_data(doc))])
     assert "<title>Lineage across models</title>" in html and '"multi":true' in html
+
+
+def test_lineage_across_models_compact_shape_loses_nothing(doc):
+    """Ticket 05 (D15): models by index, edges by node index, one "same" group per item - and
+    everything the former per-member data held is still there."""
+    import copy
+
+    models = _two_models(doc)
+    third = copy.deepcopy(models[0])  # a third model: groups of three, two versions
+    third[0]["key"], third[0]["name"] = "c", "Gamma"
+    models.append(third)
+    data = build_multi_viewer_data(models)
+    assert data["models"] == [{"key": "a", "name": "Alpha"}, {"key": "b", "name": "Beta"}, {"key": "c", "name": "Gamma"}]
+    assert not any("m" in n or "model" in n for n in data["nodes"])
+    assert all(n.get("unused", True) is True for n in data["nodes"])  # false is left out
+    assert all(isinstance(e[0], int) and isinstance(e[1], int) for e in data["edges"] + data["model_edges"])
+    assert "differs" not in data  # derived from the groups' versions
+    group = next(g for g in data["same"] if data["nodes"][g["nodes"][0]]["id"] == "a|measure:Sales[Dynamic]")
+    assert (group["kind"], group["versions"], group["apart"]) == ("measure", [1, 2, 1], [[1, 2, ["DAX"]]])
+
+    # Rebuilt the template's way, the former data comes back exactly
+    unpacked = _unpacked(data)
+    same, differs = _former_same(models, set(unpacked["nodes"]))
+    assert unpacked["same"] == same and unpacked["differs"] == differs
+    assert len(same) == sum(len(g["nodes"]) for g in data["same"])
+    former_nodes = {
+        f"{entry['key']}|{n['id']}": n for entry, viewer in models for n in viewer["nodes"] if n["type"] != "source"
+    }
+    for node_id, former in former_nodes.items():
+        node = unpacked["nodes"][node_id]
+        assert {k: node[k] for k in ("label", "group", "type", "unused", "details")} == {
+            k: former[k] for k in ("label", "group", "type", "unused", "details")
+        }
+        assert node.get("dax_formatted") == former.get("dax_formatted")
+        assert node["m"] == node_id.split("|")[0]
+    former_edges = {
+        (f"{entry['key']}|{a}", f"{entry['key']}|{b}", kind)
+        for entry, viewer in models for a, b, kind in viewer["edges"] if not a.startswith("source:")
+    }
+    assert former_edges <= {tuple(e) for e in unpacked["edges"]}
+
+    # The template reads that shape: unpacked once on load, the details ask sameAs()
+    html = render_multi_lineage_html(models)
+    for needle in ("DATA.models", "sameAs(n.id)", "byIds(DATA.edges)", "DATA.differs[id] = true"):
+        assert needle in html
+
+
+def test_lineage_across_models_renders_catalog_entries_from_before(doc):
+    """lineage.json written before the formatted DAX existed (no dax_formatted) still works."""
+    models = _two_models(doc)
+    for _, viewer in models:
+        for node in viewer["nodes"]:
+            node.pop("dax_formatted", None)
+    data = build_multi_viewer_data(models)
+    assert not any("dax_formatted" in n for n in data["nodes"])
+    assert _unpacked(data)["same"]["a|measure:Sales[Dynamic]"] == [["b|measure:Sales[Dynamic]", False, ["DAX"]]]
+    assert '"multi":true' in render_multi_lineage_html(models)
 
 
 def test_formatted_dax_is_an_extra_field(doc, data):

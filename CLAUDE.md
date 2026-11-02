@@ -382,19 +382,33 @@ src/pbixtractor/
                     right = covered) and zoom centre use areaW; a marked item under the overlay
                     is revealed (keepClear). Computed from these numbers, never measured.
                     Several models (the catalog's lineage.html): build_multi_viewer_data([(entry,
-                    build_viewer_data)]) → ids "<key>|<id>", nodes carry m (key) + model (name);
-                    same-named sources merged ("source|<name lower, no brackets>", shared = count,
-                    details Models); model nodes "model|<key>" (group "File" or the source label,
-                    link = its own lineage page) + model_edges (source → model → report, only for
-                    overviews, never in the lineage walk); one global layering (deepest measure
-                    chain decides visual/page/report columns); same = measure id → [[same-named
-                    measure in another model, identical DAX (whitespace/case ignored)?]]. The
-                    template's MULTI mode (DATA.multi): start view = shared sources → models →
-                    reports; {kind:"model"} = that model's sources → tables → pages/reports
-                    (double-click a model); {kind:"all"} = "☰ Show everything" (explicit, owner:
-                    never by default); Up a level: table/report → model → start; details show
-                    "Same measure in other models" (= / ≠ DAX) and "Open its own lineage viewer";
-                    model filter for the left list; RLS banner names the models only.
+                    build_viewer_data)]) → ids "<key>|<id>"; same-named sources merged
+                    ("source|<name lower, no brackets>", shared = count, details Models); model
+                    nodes "model|<key>" (group "File" or the source label, link = its own lineage
+                    page) + model_edges (source → model → report, only for overviews, never in the
+                    lineage walk); one global layering (deepest measure chain decides
+                    visual/page/report columns). Compact shape (ticket 05, D15; 8-model synthetic
+                    page 5.1 → 2.2 MB): models = [{key, name}] and each node's mi = an index into
+                    it (merged sources: none); unused only when true; edges / model_edges =
+                    [source index, target index, type] into nodes; same = one group per measure /
+                    column / table found in several models (compare.compare_entries): {kind,
+                    nodes [indices], versions [1 = most common; equal = identical (DAX
+                    whitespace/case ignored)], apart [[version, other version, what differs]]};
+                    no differs key. lineage.json per catalog entry stays build_viewer_data's
+                    shape (older ones without dax_formatted render). The template unpacks it once
+                    on load (n.m / n.model, edges by id, DATA.differs = ids of groups with >1
+                    version, sameAs(id) → [[other id, identical?, what differs]] for the
+                    details). Every single-page feature of tickets 01-04 applies in MULTI mode too
+                    (text hidden when small, debounced lazy list with "In this view / All models",
+                    groups per model and table, off-screen markers, Fit cap, source bands in the
+                    model view and "Show everything", wrapped layers, grouped details with
+                    formatted DAX, Guide hint, narrow overlay). MULTI mode (DATA.multi): start
+                    view = shared sources → models → reports; {kind:"model"} = that model's
+                    sources → tables → pages/reports (double-click a model); {kind:"all"} = "☰
+                    Show everything" (explicit, owner: never by default); Up a level:
+                    table/report → model → start; details show "Same measure in other models" (=
+                    / ≠ DAX) and "Open its own lineage viewer"; model filter for the left list;
+                    RLS banner names the models only.
   documentation.py  Analysis stage, no file output: build_documentation() → Documentation
                     (report_info, filter_strings, pages: {page: [PageItem]}, model, objects
                     [OBJECT_COLUMNS], relations, unused_columns/measures, exact deps, BPA,

@@ -202,6 +202,10 @@ def test_catalog_lists_visuals_and_builds_a_lineage_across_models(sample):
     data = _page_data((catalog / "lineage.html").read_text(encoding="utf-8"))
     assert data["multi"] and data["stats"]["model"] == 2
     assert any(n["type"] == "source" and n["shared"] == 2 for n in data["nodes"])
+    # The compact shape (ticket 05): a models table, edges by node index, "same" groups
+    assert sorted(m["key"] for m in data["models"]) == sorted(e["key"] for e in entries)
+    assert data["edges"] and all(0 <= e[0] < len(data["nodes"]) > e[1] >= 0 for e in data["edges"])
+    assert all(len(g["nodes"]) == len(g["versions"]) >= 2 for g in data["same"])
     assert json.loads((catalog / "catalog.json").read_text(encoding="utf-8"))["lineage"] == "lineage.html"
 
     # No model left: no page

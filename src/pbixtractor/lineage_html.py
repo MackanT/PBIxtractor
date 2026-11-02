@@ -275,9 +275,16 @@ def build_multi_viewer_data(models: list[tuple[dict, dict]]) -> dict:
     Every model's nodes keep their own ids behind "<catalog key>|"; a source with the same name
     in several models becomes one node ("source|<name>"), so lineage runs from it into each
     model. Model nodes ("model|<key>") and model_edges (source -> model -> report) are only
-    for the overviews. same: measure/column/table id -> [[the same item in another model,
-    identical?, what differs], ...] (compare.compare_entries); differs: the ids of items that
-    are not the same in every model (marked "≠").
+    for the overviews.
+
+    Shape (smaller than one list per pair of models; the template unpacks it on load):
+    models = [{"key", "name"}], each node's "mi" an index into it (merged sources have none);
+    "unused" only when true; edges and model_edges = [source index, target index, type] into
+    nodes; same = the measures / columns / tables found in several models
+    (compare.compare_entries), one group each: {"kind", "nodes": [node indices], "versions":
+    [version per node, 1 = the most common], "apart": [[version, other version, what differs]]
+    for each pair of versions present}. Nodes with the same version are identical; a group
+    with more than one version is not the same everywhere (marked "≠").
 
     Args:
         models: [(catalog entry, that model's build_viewer_data())]
@@ -294,8 +301,10 @@ def build_multi_viewer_data(models: list[tuple[dict, dict]]) -> dict:
     model_edges: list[list[str]] = []
     shared: dict[str, dict] = {}
     rls = []
-    for entry, data in models:
+    model_table = []
+    for index, (entry, data) in enumerate(models):
         key, name = entry["key"], entry["name"]
+        model_table.append({"key": key, "name": name})
         model_id = f"model|{key}"
         local: dict[str, str] = {}
         sources, reports = set(), []
@@ -304,15 +313,15 @@ def build_multi_viewer_data(models: list[tuple[dict, dict]]) -> dict:
                 norm = _source_key(node["label"])
                 merged = shared.setdefault(
                     norm,
-                    {**node, "id": f"source|{norm}", "m": "", "model": "", "layer": 0,
-                     "details": dict(node["details"]), "models": []},
+                    {**node, "id": f"source|{norm}", "layer": 0, "details": dict(node["details"]),
+                     "models": []},
                 )
                 if name not in merged["models"]:
                     merged["models"].append(name)
                 local[node["id"]] = merged["id"]
                 sources.add(merged["id"])
                 continue
-            copy = {**node, "id": f"{key}|{node['id']}", "m": key, "model": name}
+            copy = {**node, "id": f"{key}|{node['id']}", "mi": index}
             if node["type"] != "measure":
                 copy["layer"] = layer_of.get(node["type"], node["layer"])
             local[node["id"]] = copy["id"]
@@ -327,10 +336,8 @@ def build_multi_viewer_data(models: list[tuple[dict, dict]]) -> dict:
             "label": name,
             # where it comes from, short: "Fabric · <workspace>"; a file's path is in its details
             "group": "File" if entry["source"].get("kind") == "file" else entry["source"].get("label", ""),
-            "m": key,
-            "model": name,
+            "mi": index,
             "layer": 1,
-            "unused": False,
             "link": entry.get("links", {}).get("lineage"),
             "details": {k: v for k, v in {
                 "Source": entry["source"].get("label"),
@@ -350,32 +357,42 @@ def build_multi_viewer_data(models: list[tuple[dict, dict]]) -> dict:
 
     for merged in shared.values():
         models_of = merged.pop("models")
+        merged.pop("m", None), merged.pop("model", None)
         if len(models_of) > 1:
             merged["details"]["Models"] = ", ".join(models_of)
         merged["shared"] = len(models_of)
         nodes.append(merged)
+    for node in nodes:
+        if not node.get("unused"):
+            node.pop("unused", None)  # false: left out (the template reads a missing one as false)
 
-    # The same measure / column / table in other models, and whether it is really the same
-    known = {n["id"] for n in nodes}
-    same: dict[str, list] = {}
-    differs: dict[str, bool] = {}
+    # The same measure / column / table in other models: one group each, its members' versions
+    # and, per pair of versions, what differs
+    position = {n["id"]: i for i, n in enumerate(nodes)}
+    same = []
     groups = compare_entries([entry for entry, _ in models])
     for kind in ("measure", "column", "table"):
         for group in groups[kind]:
-            ids = [f"{m['entry']}|{kind}:{m['id']}" for m in group["members"]]
-            for member, node_id in zip(group["members"], ids):
-                if node_id not in known:
-                    continue
-                pairs = []
-                for other, other_id in zip(group["members"], ids):
-                    if other is member or other_id not in known:
-                        continue
-                    apart = differences(member, other)
-                    pairs.append([other_id, not apart, apart])
-                if pairs:
-                    same[node_id] = pairs
-                    if any(not pair[1] for pair in pairs):
-                        differs[node_id] = True
+            members = [
+                (member, position[f"{member['entry']}|{kind}:{member['id']}"])
+                for member in group["members"]
+                if f"{member['entry']}|{kind}:{member['id']}" in position
+            ]
+            if len(members) < 2:
+                continue
+            first: dict[int, dict] = {}
+            for member, _ in members:
+                first.setdefault(member["version"], member)
+            versions = sorted(first)
+            same.append({
+                "kind": kind,
+                "nodes": [i for _, i in members],
+                "versions": [member["version"] for member, _ in members],
+                "apart": [
+                    [a, b, differences(first[a], first[b])]
+                    for x, a in enumerate(versions) for b in versions[x + 1:]
+                ],
+            })
 
     types = TYPE_ORDER + ["model"]
     return {
@@ -384,11 +401,11 @@ def build_multi_viewer_data(models: list[tuple[dict, dict]]) -> dict:
         "generator": next((d.get("generator", "") for _, d in models), ""),
         "exact": all(d.get("exact") for _, d in models),
         "rls": rls,
+        "models": model_table,
         "nodes": nodes,
-        "edges": edges,
-        "model_edges": model_edges,
+        "edges": [[position[a], position[b], kind] for a, b, kind in edges],
+        "model_edges": [[position[a], position[b], kind] for a, b, kind in model_edges],
         "same": same,
-        "differs": differs,
         "stats": {t: sum(1 for n in nodes if n["type"] == t) for t in types},
     }
 
@@ -772,6 +789,45 @@ details.sect > .links { padding-left: 14px; }
   var DATA = JSON.parse(document.getElementById("data").textContent);
   // Several models (the catalog's lineage across models): model nodes, a start view per level
   var MULTI = !!DATA.multi;
+  // The several-models data is stored compactly (build_multi_viewer_data): a node's model is an
+  // index into DATA.models, edges point at node indices, "the same item in other models" is one
+  // group per item. Unpacked here once: n.m / n.model, edges by id, differs (id -> true) and
+  // sameAs(id) -> [[other id, identical?, what differs], ...] (built when the details ask)
+  var sameGroup = {};
+  if (MULTI) (function () {
+    var nodes = DATA.nodes, models = DATA.models || [];
+    nodes.forEach(function (n) {
+      var model = models[n.mi];
+      n.m = model ? model.key : ""; n.model = model ? model.name : ""; n.unused = !!n.unused;
+    });
+    function byIds(list) {
+      (list || []).forEach(function (e) { e[0] = nodes[e[0]].id; e[1] = nodes[e[1]].id; });
+    }
+    byIds(DATA.edges); byIds(DATA.model_edges);
+    DATA.differs = {};
+    (DATA.same || []).forEach(function (g) {
+      var several = g.versions.some(function (v) { return v !== g.versions[0]; });
+      g.nodes.forEach(function (i, k) {
+        var id = nodes[i].id;
+        sameGroup[id] = { group: g, at: k };
+        if (several) DATA.differs[id] = true;
+      });
+    });
+  })();
+  function sameAs(id) {
+    var found = sameGroup[id];
+    if (!found) return null;
+    var g = found.group, mine = g.versions[found.at], pairs = [];
+    g.nodes.forEach(function (i, k) {
+      if (k === found.at) return;
+      var other = g.versions[k], apart = [];
+      if (other !== mine) g.apart.forEach(function (a) {
+        if ((a[0] === mine && a[1] === other) || (a[0] === other && a[1] === mine)) apart = a[2];
+      });
+      pairs.push([DATA.nodes[i].id, other === mine, apart]);
+    });
+    return pairs;
+  }
   var TYPES = ["source", "table", "column", "measure", "visual", "page", "report"].concat(MULTI ? ["model"] : []);
   var TYPE_LABEL = { source: "Source", table: "Table", column: "Column", measure: "Measure",
                      visual: "Visual", page: "Page", report: "Report", model: "Model" };
@@ -1814,8 +1870,9 @@ details.sect > .links { padding-left: 14px; }
       dl.appendChild(box);
     });
     body.appendChild(dl);
-    if (MULTI && DATA.same[n.id]) {
-      var pairs = DATA.same[n.id], apart = pairs.filter(function (p) { return !p[1]; });
+    var pairs = MULTI && sameAs(n.id);
+    if (pairs) {
+      var apart = pairs.filter(function (p) { return !p[1]; });
       body.insertBefore(html("div", "notice", apart.length
         ? "≠ Not the same in " + apart.length + " other model" + (apart.length === 1 ? "" : "s") + ": " +
           apart.map(function (p) { return byId[p[0]].model + " (" + p[2].join(", ") + ")"; }).join("; ") + "."
