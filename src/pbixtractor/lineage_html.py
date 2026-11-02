@@ -11,6 +11,7 @@ Built from the JSON documentation (json_report.py), so it can also be regenerate
 """
 
 import json
+import re
 from html import escape
 from pathlib import Path
 
@@ -282,9 +283,10 @@ def build_multi_viewer_data(models: list[tuple[dict, dict]]) -> dict:
     "unused" only when true; edges and model_edges = [source index, target index, type] into
     nodes; same = the measures / columns / tables found in several models
     (compare.compare_entries), one group each: {"kind", "nodes": [node indices], "versions":
-    [version per node, 1 = the most common], "apart": [[version, other version, what differs]]
-    for each pair of versions present}. Nodes with the same version are identical; a group
-    with more than one version is not the same everywhere (marked "≠").
+    [compare's version per node], "apart": [[version, other version, what differs]] for each
+    pair of versions present}. Nodes with the same version are identical; a group with more
+    than one version is not the same everywhere (marked "≠"). The numbers are ranks over all
+    of the group's members in the catalog, so the members drawn here need not include 1.
 
     Args:
         models: [(catalog entry, that model's build_viewer_data())]
@@ -357,7 +359,6 @@ def build_multi_viewer_data(models: list[tuple[dict, dict]]) -> dict:
 
     for merged in shared.values():
         models_of = merged.pop("models")
-        merged.pop("m", None), merged.pop("model", None)
         if len(models_of) > 1:
             merged["details"]["Models"] = ", ".join(models_of)
         merged["shared"] = len(models_of)
@@ -415,12 +416,11 @@ def _render(data: dict, title: str) -> str:
     # No "<" at all inside the data block: neither "</script>" nor "<!--<script" (which puts
     # the HTML parser in an escaped state) can then end or swallow it. Still valid JSON.
     payload = payload.replace("<", "\\u003c")
-    return (
-        _TEMPLATE.replace("__TITLE__", escape(title))
-        .replace("__THEME_SCRIPT__", PAGE_THEME_SCRIPT)
-        .replace("__THEME__", page_css())
-        .replace("__DATA__", payload)  # last: the data must not be searched for placeholders
-    )
+    page = _TEMPLATE.replace("__THEME_SCRIPT__", PAGE_THEME_SCRIPT).replace("__THEME__", page_css())
+    # The data and the escaped title last, in one pass: neither is searched for placeholders
+    # (a report named "__DATA__" keeps its name, a measure named "__TITLE__" its own)
+    values = {"__DATA__": payload, "__TITLE__": escape(title)}
+    return re.sub("__DATA__|__TITLE__", lambda match: values[match.group(0)], page)
 
 
 def render_lineage_html(doc: dict) -> str:
@@ -462,7 +462,7 @@ h2 { font-size: 15px; margin: 0; word-break: break-word; }
 .section { padding: 10px 16px; border-bottom: 1px solid var(--border); }
 input[type=search] { width: 100%; padding: 7px 9px; border: 1px solid var(--border);
   border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
-/* The type chips and "Only unused": one compact row of small toggles (wraps to 2 lines at most
+/* The type chips and "Unused": one compact row of small toggles (wraps to 2 lines at most
    at 290 px); the checkbox stays for keyboards and screen readers, the chip shows its state */
 .chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 7px; }
 .chip { display: inline-flex; align-items: center; gap: 3px; padding: 0 4px; font-size: 11px;
@@ -517,7 +517,7 @@ svg { width: 100%; height: 100%; display: block; cursor: grab; }
 svg.dragging { cursor: grabbing; }
 .node rect { fill: var(--panel); stroke-width: 1.5; rx: 6; }
 .node text { fill: var(--text); font-size: 19px; pointer-events: none; }
-.node .type { fill: var(--muted); font-size: 16px; }
+.node .type { fill: var(--muted); font-size: 18px; }
 .node { cursor: pointer; }
 .node.selected rect { stroke-width: 3; }
 .node.marked rect.box { stroke: var(--attn); stroke-width: 3.5; }
@@ -530,14 +530,20 @@ svg.dragging { cursor: grabbing; }
 .band text { fill: var(--muted); font-size: 19px; font-weight: 600; }
 .edge title { pointer-events: none; }
 /* Off-screen markers: how many items lie beyond each edge of the graph area. Laid out on their
-   own (like the details): a changed count never makes the browser lay out the graph again */
+   own (like the details): a changed count never makes the browser lay out the graph again.
+   They sit in a margin strip (EDGE px) along the edges; the graph is clipped to the area inside
+   it, so a marker never covers a node. Left and right ones run vertically to keep it thin */
 #offscreen { position: absolute; inset: 0; z-index: 2; pointer-events: none; contain: strict; }
-.off { position: absolute; font-size: 12px; padding: 3px 9px; pointer-events: auto; visibility: hidden; }
+.off { position: absolute; font-size: 12px; line-height: 17px; padding: 3px 9px; pointer-events: auto;
+  visibility: hidden; white-space: nowrap; }
 .off.on { visibility: visible; }  /* shown / hidden without a new layout (cheaper than display) */
-.off[data-side=left] { left: 8px; top: 50%; transform: translateY(-50%); }
-.off[data-side=right] { right: 8px; top: 50%; transform: translateY(-50%); }
-.off[data-side=top] { top: 96px; left: 50%; transform: translateX(-50%); }
-.off[data-side=bottom] { bottom: 8px; left: 50%; transform: translateX(-50%); }
+.off .arrow { display: inline-block; writing-mode: horizontal-tb; }
+.off[data-side=left], .off[data-side=right] { writing-mode: vertical-rl; padding: 9px 3px; top: 50%;
+  transform: translateY(-50%); }
+.off[data-side=left] { left: 4px; }
+.off[data-side=right] { right: 4px; }
+.off[data-side=top] { top: 94px; left: 50%; transform: translateX(-50%); }
+.off[data-side=bottom] { bottom: 4px; left: 50%; transform: translateX(-50%); }
 .btn.primary { background: var(--accent); color: var(--on-color); border-color: var(--accent); }
 .node.unused rect { stroke-dasharray: 5 3; }
 .edge { fill: none; stroke: var(--edge); stroke-width: 1.2; }
@@ -559,8 +565,9 @@ svg.small-text .band text, svg.zooming .band text { display: none; }
 .kv { margin: 0 0 10px; }
 .kv dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
 .kv dd { margin: 2px 0 0; white-space: pre-wrap; word-break: break-word; }
+/* DAX keeps the formatter's lines and indentation: no wrapping, it scrolls sideways */
 pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid var(--border);
-  border-radius: 8px; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 Consolas, monospace; }
+  border-radius: 8px; white-space: pre; overflow-x: auto; font: 12px/1.45 Consolas, monospace; }
 .links a { color: var(--accent); cursor: pointer; display: block; padding: 1px 0; }
 /* "Built from" / "Used by": one collapsible section per type, "Columns (42)" */
 .grouped > dt { margin-bottom: 2px; }
@@ -572,8 +579,8 @@ details.sect > .links { padding-left: 14px; }
 .daxhead { display: flex; align-items: baseline; gap: 8px; }
 .daxhead .linkbtn { font-size: 11px; text-transform: none; letter-spacing: 0; }
 /* The Guide hint: until the Guide has been opened once */
-#guideHint { font-size: 12px; color: var(--muted); background: var(--panel); border: 1px dashed var(--border);
-  border-radius: 8px; padding: 4px 8px; cursor: pointer; box-shadow: var(--shadow); }
+#guideHint { font: inherit; font-size: 12px; color: var(--muted); background: var(--panel);
+  border: 1px dashed var(--border); border-radius: 8px; padding: 4px 8px; cursor: pointer; box-shadow: var(--shadow); }
 #guideHint[hidden] { display: none; }
 #detailsToggle { display: none; }
 .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
@@ -629,7 +636,7 @@ details.sect > .links { padding-left: 14px; }
     </header>
     <div class="section">
       <input type="search" id="search" placeholder="Search tables, columns, measures, visuals, pages" aria-label="Search">
-      <div class="chips" id="types"><label class="chip unused is-off" title="Only unused columns and measures"><input type="checkbox" id="unusedOnly"> Only unused</label></div>
+      <div class="chips" id="types"><label class="chip unused is-off" title="Show only the unused columns and measures"><input type="checkbox" id="unusedOnly"> Unused</label></div>
       <select id="modelFilter" aria-label="Model" hidden style="margin-top:8px; width:100%"><option value="">All models</option></select>
     </div>
     <div id="listHead" hidden><span id="listTitle"></span><button class="linkbtn" id="listScope"></button></div>
@@ -656,11 +663,11 @@ details.sect > .links { padding-left: 14px; }
       </span>
       <button class="btn" id="collapse" title="Collapse the expanded groups again" hidden>⊟ Collapse groups</button>
       <button class="btn" id="panels" title="Hide or show the side panels for a bigger graph">⇔ Panels</button>
-      <span id="guideHint" hidden title="Open the guide: how to read this view">New here?</span>
+      <button type="button" id="guideHint" hidden title="Open the guide: how to read this view">New here?</button>
       <button class="btn" id="help" title="How to read this view">? Guide</button>
       <span id="status"></span>
     </div>
-    <svg id="canvas" aria-label="Lineage graph"><g id="viewport"><g id="bands"></g><g id="edges"></g><g id="nodes"></g></g></svg>
+    <svg id="canvas" aria-label="Lineage graph"><defs><clipPath id="frame"><rect id="frameRect"/></clipPath></defs><g clip-path="url(#frame)"><g id="viewport"><g id="bands"></g><g id="edges"></g><g id="nodes"></g></g></g></svg>
     <div id="empty">Select an item on the left to see its lineage.</div>
     <div id="offscreen">
       <button class="btn off" data-side="left"></button>
@@ -754,7 +761,7 @@ details.sect > .links { padding-left: 14px; }
 
     <h3>The three panels</h3>
     <ul>
-      <li><b>Left</b>: search, show/hide item types, and "Only unused" (columns and measures).
+      <li><b>Left</b>: search, show/hide item types, and "Unused" (only the unused columns and measures).
         With a lineage open the list shows <b>what is in this view</b> (a group's members under its
         ▸); <b>Whole model</b> lists everything. Click an item to mark it (its node is highlighted
         in the graph when shown, and its details appear on the right); double-click (or Enter) to
@@ -841,12 +848,15 @@ details.sect > .links { padding-left: 14px; }
   var NODE_MIN_W = 210, NODE_MAX_W = 320, GAP_X = 90, GAP_Y = 12, WRAP_GAP = 30;
   var BAND_PAD = 12, BAND_GAP = 24;
   // Font sizes (layout units): at TEXT_MIN_SCALE a label is LABEL_FONT * 0.5 = 9.5 px on screen
-  var LABEL_FONT = 19, SUB_FONT = 16, LINE_H = 23, PAD_L = 14, PAD_R = 12;
+  var LABEL_FONT = 19, SUB_FONT = 18, LINE_H = 23, PAD_L = 14, PAD_R = 12;
   // In a lineage, a kind with more than GROUP_THRESHOLD items in one layer is shown as one group
   // per table (columns, measures) or page (visuals); several models: per model and table
   var GROUP_THRESHOLD = 40, GROUPED = { column: "columns", measure: "measures", visual: "visuals" };
-  var TOOLBAR_H = 50;  // the toolbar covers the top of the graph area
-  var TOP_H = 90;  // ... and with the status line below it: what Fit keeps clear
+  // The graph's free area: below the toolbar and its status line (topH: measured once the page
+  // is shown, again after a resize or the Panels toggle; estimated before that) and inside a
+  // margin strip EDGE px wide along the edges, which holds the off-screen markers. The graph is
+  // clipped to it; Fit, fromLeft and reveal frame inside it (inner())
+  var EDGE = 32, topH = 0;
   // 1,234: counts only (whole numbers); without toLocaleString, whose first call is slow
   function fmt(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
   // Node text is hidden below this zoom (labels would be under ~9.5 px on screen)
@@ -862,7 +872,7 @@ details.sect > .links { padding-left: 14px; }
   var CHAR_W = ("20,29,43,50,50,82,61,25,30,30,42,50,25,31,25,35,50,50,50,50,50,50,50,50,50,50,25,25,50,50,50,42," +
     "85,54,59,57,61,53,49,62,65,26,48,58,49,73,65,66,57,66,57,53,54,64,51,79,51,48,54,30,35,30,50,50," +
     "54,50,55,46,55,50,29,50,54,25,25,49,25,83,55,54,55,55,35,42,34,54,47,72,45,47,42,30,24,30,50").split(",").map(Number);
-  var FONT_PX = { l: LABEL_FONT / 100, s: SUB_FONT / 100, b: LABEL_FONT * 1.04 / 100 };
+  var FONT_PX = { l: LABEL_FONT / 100, s: SUB_FONT / 100, b: LABEL_FONT * 1.04 / 100, t: 13.5 / 100 };
   function textWidth(text, font) {
     var w = 0;
     for (var i = 0; i < text.length; i++) { var c = text.charCodeAt(i) - 32; w += c >= 0 && c < 95 ? CHAR_W[c] : 50; }
@@ -964,7 +974,6 @@ details.sect > .links { padding-left: 14px; }
   }
 
   var unusedChip = $("unusedOnly").parentNode;
-  if (MULTI) unusedChip.lastChild.textContent = " Unused";  // one chip more (Model): still 2 lines
   TYPES.forEach(function (t) {
     var chip = html("label", "chip");
     chip.title = "Show or hide " + TYPE_LABEL[t].toLowerCase() + "s in the list";
@@ -1027,8 +1036,7 @@ details.sect > .links { padding-left: 14px; }
     var inView = listInView();
     var key = [state.query, state.unusedOnly, state.model, TYPES.map(function (t) { return state.types[t] ? 1 : 0; }).join(""),
                inView ? "v" + listGen : "m"].join("\u0000");
-    if (key === listKey && force !== true) { syncRows(); return; }  // same input: only the marks change
-    listKey = key;
+    // The head first: the same rows can belong to an overview (no head) and a lineage
     var head = $("listHead"), canView = !!(graph && graph.selected);
     head.hidden = !canView;
     if (canView) {
@@ -1036,7 +1044,10 @@ details.sect > .links { padding-left: 14px; }
       $("listScope").textContent = inView ? WHOLE : "In this view";
       $("listScope").title = inView ? "List every item of the model" : "List only what is in the current view";
     }
+    if (key === listKey && force !== true) { syncRows(); return; }  // same input: only the marks change
+    listKey = key;
     var list = $("results"), sameView = inView && listView === graph.selected, top = listTop;
+    if (moreObserver) moreObserver.disconnect();  // its "Show more" row goes with the rows
     list.textContent = "";
     rowEls = {}; rowActive = null; rowMarked = null; listShown = 0; moreRow = null; listMember = {};
     var q = state.query;
@@ -1116,17 +1127,11 @@ details.sect > .links { padding-left: 14px; }
     listTop = 0; $("results").scrollTop = 0;
     renderResults();
   });
-  // A click marks, a double-click opens - also when the first click rebuilt the rows under the
-  // mouse (a group expanded, new details): the second click opens what the first one marked
-  var lastClick = null;
-  function firstClick(id) { lastClick = { id: id, t: Date.now(), opened: false }; }
-  function secondClick(ev) {
-    if (!(ev.detail >= 2 && lastClick && !lastClick.opened && Date.now() - lastClick.t < 700)) return false;
-    lastClick.opened = true; lastClick.t = Date.now();
-    open(lastClick.id);
-    return true;
-  }
-  function justOpened() { return !!lastClick && lastClick.opened && Date.now() - lastClick.t < 700; }
+  // A click marks, the browser's dblclick opens what the first click marked (remembered by id,
+  // no timer) - also when that click rebuilt the rows under the mouse (a group expanded, new
+  // details). The 2nd and 3rd click of a multi-click (detail >= 2) do nothing themselves
+  var clickedId = null;
+  function openClicked() { var id = clickedId; clickedId = null; if (id) open(id); }
   // One handler set for the whole list. Like the graph: click marks it (details on the right),
   // double-click (or Enter) opens its lineage; a group's ▸ lists its members below it
   function rowOf(ev) { var row = ev.target.closest && ev.target.closest(".result"); return row && row.parentNode === $("results") ? row : null; }
@@ -1137,18 +1142,16 @@ details.sect > .links { padding-left: 14px; }
     if (rowEls[gid]) rowEls[gid].focus({ preventScroll: true });
   }
   $("results").addEventListener("click", function (ev) {
-    if (secondClick(ev)) return;
-    var row = rowOf(ev); if (!row) return;
-    if (row === moreRow) { lastClick = null; appendRows(); return; }
+    if (ev.detail >= 2) return;
+    var row = rowOf(ev); clickedId = null;
+    if (!row) return;
+    if (row === moreRow) { appendRows(); return; }
     if (!row.dataset.id) return;
-    if (ev.target.classList.contains("twisty")) { lastClick = null; toggleListGroup(row.dataset.id); return; }
-    firstClick(row.dataset.id);
+    if (ev.target.classList.contains("twisty")) { toggleListGroup(row.dataset.id); return; }
+    clickedId = row.dataset.id;
     jump(row.dataset.id);
   });
-  $("results").addEventListener("dblclick", function (ev) {
-    if (justOpened()) return;
-    var row = rowOf(ev); if (row && row.dataset.id && !ev.target.classList.contains("twisty")) open(row.dataset.id);
-  });
+  $("results").addEventListener("dblclick", openClicked);
   $("results").addEventListener("keydown", function (ev) {
     var row = rowOf(ev); if (!row || !row.dataset.id) return;
     if (ev.key === "Enter") open(row.dataset.id);
@@ -1176,7 +1179,7 @@ details.sect > .links { padding-left: 14px; }
 
   // How tall a column may be (layout units): the graph area below the toolbar and the status
   // line, at the readable zoom
-  function wrapLimit() { return Math.max(400, Math.floor((size().h - TOP_H - 20) / TEXT_MIN_SCALE)); }
+  function wrapLimit() { return Math.max(400, Math.floor((size().h - topH - 2 * EDGE - 10) / TEXT_MIN_SCALE)); }
   // Fill blocks ({h}) into columns no taller than limit, keeping their order (column by column,
   // about equally tall); returns [[block, ...], ...]
   function wrapColumns(blocks, gap, limit) {
@@ -1195,7 +1198,9 @@ details.sect > .links { padding-left: 14px; }
   // banded layer keeps the band order and its source layer the name order. A layer taller than
   // the graph area at the readable zoom wraps into side-by-side columns (a band inside its
   // frame); each column is as wide as its widest box. Returns {xy, box (id -> {w, h, ...}),
-  // bands (band id -> {x, y, w, h, lines}), limit}.
+  // bands (band id -> {x, y, w, h, lines}), columns, columnsAt(limit)}: columns = how the layers
+  // wrap (a short text), columnsAt = the same for another limit (a resize lays out again only
+  // when it differs).
   function layout(ids, upAdj, downAdj, bands) {
     var present = {}; ids.forEach(function (id) { present[id] = true; });
     var layers = {}, fixed = {};
@@ -1238,7 +1243,7 @@ details.sect > .links { padding-left: 14px; }
     var limit = wrapLimit(), box = {}, bandBox = {}, bandById = {}, columns = [];
     if (bands) bands.list.forEach(function (b) { bandById[b.id] = b; });
     ids.forEach(function (id) { var t = nodeText(N(id)); box[id] = { w: t.need, h: t.h, text: t }; });
-    function bandBlock(b) {
+    function bandBlock(b, limit) {
       var head = BAND_PAD + 2 * LINE_H;  // room for a 2-line header while wrapping
       var inner = wrapColumns(b.members.map(function (id) { return { id: id, h: box[id].h }; }), GAP_Y, limit - head - BAND_PAD);
       var widths = inner.map(function (col) { return Math.max.apply(null, col.map(function (c) { return box[c.id].w; })); });
@@ -1248,19 +1253,30 @@ details.sect > .links { padding-left: 14px; }
       var tallest = Math.max.apply(null, inner.map(function (col) { return col.reduce(function (s, c) { return s + box[c.id].h + GAP_Y; }, -GAP_Y); }));
       return { band: b, inner: inner, widths: widths, lines: lines, top: top, w: w, h: top + tallest + BAND_PAD };
     }
-    var layerCols = keys.map(function (k) {
-      var blocks = [], seen = {};
-      layers[k].forEach(function (id) {
-        var bid = bands && bands.of[id];
-        if (!bid) { blocks.push({ id: id, w: box[id].w, h: box[id].h }); return; }
-        if (!seen[bid]) { seen[bid] = true; blocks.push(bandBlock(bandById[bid])); }
+    function wrapAll(limit) {
+      return keys.map(function (k) {
+        var blocks = [], seen = {};
+        layers[k].forEach(function (id) {
+          var bid = bands && bands.of[id];
+          if (!bid) { blocks.push({ id: id, w: box[id].w, h: box[id].h }); return; }
+          if (!seen[bid]) { seen[bid] = true; blocks.push(bandBlock(bandById[bid], limit)); }
+        });
+        var cols = wrapColumns(blocks, blocks.some(function (b) { return b.band; }) ? BAND_GAP : GAP_Y, limit);
+        return cols.map(function (col) {
+          var height = col.reduce(function (s, b) { return s + b.h + (b.band ? BAND_GAP : GAP_Y); }, 0) - (col[col.length - 1].band ? BAND_GAP : GAP_Y);
+          return { blocks: col, w: Math.max.apply(null, col.map(function (b) { return b.w; })), h: height };
+        });
       });
-      var cols = wrapColumns(blocks, blocks.some(function (b) { return b.band; }) ? BAND_GAP : GAP_Y, limit);
-      return cols.map(function (col) {
-        var height = col.reduce(function (s, b) { return s + b.h + (b.band ? BAND_GAP : GAP_Y); }, 0) - (col[col.length - 1].band ? BAND_GAP : GAP_Y);
-        return { blocks: col, w: Math.max.apply(null, col.map(function (b) { return b.w; })), h: height };
-      });
-    });
+    }
+    // "2,1/3" per layer: its columns, and the columns inside each band (heights decide, not widths)
+    function wrapping(cols) {
+      return cols.map(function (layer) {
+        return layer.length + "/" + layer.map(function (c) {
+          return c.blocks.filter(function (b) { return b.band; }).map(function (b) { return b.inner.length; }).join(",");
+        }).join(";");
+      }).join("|");
+    }
+    var layerCols = wrapAll(limit);
     var tallestCol = 0;
     layerCols.forEach(function (cols) { cols.forEach(function (c) { tallestCol = Math.max(tallestCol, c.h); }); });
     var xy = {}, x = 0;
@@ -1287,7 +1303,8 @@ details.sect > .links { padding-left: 14px; }
       });
       x += GAP_X;
     });
-    return { xy: xy, box: box, bands: bandBox, limit: limit };
+    return { xy: xy, box: box, bands: bandBox, columns: wrapping(layerCols),
+             columnsAt: function (other) { return wrapping(wrapAll(other)); } };
   }
 
   // ---------- overviews ----------
@@ -1424,8 +1441,9 @@ details.sect > .links { padding-left: 14px; }
   }
 
   // ---------- groups (big lineages) ----------
-  // The group nodes of the drawn lineage (id "group:<n>" -> a node-like object); N(id) finds
-  // an item or a group
+  // The group nodes of the drawn lineage (id -> a node-like object); N(id) finds an item or a
+  // group. A group's id comes from what it groups ("group:table|measure|4|<model>|Sales",
+  // "group:layer|measure|4|<model>"), so it is the same group after any expand or collapse
   var groupNodes = {};
   function N(id) { return byId[id] || groupNodes[id]; }
   // Within each layer, a kind (column, measure, visual) with more than GROUP_THRESHOLD items is
@@ -1466,7 +1484,10 @@ details.sect > .links { padding-left: 14px; }
     order.forEach(function (key) {
       var members = buckets[key];
       if (members.length < 2) return;
-      var first = byId[members[0]], gid = "group:" + groups++, whole = key === layerKey(first);
+      var first = byId[members[0]], whole = key === layerKey(first);
+      var gid = "group:" + (whole ? "layer|" : "table|") + [first.type, first.layer, first.m || ""].join("|") +
+        (whole ? "" : "|" + (first.group || ""));
+      groups++;
       var name = whole ? fmt(perTables[key]) + (first.type === "visual" ? " pages" : " tables")
         : first.group || (first.type === "visual" ? "(no page)" : "(no table)");
       groupNodes[gid] = { id: gid, isGroup: true, key: key, whole: whole, type: first.type, layer: first.layer,
@@ -1542,8 +1563,8 @@ details.sect > .links { padding-left: 14px; }
     var placed = layout(ids, upAdj, downAdj, bands), xy = placed.xy, box = placed.box;
     // Built once per drawing: node elements, each node's edge elements and neighbours (marking
     // and highlighting touch only these), and the bounds Fit uses (from the layout)
-    graph = { ids: ids, xy: xy, box: box, limit: placed.limit, selected: selectedId, nodes: {}, edges: {}, near: {},
-              bounds: null, hi: null, memberOf: {}, itemCount: ids.length };
+    graph = { ids: ids, xy: xy, box: box, columns: placed.columns, columnsAt: placed.columnsAt, narrow: NARROW.matches,
+              selected: selectedId, nodes: {}, edges: {}, near: {}, bounds: null, hi: null, memberOf: {}, itemCount: ids.length };
     listGen++;  // a new drawing: "In this view" lists it
     ids.forEach(function (id) { graph.edges[id] = []; graph.near[id] = [id]; });
     var edgeHtml = [], edgeEnds = [], nodeHtml = [], bandHtml = [], bandEdges = {};
@@ -1683,12 +1704,11 @@ details.sect > .links { padding-left: 14px; }
   function reveal(id) {
     var p = graph && graph.xy[id];
     if (!p || !graph.nodes[id]) return;
-    var w = areaW(), h = size().h;
-    var x = state.tx + p.x * state.scale, y = state.ty + p.y * state.scale;
-    var b = graph.box[id];
-    if (x < 0 || y < 50 || x + b.w * state.scale > w || y + b.h * state.scale > h) {
-      state.tx = w / 2 - (p.x + b.w / 2) * state.scale;
-      state.ty = h / 2 - (p.y + b.h / 2) * state.scale;
+    var r = inner(), s = state.scale, b = graph.box[id];
+    var x = state.tx + p.x * s, y = state.ty + p.y * s;
+    if (x < r.x0 || y < r.y0 || x + b.w * s > r.x1 || y + b.h * s > r.y1) {
+      state.tx = (r.x0 + r.x1) / 2 - (p.x + b.w / 2) * s;
+      state.ty = (r.y0 + r.y1) / 2 - (p.y + b.h / 2) * s;
       apply();
     }
   }
@@ -1715,7 +1735,7 @@ details.sect > .links { padding-left: 14px; }
   // ---------- details ----------
   // Entries are links with data-id, one handler set on the panel: a click marks the item (its
   // group expands), a double-click opens its lineage (also when the click rebuilt the details:
-  // firstClick / secondClick). Long lists are built LIST_PAGE links at a time.
+  // clickedId). Long lists are built LIST_PAGE links at a time.
   var detailsObserver = window.IntersectionObserver ? new IntersectionObserver(function (entries) {
     entries.forEach(function (e) { if (e.isIntersecting && e.target.fill) e.target.fill(); });
   }, { root: $("detailsBody") }) : null;
@@ -1780,19 +1800,15 @@ details.sect > .links { padding-left: 14px; }
       types.map(function (t) { return { name: TYPE_LABEL[t] + "s", ids: per[t] }; }));
   }
   $("detailsBody").addEventListener("click", function (ev) {
-    if (secondClick(ev)) return;
-    var a = ev.target.closest && ev.target.closest("a");
+    if (ev.detail >= 2) return;
+    var a = ev.target.closest && ev.target.closest("a"); clickedId = null;
     if (!a) return;
-    if (a.fill) { lastClick = null; a.fill(); return; }
+    if (a.fill) { a.fill(); return; }
     if (!a.dataset.id) return;  // e.g. a model's own lineage viewer (a real link)
-    firstClick(a.dataset.id);
+    clickedId = a.dataset.id;
     jump(a.dataset.id);
   });
-  $("detailsBody").addEventListener("dblclick", function (ev) {
-    if (justOpened()) return;
-    var a = ev.target.closest && ev.target.closest("a[data-id]");
-    if (a) open(a.dataset.id);
-  });
+  $("detailsBody").addEventListener("dblclick", openClicked);
   // DAX: formatted (dax_formatted, when it differs) or as written; the choice is kept for the
   // session (sessionStorage, try/catch: without it, for this page) and applies to every item
   var DAX_KEY = "pbixtractor.lineage.daxAsWritten", daxAsWritten = false;
@@ -1820,7 +1836,9 @@ details.sect > .links { padding-left: 14px; }
   }
 
   function renderDetails() {
-    var body = $("detailsBody"); body.textContent = "";
+    var body = $("detailsBody");
+    if (detailsObserver) detailsObserver.disconnect();  // the "Show more" rows go with the details
+    body.textContent = "";
     var view = current();
     var byLabel = function (a, b) { return byId[a].label.localeCompare(byId[b].label); };
     if (view && MULTI && view.kind === "overview" && !state.marked) {
@@ -2009,15 +2027,62 @@ details.sect > .links { padding-left: 14px; }
 
   // ---------- pan & zoom ----------
   var svg = $("canvas"), viewport = $("viewport");
-  // The graph area's size, read once (reading it right after drawing would make the browser lay
-  // out the new graph at once); read again after a resize or the Panels toggle
+  // The graph area's size. At startup it is computed from the window and the known panel
+  // widths (measuring would make the browser lay out the page before the graph is drawn); it
+  // is measured once the page is shown, after a (debounced) resize and the Panels toggle -
+  // never right after drawing (that would lay out the new graph at once) or per frame
   var svgSize = null;
-  function size() {
-    if (!svgSize) svgSize = { w: svg.clientWidth || 800, h: svg.clientHeight || 600 };
-    return svgSize;
+  function size() { return svgSize || (svgSize = computedSize()); }
+  function computedSize() {
+    var w = window.innerWidth || 800, h = window.innerHeight || 600, wide = $("app").classList.contains("wide");
+    if (w <= 700) return { w: w, h: Math.round(h * (wide ? 0.45 : 0.55)) };  // list above the graph
+    return { w: wide ? w : w - (NARROW.matches ? 260 : 290 + 360), h: h };
+  }
+  // Before the first measurement, estimated: the toolbar's items (TOOL_W px each, in order:
+  // ← →, Up a level, Overview, [Show everything], direction, − Fit +, Panels, [New here?],
+  // Guide) and then the status (the overview's text, 13.5 px) wrap like the flex row does,
+  // GAP px apart, in the graph's width - 20; a row is ROW_H high (33 with the drop-down), a
+  // status of n lines 12 + 19 n
+  var TOOL_W = { back: 65, levelUp: 84, overview: 84, everything: 129, direction: 194, zoom: 86, panels: 78,
+                 guideHint: 70, help: 62 }, GAP = 8, ROW_H = 31;
+  function estimatedTop(status) {
+    var room = Math.max(200, areaW() - 20), rows = [], x = 0;
+    function place(w, h) {
+      if (!rows.length || (x && x + GAP + w > room)) { rows.push(0); x = 0; } else if (x) x += GAP;
+      x += w; rows[rows.length - 1] = Math.max(rows[rows.length - 1], h);
+    }
+    ["back", "levelUp", "overview", "everything", "direction", "zoom", "panels", "guideHint", "help"].forEach(function (id) {
+      if ((id === "everything" && !MULTI) || (id === "guideHint" && $("guideHint").hidden)) return;
+      place(TOOL_W[id], id === "direction" ? ROW_H + 2 : ROW_H);
+    });
+    var statusW = textWidth(status, "t") + 20;
+    place(Math.min(statusW, room), 12 + 19 * Math.ceil(statusW / room));
+    return 10 + rows.reduce(function (s, h) { return s + h; }, 0) + GAP * (rows.length - 1) + 6;
+  }
+  // Measure the graph area and the toolbar (+ status) height; true (and the frame updated)
+  // when either changed
+  function measure() {
+    var before = size().w + "x" + size().h + ":" + topH, r = svg.getBoundingClientRect();
+    svgSize = { w: Math.round(r.width) || size().w, h: Math.round(r.height) || size().h };
+    topH = Math.ceil($("toolbar").getBoundingClientRect().bottom - r.top) + 6;
+    if (before === svgSize.w + "x" + svgSize.h + ":" + topH) return false;
+    updateFrame();
+    return true;
   }
   // The visible graph area's width: the graph minus the details overlay (narrow pages)
   function areaW() { return size().w - covered(); }
+  // The free area inside the marker strip, below the toolbar (screen px in the graph)
+  function inner() {
+    return { x0: EDGE, y0: topH + EDGE, x1: areaW() - EDGE, y1: size().h - EDGE };
+  }
+  // The graph is drawn only inside the free area (a clip rectangle in screen px): the markers
+  // in the strip around it cover nothing. The strip itself still takes clicks, drags and zooms
+  function updateFrame() {
+    var r = inner(), rect = $("frameRect");
+    rect.setAttribute("x", r.x0); rect.setAttribute("y", r.y0);
+    rect.setAttribute("width", Math.max(0, r.x1 - r.x0)); rect.setAttribute("height", Math.max(0, r.y1 - r.y0));
+    markerEls.top.style.top = topH + 4 + "px";
+  }
 
   // ---------- the details panel on narrow pages ----------
   // Below NARROW_W px page width the details are an overlay of at most DETAILS_W px on the right
@@ -2038,6 +2103,7 @@ details.sect > .links { padding-left: 14px; }
     t.setAttribute("aria-expanded", collapsed ? "false" : "true");
     $("offscreen").style.right = covered() + "px";  // the right marker and the toolbar stay beside it
     $("toolbar").style.right = covered() + 10 + "px";
+    if (topH) updateFrame();
   }
   function setDetails(open, byHand) {
     if (byHand) detailsTouched = true;
@@ -2052,7 +2118,7 @@ details.sect > .links { padding-left: 14px; }
   function keepClear(id) {
     var p = graph && graph.xy[id];
     if (!p || !graph.nodes[id] || !covered()) return;
-    if (state.tx + (p.x + graph.box[id].w) * state.scale > areaW()) reveal(id);
+    if (state.tx + (p.x + graph.box[id].w) * state.scale > inner().x1) reveal(id);
   }
   $("detailsToggle").addEventListener("click", function () {
     setDetails(detailsCollapsed(), true);
@@ -2085,32 +2151,34 @@ details.sect > .links { padding-left: 14px; }
     if (scale >= TEXT_MIN_SCALE) { frame(box, scale); return; }
     // too many neighbours to read at once: readable text around the item (vertically centred),
     // without empty space left or right of the neighbours (the markers show the rest)
-    var s = TEXT_MIN_SCALE, w = areaW(), h = size().h, c = anchor ? { x: anchor.x + size1.w / 2, y: anchor.y + size1.h / 2 }
+    var s = TEXT_MIN_SCALE, r = inner(), c = anchor ? { x: anchor.x + size1.w / 2, y: anchor.y + size1.h / 2 }
       : { x: box.x + box.width / 2, y: box.y + box.height / 2 };
     function place(mid, lo, hi, from, to) {  // screen offset: centred, kept inside [lo, hi] of the box
-      return Math.max(Math.min((from + to) / 2 - mid * s, from + 20 - lo * s), to - 20 - hi * s);
+      return Math.max(Math.min((from + to) / 2 - mid * s, from + 8 - lo * s), to - 8 - hi * s);
     }
     state.scale = s;
-    state.tx = place(c.x, box.x, box.x + box.width, 0, w);
-    state.ty = (TOOLBAR_H + h) / 2 - c.y * s;
+    state.tx = place(c.x, box.x, box.x + box.width, r.x0, r.x1);
+    state.ty = (r.y0 + r.y1) / 2 - c.y * s;
     apply();
   }
   // The readable zoom, the view's left edge at the left (the markers show the rest); centred
   // vertically when it fits (wrapped layers do), else from the top
   function fromLeft(box) {
-    var s = TEXT_MIN_SCALE, room = size().h - TOP_H - 10;
+    var s = TEXT_MIN_SCALE, r = inner(), room = r.y1 - r.y0 - 8;
     state.scale = s;
-    state.tx = 20 - box.x * s;
-    state.ty = TOP_H + Math.max(0, (room - box.height * s) / 2) - box.y * s;
+    state.tx = r.x0 + 8 - box.x * s;
+    state.ty = r.y0 + 4 + Math.max(0, (room - box.height * s) / 2) - box.y * s;
     apply();
   }
   function scaleFor(box) {
-    return Math.min(FIT_MAX, (areaW() - 40) / Math.max(box.width, 1), (size().h - TOP_H - 20) / Math.max(box.height, 1));
+    var r = inner();
+    return Math.min(FIT_MAX, (r.x1 - r.x0 - 16) / Math.max(box.width, 1), (r.y1 - r.y0 - 8) / Math.max(box.height, 1));
   }
   function frame(box, scale) {
+    var r = inner();
     state.scale = scale;
-    state.tx = (areaW() - box.width * scale) / 2 - box.x * scale;
-    state.ty = TOP_H + (size().h - TOP_H - 10 - box.height * scale) / 2 - box.y * scale;
+    state.tx = (r.x0 + r.x1 - box.width * scale) / 2 - box.x * scale;
+    state.ty = (r.y0 + r.y1 - box.height * scale) / 2 - box.y * scale;
     apply();
   }
   function boundsOf(ids) {
@@ -2140,13 +2208,13 @@ details.sect > .links { padding-left: 14px; }
   function hiddenBySide() {
     var out = { left: [], right: [], top: [], bottom: [] };
     if (!graph) return out;
-    var w = areaW(), h = size().h, s = state.scale;
+    var r = inner(), s = state.scale;
     graph.ids.forEach(function (id) {
       var p = graph.xy[id], x = state.tx + p.x * s, y = state.ty + p.y * s, nw = graph.box[id].w * s, nh = graph.box[id].h * s;
-      if (x + nw < 0) out.left.push(id);
-      else if (x > w) out.right.push(id);
-      else if (y + nh < TOOLBAR_H - 10) out.top.push(id);
-      else if (y > h) out.bottom.push(id);
+      if (x + nw < r.x0) out.left.push(id);
+      else if (x > r.x1) out.right.push(id);
+      else if (y + nh < r.y0) out.top.push(id);
+      else if (y > r.y1) out.bottom.push(id);
     });
     return out;
   }
@@ -2158,23 +2226,25 @@ details.sect > .links { padding-left: 14px; }
       if (el.classList.contains("on") !== !!n) el.classList.toggle("on", !!n);
       if (!n || markerText[side] === n) return;  // unchanged: the page is not touched
       markerText[side] = n;
-      el.textContent = fmt(n) + " more " + ARROW[side];
+      el.innerHTML = fmt(n) + ' more <span class="arrow">' + ARROW[side] + "</span>";  // the arrow upright
       el.title = fmt(n) + (n === 1 ? " item lies" : " items lie") + " beyond this edge - click to bring the nearest into view";
     });
   }
-  // Pan (same zoom) so that the nearest hidden items on that side come into view
+  // Pan (same zoom) so that the nearest hidden item on that side comes into view (with its own
+  // width / height), inside the marker strip
   function panToward(side) {
     var ids = hiddenBySide()[side];
     if (!ids.length) return;
-    var s = state.scale, horizontal = side === "left" || side === "right", best = null;
+    var s = state.scale, r = inner(), horizontal = side === "left" || side === "right", best = null, bestId = null;
     ids.forEach(function (id) {
       var p = graph.xy[id], v = horizontal ? p.x : p.y;
-      if (!best || (side === "left" || side === "top" ? v > best : v < best)) best = v;
+      if (best === null || (side === "left" || side === "top" ? v > best : v < best)) { best = v; bestId = id; }
     });
-    if (side === "left") state.tx = 30 - best * s;
-    else if (side === "right") state.tx = areaW() - 30 - (best + NODE_MAX_W) * s;
-    else if (side === "top") state.ty = TOOLBAR_H + 30 - best * s;
-    else state.ty = size().h - 30 - (best + nodeHeight(2)) * s;
+    var b = graph.box[bestId];
+    if (side === "left") state.tx = r.x0 + 8 - best * s;
+    else if (side === "right") state.tx = r.x1 - 8 - (best + b.w) * s;
+    else if (side === "top") state.ty = r.y0 + 8 - best * s;
+    else state.ty = r.y1 - 8 - (best + b.h) * s;
     apply();
   }
   function zoomBy(factor) {
@@ -2193,7 +2263,7 @@ details.sect > .links { padding-left: 14px; }
   $("panels").addEventListener("click", function () {
     $("app").classList.toggle("wide");
     updateDetailsToggle();
-    requestAnimationFrame(function () { svgSize = null; fit(); });
+    requestAnimationFrame(function () { measure(); if (!relayoutIfWrapped()) fit(); });
   });
   svg.addEventListener("wheel", function (e) {
     e.preventDefault();
@@ -2222,12 +2292,21 @@ details.sect > .links { padding-left: 14px; }
   // A click on empty space (not a drag) clears the marked item
   svg.addEventListener("click", function () { if (!dragged && state.marked) mark(null); });
   window.addEventListener("mouseup", function () { drag = null; svg.classList.remove("dragging"); });
-  // A new height can change how layers wrap: then the view is laid out again
+  // The view is laid out again only when the layers would wrap into other columns or the page
+  // switched between narrow and wide; else the pan and zoom stay, the markers are recounted
+  function relayoutIfWrapped() {
+    if (!current() || !graph || (graph.narrow === NARROW.matches && graph.columnsAt(wrapLimit()) === graph.columns)) return false;
+    renderGraph(); restoreMark();
+    return true;
+  }
+  var resizeTimer = null;
   window.addEventListener("resize", function () {
-    svgSize = null;
-    updateDetailsToggle();
-    if (!current()) return;
-    if (graph && graph.limit !== wrapLimit()) { renderGraph(); restoreMark(); } else fit();
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () {
+      measure();
+      updateDetailsToggle();
+      if (!relayoutIfWrapped()) scheduleMarkers();
+    }, 150);
   });
   window.addEventListener("keydown", function (e) {
     if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); back(); return; }
@@ -2272,10 +2351,22 @@ details.sect > .links { padding-left: 14px; }
     if (!byId[id] || id === state.selected) return;
     if (graph && (graph.nodes[id] || graph.memberOf[id])) jump(id); else select(id);
   });
-  var linked = decodeURIComponent(location.hash.slice(1));  // read before render() resets it
-  size();  // measured before anything is drawn: cheap
+  var linked = "";  // read before render() resets it; a malformed one opens the overview
+  try { linked = decodeURIComponent(location.hash.slice(1)); } catch (e) { /* not an item */ }
+  topH = estimatedTop(buildOverview({ kind: "overview" }).status); updateFrame();
   show({ kind: "overview" });
   if (linked && byId[linked]) select(linked);
+  // Once the page is shown and the browser is idle (its layout is done then: reading it is
+  // free) the real sizes; a view the reader has not moved yet is framed again when they differ
+  // from the estimate
+  var moved = false;
+  ["pointerdown", "keydown", "wheel"].forEach(function (type) {
+    window.addEventListener(type, function () { moved = true; }, { capture: true, passive: true });
+  });
+  function measureShown() { if (measure() && !moved && !relayoutIfWrapped()) fit(); }
+  requestAnimationFrame(function () {
+    if (window.requestIdleCallback) requestIdleCallback(measureShown, { timeout: 1000 }); else setTimeout(measureShown, 100);
+  });
 })();
 </script>
 </body>

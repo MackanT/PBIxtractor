@@ -274,141 +274,134 @@ src/pbixtractor/
                     visualContainerObjects title.text, "fx: T[F]" when bound); lineage labels use
                     it ("Card: Revenue YTD") instead of the field names.
   lineage_html.py   write_lineage_html(path, documentation_to_dict(...)) → <name>_lineage.html:
-                    one self-contained offline page (vanilla JS + SVG, data embedded as JSON,
-                    "</" escaped). Edges re-oriented to flow data → report (source → table →
-                    column → measure → visual → page → report); relationships left out. Layer per
-                    node (measures by dependency depth); in-browser layered layout with
-                    barycenter ordering; select → upstream/downstream; details panel.
-                    Starts on an overview (source → table → page, or → report when several
-                    reports; table feeds it if it is upstream; tables feeding nothing dashed).
-                    Toolbar: back/forward history (Alt+←/→), "Up a level" (column/measure →
-                    table, visual → page, page → report, else overview), zoom −/Fit/+, "Panels" (hide side panels), Guide overlay
-                    (never opens by itself: a "New here?" hint beside "? Guide" until it was
-                    opened once, localStorage pbixtractor.lineage.guideSeen, every access in
-                    try/catch - without storage the hint shows each time).
-                    #<node id> in the URL opens that item (kept in sync via replaceState). Left
-                    list = graph: click marks (highlight + details, reveal() pans to it),
-                    double-click/Enter opens the lineage.
-                    Speed (viewer-improvements ticket 01, measured with Playwright at 4x CPU
-                    throttling): node text hidden below zoom 0.5 (TEXT_MIN_SCALE, svg class
-                    small-text) and while the wheel zooms (class zooming, back 150 ms after
-                    the last wheel event); Fit / reveal from the layout's coordinates (no
-                    getBBox; the graph area's size read once, again after resize / Panels);
-                    search debounced 150 ms over
-                    n.hay (lower-case text) in LIST_ORDER (sorted once), rows built 100 at a
-                    time (IntersectionObserver / "Show more"), one delegated handler set on the
-                    list, no rebuild on plain navigation (listKey); nodes drawn as one escaped
-                    markup string (esc) with one delegated handler set on #nodes (mouseenter/
-                    -leave caught while capturing); mark/highlight change only the previous
-                    and the new item (graph.nodes / .edges / .near built per drawing), the rest
-                    dims through #viewport.has-hi / .has-mark (+ .hi / .rel / .marked). The
-                    details panel body is absolute + contain: strict - without it every new
-                    details text made Chrome lay out all the graph's SVG text again.
-                    Big lineages (ticket 02, no node cut any more): groupLineage() - per layer,
-                    a kind (column/measure/visual) with > GROUP_THRESHOLD (40) items becomes one
-                    group node per table (visuals: page; several models: per model too), and
-                    when a layer would still show > 40 such groups, one group for the layer
-                    ("53 tables · 190 measures") that expands into the per-table ones; never
-                    the selected item, groups of one show the member. Group nodes ("group:<n>",
-                    groupNodes, N(id) = item or group) are stacked boxes with a "+"; edges are
-                    drawn once per pair (tooltip "<n> links"). Click = mark + details (count,
-                    "Expand", member list); double-click / Enter / "+" = expand(): the key goes
-                    into view.expanded (part of the history entry, kept while marking; a new
-                    view starts collapsed), re-layout, the members framed; "⊟ Collapse groups"
-                    (toolbar, shown while any is expanded). jump(id) (list click/Space, a
-                    group's member list, hashchange #<id>) expands the item's group(s) and
-                    marks it. Status: "1,696 items: … (grouped: 47 groups)". Fit (also after
-                    opening): the whole view when it fits at zoom ≥ TEXT_MIN_SCALE, else the
+                    one self-contained offline page (vanilla JS + SVG, data embedded as JSON with
+                    no "<" at all; _render() inserts the data and the escaped title last, in one
+                    pass). Edges re-oriented to flow data → report (source → table → column →
+                    measure → visual → page → report); relationships left out. Layer per node
+                    (measures by dependency depth). build_viewer_data() adds dax_formatted
+                    (dax_format.format_dax, measures and calculated columns, only when it
+                    differs; details "Expression" stays as written).
+                    Views: starts on an overview (sources → tables → pages, or → reports when
+                    several; flowOverview: tables in one band per source "<source> · <n> tables",
+                    a table with several sources under the first by name, "No source" last; a
+                    source's edge goes once to its band header; tables feeding nothing dashed).
+                    Double-click / Enter opens an item's lineage (upstream + downstream, or one
+                    of them via the drop-down). Toolbar: back/forward (Alt+←/→), "Up a level"
+                    (column/measure → table, visual → page, page → report, else overview),
+                    Overview, zoom −/Fit/+, "⊟ Collapse groups" (while any is expanded),
+                    "Panels" (hides the side panels), "? Guide" (never opens by itself: a "New
+                    here?" <button> beside it until it was opened once, localStorage
+                    pbixtractor.lineage.guideSeen, every access in try/catch). #<node id> in
+                    the URL opens that item (replaceState keeps it in sync; a malformed hash
+                    opens the overview); a later hashchange marks an item of the drawn view
+                    (jump), else opens it.
+                    Big lineages: groupLineage() - per layer, a kind (column/measure/visual)
+                    with > GROUP_THRESHOLD (40) items becomes one group node per table
+                    (visuals: page; several models: per model too); > 40 such groups → one
+                    group for the layer ("53 tables · 190 measures") that expands into the
+                    per-table ones; never the selected item; groups of one show the member.
+                    Group ids come from what they group ("group:table|<type>|<layer>|<model>|
+                    <table>", "group:layer|<type>|<layer>|<model>"), so a mark survives
+                    expanding / collapsing. Group nodes (groupNodes, N(id) = item or group)
+                    are stacked boxes with a "+"; edges drawn once per pair (tooltip "<n>
+                    links"). Click = mark + details (count, "Expand", members); double-click /
+                    Enter / "+" = expand() (key in view.expanded, part of the history entry),
+                    re-laid out, the members framed. jump(id) (list, details, #<id>) expands
+                    the item's group(s), marks it and reveal()s it.
+                    Layout: layout(ids, up, down, bands) = barycenter ordering (banded and
+                    source layers keep their order); a layer (or a band inside its frame)
+                    taller than wrapLimit() (the free area's height at TEXT_MIN_SCALE) wraps
+                    into side-by-side columns (wrapColumns: order kept, about equally tall),
+                    WRAP_GAP 30 apart (< GAP_X 90), each as wide as its widest box; returns
+                    xy, box, bands and how the layers wrap (columns / columnsAt(limit)).
+                    Labels (nodeText, cached as n.sized): boxes NODE_MIN_W 210..NODE_MAX_W
+                    320 wide; a longer name wraps to 2 lines (wrapLabel), then "…"; the
+                    sub-line (type · table) one line, cut to the box; <title> = full name +
+                    where. LABEL_FONT 19 / SUB_FONT 18; widths from CHAR_W (Source Sans 3
+                    advance widths per ASCII character) - no canvas or DOM text measurement.
+                    fmt() formats counts with a regex (no toLocaleString).
+                    Graph area: size() is computed at startup from innerWidth/innerHeight, the
+                    panel widths (290 + 360; narrow 260; ≤ 700 px the list sits above, 55 vh)
+                    and the Panels state - never measured before the first drawing; measure()
+                    reads the svg and the toolbar (+ status) height (topH) once the page is
+                    shown (rAF + setTimeout; a view not yet moved by the reader is framed again
+                    if they differ from the estimate - estimatedTop() simulates the toolbar's
+                    flex wrapping from TOOL_W and the status text), after a resize (debounced
+                    150 ms) and after the Panels toggle; never per frame. A resize lays the
+                    view out again only when the layers would wrap differently or the page
+                    crossed the narrow width; otherwise pan and zoom stay and only the markers
+                    are recounted. inner() = the free area: below topH, inside a margin strip
+                    EDGE 32 px wide along the edges (and left of the narrow details overlay);
+                    the graph is clipped to it (<clipPath id="frame">, updateFrame()), the
+                    strip still takes clicks, drags and the wheel.
+                    Fit: the whole view when it fits at zoom ≥ TEXT_MIN_SCALE 0.5, else the
                     selected item + its direct neighbours (graph.near; groups count as one);
-                    when even those need a smaller zoom: TEXT_MIN_SCALE, vertically centred on
-                    the item, no empty space left/right of the neighbours; never above
-                    FIT_MAX 0.75 (ticket 04: labels ~14 px; + zooms further); layout
-                    coordinates only. Off-screen markers (#offscreen, contain: strict,
-                    shown via the class "on" - visibility, cheaper than display): "12 more ←"
-                    per edge, counted from graph.xy and the pan/zoom (hiddenBySide), updated
-                    in one requestAnimationFrame after apply() and only once the wheel stops;
-                    a click pans (same zoom) until the nearest hidden item on that side is in
-                    view (panToward).
-                    Readable overview and labels (ticket 03): the overview (flowOverview: one
-                    model, MULTI's model view and "Show everything") groups tables in a band
-                    per source ("<source> · <n> tables", tables by name; a table with several
-                    sources under the first by name; "No source · n tables" last), drawn as a
-                    frame in #bands; a source's edges go to the band header, once per band
-                    (bandEdges, tooltip "<n> tables"; highlighting still per table); tables
-                    stay single nodes. layout(ids, up, down, bands): banded and source layers
-                    keep that order (no barycenter sweep); a layer (or a band inside its frame)
-                    taller than wrapLimit() = the graph area below toolbar + status (TOP_H 90)
-                    at TEXT_MIN_SCALE wraps into side-by-side columns (wrapColumns: order kept,
-                    column by column, about equally tall), WRAP_GAP 30 apart (< GAP_X 90);
-                    each column as wide as its widest box; graph.box[id] = {w, h}; a resize
-                    that changes wrapLimit lays the view out again. Fit on an overview: the
-                    whole when readable (frame keeps TOP_H clear), else fromLeft() at
-                    TEXT_MIN_SCALE (markers show the rest). Labels (nodeText, cached as
-                    n.sized): boxes NODE_MIN_W 210..NODE_MAX_W 320 wide from the name and the
-                    sub-line; a longer name wraps to 2 lines (wrapLabel, between words), then
-                    "…" (truncate); the sub-line (type · table) one line, cut to the box; group
-                    labels and band headers the same; <title> = full name + where. Fonts:
-                    LABEL_FONT 19 / SUB_FONT 16 (9.5 px on screen at zoom 0.5, below it hidden
-                    as before). Widths from CHAR_W (Source Sans 3 advance widths per ASCII
-                    character, 1/100 em; others 0.5 em; band headers × 1.04) - no canvas, no
-                    DOM measurement. fmt() formats counts with a regex (toLocaleString's first
-                    call cost ~25 ms at 4x on load).
-                    Panels (ticket 04): the left list shows "In this view (N)" while a lineage
-                    is open (listInView: the drawn items and groups, the shown item first, then
-                    in flow order; a group row's ▸ (or a search matching its members) lists its
-                    members below it; listGen per drawing is part of listKey) with a "Whole
-                    model" switch ("All models" in MULTI) back to LIST_ORDER - kept in memory
-                    for the tab only; overviews always list the whole model (#listHead hidden).
-                    Type chips + "Only unused" are one row of small toggles (checkbox visually
-                    hidden, class is-off; ≤ 2 lines at 290 px). Details: "Built from" / "Used
-                    by: 42 columns · 512 measures" (byType → sections(): a <details> per type,
-                    more than SECTION_OPEN 10 items start collapsed, links sorted and built on
-                    first open, 100 at a time - lazyLinks, IntersectionObserver / "Show more";
-                    no 200 cap); group details use the same sections (a layer group: per
-                    table/page). Detail links carry data-id, one handler set on #detailsBody:
-                    click = jump (mark, expanding its group), double-click = open; the second
-                    click of a double-click opens what the first marked even when that rebuilt
-                    the rows (firstClick / secondClick, shared with the list). Formatted DAX:
-                    build_viewer_data() adds dax_formatted (dax_format.format_dax, measures and
-                    calculated columns, only when it differs; details "Expression" stays as
-                    written, so JSON / catalog compare / lineage.json keep their meaning); the
-                    panel shows it with a "Show as written" / "Show formatted" toggle (#daxToggle,
-                    sessionStorage pbixtractor.lineage.daxAsWritten, all items). Visible graph
-                    area: areaW() = graph width - covered(); below NARROW_W 1200 px the details
-                    are a fixed overlay (min(DETAILS_W 320, 100vw - 40)) with a handle
-                    (#detailsToggle) collapsing it to a TAB_W 26 px tab; it starts collapsed and
-                    opens by itself on a mark / opened item until the handle was used (Escape
-                    collapses it); Fit, reveal(), the markers (#offscreen and #toolbar get
-                    right = covered) and zoom centre use areaW; a marked item under the overlay
-                    is revealed (keepClear). Computed from these numbers, never measured.
+                    when even those need less: TEXT_MIN_SCALE, vertically centred on the item;
+                    never above FIT_MAX 0.75; a big overview → fromLeft() at TEXT_MIN_SCALE.
+                    Fit, fromLeft, reveal, keepClear and the markers use inner() and the
+                    layout's coordinates only (no getBBox).
+                    Off-screen markers (#offscreen, contain: strict, class "on"): "12 more ←"
+                    per edge in the strip (left/right ones vertical), counted from graph.xy and
+                    the pan/zoom (hiddenBySide), updated once per animation frame and only once
+                    the wheel stops; a click pans (same zoom) until the nearest hidden item, with
+                    its own width/height, is inside the free area (panToward).
+                    Speed: node text hidden below zoom 0.5 (svg class small-text) and while the
+                    wheel zooms (class zooming, back 150 ms after the last wheel event); nodes
+                    drawn as one escaped markup string (esc) with one delegated handler set on
+                    #nodes (mouseenter/-leave while capturing); mark/highlight change only the
+                    previous and the new item (graph.nodes / .edges / .near per drawing), the
+                    rest dims through #viewport.has-hi / .has-mark; the details body is
+                    absolute + contain: strict (new details never relayout the graph).
+                    Left list: search debounced 150 ms over n.hay in LIST_ORDER (sorted once);
+                    type chips + "Unused" in one row of small toggles; rows built 100 at a time
+                    ("Show more" + IntersectionObserver, disconnected when the rows are wiped);
+                    one delegated handler set; no rebuild on plain navigation (listKey, the
+                    #listHead updated before that early return). With a lineage open it shows
+                    "In this view (N)" (the drawn items and groups, the shown item first, then
+                    in flow order; a group row's ▸ or a search lists its members) with a
+                    "Whole model" ("All models") switch, kept in memory; overviews list the
+                    whole model without a head. List rows and detail links: click = jump
+                    (mark); the browser's dblclick opens the item the first click marked
+                    (clickedId, no timer; clicks with detail ≥ 2 do nothing, so a triple-click
+                    opens once); Enter opens, Space marks.
+                    Details: "Built from" / "Used by: 42 columns · 512 measures" (byType →
+                    sections(): a <details> per type, > SECTION_OPEN 10 items start collapsed,
+                    links sorted and built on first open, 100 at a time - lazyLinks; its
+                    IntersectionObserver disconnected when the details are wiped); groups use
+                    the same sections (a layer group: per table/page). DAX in a <pre> that does
+                    not wrap (white-space: pre, scrolls sideways): dax_formatted by default,
+                    "Show as written" / "Show formatted" (#daxToggle, sessionStorage
+                    pbixtractor.lineage.daxAsWritten, all items).
+                    Narrow pages (< NARROW_W 1200 px, e.g. the web UI's iframe): the details are
+                    a fixed overlay (min(DETAILS_W 320, 100vw - 40)) with a handle
+                    (#detailsToggle) collapsing it to a TAB_W 26 px tab; it starts collapsed,
+                    opens by itself on a mark / opened item until the handle was used, Escape
+                    collapses it; areaW() = graph width - covered() (#offscreen and #toolbar
+                    get right = covered); a marked item under it is revealed (keepClear).
                     Several models (the catalog's lineage.html): build_multi_viewer_data([(entry,
                     build_viewer_data)]) → ids "<key>|<id>"; same-named sources merged
                     ("source|<name lower, no brackets>", shared = count, details Models); model
                     nodes "model|<key>" (group "File" or the source label, link = its own lineage
                     page) + model_edges (source → model → report, only for overviews, never in the
                     lineage walk); one global layering (deepest measure chain decides
-                    visual/page/report columns). Compact shape (ticket 05, D15; 8-model synthetic
-                    page 5.1 → 2.2 MB): models = [{key, name}] and each node's mi = an index into
-                    it (merged sources: none); unused only when true; edges / model_edges =
-                    [source index, target index, type] into nodes; same = one group per measure /
-                    column / table found in several models (compare.compare_entries): {kind,
-                    nodes [indices], versions [1 = most common; equal = identical (DAX
-                    whitespace/case ignored)], apart [[version, other version, what differs]]};
-                    no differs key. lineage.json per catalog entry stays build_viewer_data's
-                    shape (older ones without dax_formatted render). The template unpacks it once
-                    on load (n.m / n.model, edges by id, DATA.differs = ids of groups with >1
-                    version, sameAs(id) → [[other id, identical?, what differs]] for the
-                    details). Every single-page feature of tickets 01-04 applies in MULTI mode too
-                    (text hidden when small, debounced lazy list with "In this view / All models",
-                    groups per model and table, off-screen markers, Fit cap, source bands in the
-                    model view and "Show everything", wrapped layers, grouped details with
-                    formatted DAX, Guide hint, narrow overlay). MULTI mode (DATA.multi): start
-                    view = shared sources → models → reports; {kind:"model"} = that model's
-                    sources → tables → pages/reports (double-click a model); {kind:"all"} = "☰
-                    Show everything" (explicit, owner: never by default); Up a level:
-                    table/report → model → start; details show "Same measure in other models" (=
-                    / ≠ DAX) and "Open its own lineage viewer"; model filter for the left list;
-                    RLS banner names the models only.
+                    visual/page/report columns). Compact shape: models = [{key, name}] and each
+                    node's mi = an index into it (merged sources: none); unused only when true;
+                    edges / model_edges = [source index, target index, type] into nodes; same =
+                    one group per measure / column / table found in several models
+                    (compare.compare_entries): {kind, nodes [indices], versions [compare's
+                    version per node; equal = identical (DAX whitespace/case ignored); ranked
+                    over all members in the catalog, so the drawn ones need not include 1],
+                    apart [[version, other version, what differs]]}. lineage.json per catalog
+                    entry stays build_viewer_data's shape (older ones without dax_formatted
+                    render). The template unpacks it once on load (n.m / n.model, edges by id,
+                    DATA.differs = ids of groups with > 1 version, sameAs(id) → [[other id,
+                    identical?, what differs]]). Everything above applies in MULTI mode too.
+                    MULTI mode (DATA.multi): start view = shared sources → models → reports;
+                    {kind:"model"} = that model's sources → tables → pages/reports (double-click
+                    a model); {kind:"all"} = "☰ Show everything" (explicit, owner: never by
+                    default); Up a level: table/report → model → start; details show "Same
+                    measure in other models" (= / ≠ DAX) and "Open its own lineage viewer"; model
+                    filter for the left list; RLS banner names the models only.
   documentation.py  Analysis stage, no file output: build_documentation() → Documentation
                     (report_info, filter_strings, pages: {page: [PageItem]}, model, objects
                     [OBJECT_COLUMNS], relations, unused_columns/measures, exact deps, BPA,
@@ -454,9 +447,12 @@ src/pbixtractor/
                     unclosed string/name/comment, unknown character, VAR without RETURN) or a
                     changed _signature() (tokens without whitespace, function/keyword case
                     ignored) → the input unchanged, logged at DEBUG only. Idempotent. Used by
-                    write_documentation_tsv() and the Common sheets' Definition cells only:
-                    JSON, lineage viewer, catalog, dependencies and text matching keep the DAX
-                    as written (D4/D11).
+                    write_documentation_tsv(), the Common sheets' Definition cells and the
+                    lineage viewer: lineage_html.build_viewer_data() stores it as
+                    dax_formatted (only where it differs), so the viewer and the catalog's
+                    lineage across models (lineage.json) show formatted DAX, with "Show as
+                    written". The documentation JSON, the catalog comparison (compare.py),
+                    dependencies and text matching keep the DAX as written.
   excel_report.py   create_formats(), write_main_workbook(), write_data_workbook(); shared
                     helpers per sheet type (_write_relations, _write_objects, _write_page_sheet,
                     _write_pages_sheet, _write_dependencies_sheet). _Workbook/_Worksheet: text

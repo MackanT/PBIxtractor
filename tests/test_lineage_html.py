@@ -217,7 +217,7 @@ def test_overview_bands_wrapping_and_labels(doc):
     # Tall layers wrap into columns closer together than the layers are
     assert "function wrapColumns(blocks, gap, limit)" in script
     assert number("WRAP_GAP") < number("GAP_X")
-    assert "(size().h - TOP_H - 20) / TEXT_MIN_SCALE" in script
+    assert "(size().h - topH - 2 * EDGE - 10) / TEXT_MIN_SCALE" in script
     # Overview: tables in a band per source ("No source" last), one edge per source and band
     assert '<g id="bands"></g><g id="edges"></g>' in html
     assert '"No source · "' in script and 'byId[id].label + " · " + tables(' in script
@@ -494,3 +494,74 @@ def test_panels_list_details_dax_guide_and_fit(doc):
     assert "var NARROW_W = 1200, DETAILS_W = 320, TAB_W = 26" in script
     assert "@media (max-width: 1199px)" in html and "#app.details-collapsed #details { width: 26px; }" in html
     assert 'id="detailsToggle"' in html
+
+
+def test_title_is_inserted_last(doc):
+    """A report named like a placeholder keeps its name; nothing is put into the data."""
+    named = {**doc, "report": {**doc["report"], "name": "__DATA__"}}
+    html = render_lineage_html(named)
+    data = build_viewer_data(named)
+    assert data["report"] == "__DATA__"
+    assert "<title>__DATA__ - lineage</title>" in html
+    start = html.index('<script type="application/json" id="data">') + len(
+        '<script type="application/json" id="data">'
+    )
+    payload = json.loads(html[start : html.index("</script>", start)])
+    assert payload["report"] == data["report"]
+    # A measure named "__TITLE__" stays as it is in the data
+    measure = next(n for n in data["nodes"] if n["type"] == "measure")
+    from pbixtractor.lineage_html import _render
+
+    html = _render({**data, "nodes": [{**measure, "label": "__TITLE__"}]}, "__DATA__")
+    assert "<title>__DATA__</title>" in html and '"label":"__TITLE__"' in html
+
+
+def test_review_fixes(doc):
+    """Ticket 06: the review's bugs and decisions D20-D28 (string checks: no JS test runner)."""
+    import re
+
+    html = render_lineage_html(doc)
+    script = html[html.rindex("<script>") :]
+    # Group ids from what they group, never from their position
+    assert '"group:" + (whole ? "layer|" : "table|")' in script
+    assert '"group:" + groups++' not in script
+    # The list head follows the view before the cached rows return early
+    render = script[script.index("function renderResults(") : script.index("function appendRows(")]
+    assert render.index("head.hidden = !canView") < render.index("key === listKey")
+    # A resize: debounced, laid out again only when the wrapping or narrow mode changes
+    assert "resizeTimer = setTimeout(function () {" in script and "}, 150);" in script
+    assert "graph.columnsAt(wrapLimit()) === graph.columns" in script
+    assert "graph.narrow === NARROW.matches" in script
+    # A malformed #link opens the overview
+    assert "try { linked = decodeURIComponent(location.hash.slice(1)); } catch (e)" in script
+    # The toolbar (+ status) height: estimated, then measured (start, resize, Panels); no constant
+    assert "TOOLBAR_H" not in script and "TOP_H" not in script
+    assert script.count("measure();") == 2 and "if (measure() && !moved" in script
+    # panToward: "unset" is null, the right side uses the node's own width
+    pan = script[script.index("function panToward(") : script.index("function zoomBy(")]
+    assert "best === null" in pan and "(best + b.w) * s" in pan and "NODE_MAX_W" not in pan
+    # The "Show more" observers let go of wiped rows
+    assert "moreObserver.disconnect()" in script and "detailsObserver.disconnect()" in script
+    # D20: DAX does not wrap, it scrolls; D22: "Unused" on every page; D23: SUB_FONT 18
+    assert "white-space: pre; overflow-x: auto;" in html
+    assert "pre-wrap; word-break: break-word; font: 12px" not in html
+    assert '<input type="checkbox" id="unusedOnly"> Unused</label>' in html
+    assert "Only unused" not in html
+    assert re.search(r"SUB_FONT = (\d+)", script).group(1) == "18"
+    # D24: markers in an edge strip; the graph is clipped to the area inside it
+    assert "var EDGE = 32" in script
+    assert '<clipPath id="frame"><rect id="frameRect"/></clipPath>' in html
+    assert '<g clip-path="url(#frame)"><g id="viewport">' in html
+    for name in ("fit(", "fromLeft(", "reveal(", "hiddenBySide("):
+        name = "function " + name
+        body = script[script.index(name) :]
+        assert "inner()" in body[: body.index("\n  }\n")], name
+    # D25: the hint is a real button; D26: the browser's dblclick, no timer
+    assert '<button type="button" id="guideHint" hidden' in html
+    assert "Date.now()" not in script and "lastClick" not in script
+    assert script.count('addEventListener("dblclick", openClicked)') == 2
+    assert "if (ev.detail >= 2) return;" in script
+    # D28: the graph size computed from the window at startup, not measured
+    assert "function computedSize()" in script and "window.innerWidth" in script
+    assert "svg.clientWidth" not in script
+
