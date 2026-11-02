@@ -291,7 +291,7 @@ src/pbixtractor/
                     small-text) and while the wheel zooms (class zooming, back 150 ms after
                     the last wheel event); Fit / reveal from the layout's coordinates (no
                     getBBox; the graph area's size read once, again after resize / Panels);
-                    the 600-node cut is linear (Set + counter); search debounced 150 ms over
+                    search debounced 150 ms over
                     n.hay (lower-case text) in LIST_ORDER (sorted once), rows built 100 at a
                     time (IntersectionObserver / "Show more"), one delegated handler set on the
                     list, no rebuild on plain navigation (listKey); nodes drawn as one escaped
@@ -301,6 +301,30 @@ src/pbixtractor/
                     dims through #viewport.has-hi / .has-mark (+ .hi / .rel / .marked). The
                     details panel body is absolute + contain: strict - without it every new
                     details text made Chrome lay out all the graph's SVG text again.
+                    Big lineages (ticket 02, no node cut any more): groupLineage() - per layer,
+                    a kind (column/measure/visual) with > GROUP_THRESHOLD (40) items becomes one
+                    group node per table (visuals: page; several models: per model too), and
+                    when a layer would still show > 40 such groups, one group for the layer
+                    ("53 tables · 190 measures") that expands into the per-table ones; never
+                    the selected item, groups of one show the member. Group nodes ("group:<n>",
+                    groupNodes, N(id) = item or group) are stacked boxes with a "+"; edges are
+                    drawn once per pair (tooltip "<n> links"). Click = mark + details (count,
+                    "Expand", member list); double-click / Enter / "+" = expand(): the key goes
+                    into view.expanded (part of the history entry, kept while marking; a new
+                    view starts collapsed), re-layout, the members framed; "⊟ Collapse groups"
+                    (toolbar, shown while any is expanded). jump(id) (list click/Space, a
+                    group's member list, hashchange #<id>) expands the item's group(s) and
+                    marks it. Status: "1,696 items: … (grouped: 47 groups)". Fit (also after
+                    opening): the whole view when it fits at zoom ≥ TEXT_MIN_SCALE, else the
+                    selected item + its direct neighbours (graph.near; groups count as one);
+                    when even those need a smaller zoom: TEXT_MIN_SCALE, vertically centred on
+                    the item, no empty space left/right of the neighbours; never above 1;
+                    layout coordinates only. Off-screen markers (#offscreen, contain: strict,
+                    shown via the class "on" - visibility, cheaper than display): "12 more ←"
+                    per edge, counted from graph.xy and the pan/zoom (hiddenBySide), updated
+                    in one requestAnimationFrame after apply() and only once the wheel stops;
+                    a click pans (same zoom) until the nearest hidden item on that side is in
+                    view (panToward).
                     Several models (the catalog's lineage.html): build_multi_viewer_data([(entry,
                     build_viewer_data)]) → ids "<key>|<id>", nodes carry m (key) + model (name);
                     same-named sources merged ("source|<name lower, no brackets>", shared = count,

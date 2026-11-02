@@ -472,7 +472,21 @@ svg.dragging { cursor: grabbing; }
 .node .type { fill: var(--muted); font-size: 10px; }
 .node { cursor: pointer; }
 .node.selected rect { stroke-width: 3; }
-.node.marked rect:first-of-type { stroke: var(--attn); stroke-width: 3.5; }
+.node.marked rect.box { stroke: var(--attn); stroke-width: 3.5; }
+/* A group of columns / measures / visuals: a stack of boxes and a "+" that expands it */
+.node rect.stack { stroke-width: 1.2; }
+.node .expand rect { fill: var(--bg); stroke: var(--border); stroke-width: 1; }
+.node .expand text { fill: var(--accent); font-size: 15px; font-weight: 700; text-anchor: middle; }
+.edge title { pointer-events: none; }
+/* Off-screen markers: how many items lie beyond each edge of the graph area. Laid out on their
+   own (like the details): a changed count never makes the browser lay out the graph again */
+#offscreen { position: absolute; inset: 0; z-index: 2; pointer-events: none; contain: strict; }
+.off { position: absolute; font-size: 12px; padding: 3px 9px; pointer-events: auto; visibility: hidden; }
+.off.on { visibility: visible; }  /* shown / hidden without a new layout (cheaper than display) */
+.off[data-side=left] { left: 8px; top: 50%; transform: translateY(-50%); }
+.off[data-side=right] { right: 8px; top: 50%; transform: translateY(-50%); }
+.off[data-side=top] { top: 96px; left: 50%; transform: translateX(-50%); }
+.off[data-side=bottom] { bottom: 8px; left: 50%; transform: translateX(-50%); }
 .btn.primary { background: var(--accent); color: var(--on-color); border-color: var(--accent); }
 .node.unused rect { stroke-dasharray: 5 3; }
 .edge { fill: none; stroke: var(--edge); stroke-width: 1.2; }
@@ -560,15 +574,22 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       </select>
       <span class="group">
         <button class="btn" id="zoomOut" title="Zoom out" aria-label="Zoom out">−</button>
-        <button class="btn" id="fit" title="Show the whole graph">Fit</button>
+        <button class="btn" id="fit" title="Frame the shown item and its direct neighbours (the whole graph when it fits readably)">Fit</button>
         <button class="btn" id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
       </span>
+      <button class="btn" id="collapse" title="Collapse the expanded groups again" hidden>⊟ Collapse groups</button>
       <button class="btn" id="panels" title="Hide or show the side panels for a bigger graph">⇔ Panels</button>
       <button class="btn" id="help" title="How to read this view">? Guide</button>
       <span id="status"></span>
     </div>
     <svg id="canvas" aria-label="Lineage graph"><g id="viewport"><g id="edges"></g><g id="nodes"></g></g></svg>
     <div id="empty">Select an item on the left to see its lineage.</div>
+    <div id="offscreen">
+      <button class="btn off" data-side="left"></button>
+      <button class="btn off" data-side="right"></button>
+      <button class="btn off" data-side="top"></button>
+      <button class="btn off" data-side="bottom"></button>
+    </div>
   </main>
   <section id="details"><div class="body" id="detailsBody"></div></section>
 </div>
@@ -620,7 +641,10 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       <li><b>← →</b>: back and forward through what you looked at (also Alt+← / Alt+→).</li>
       <li><b>⤴ Up a level</b>: from a column or measure to its table, from a visual to its page,
         from a page to its report, and from a table, report or source to the overview.</li>
-      <li><b>− Fit +</b>: zoom out, show everything, zoom in (the mouse wheel zooms too).</li>
+      <li><b>− Fit +</b>: zoom out, frame the item and its direct neighbours (or the whole graph
+        when it fits with readable names), zoom in (the mouse wheel zooms too).</li>
+      <li><b>12 more →</b> at an edge of the graph: that many items lie beyond it. Click to move
+        the nearest of them into view.</li>
       <li><b>⇔ Panels</b>: hide the side panels for a bigger graph (click again to bring them back).</li>
     </ul>
 
@@ -667,7 +691,10 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       <li><b>⚠</b> before a button: it points to a bookmark or page that no longer exists.</li>
       <li>"dependencies by text matching" at the top left: the DAX analysis failed, so
         dependencies are found by searching the DAX text and can be incomplete.</li>
-      <li>Very large lineages show only the nearest 600 items (the status bar says so).</li>
+      <li><b>Groups</b>: when a lineage has more than 40 columns, measures or visuals in one step,
+        they are shown per table (visuals per page) as one stacked box, e.g. "Sales · 42 measures".
+        Click it for its members, double-click (or Enter, or its <b>+</b>) to expand it;
+        <b>⊟ Collapse groups</b> folds them again.</li>
       <li>Relationships between tables are not drawn here - see the relationships sheet in the workbook.</li>
     </ul>
   </div>
@@ -686,7 +713,12 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   var TOP = MULTI || (DATA.stats.report || 0) > 1 ? "report" : "page";
   function plural(top) { return top === "report" ? "reports" : "pages"; }
   function feedsNone(top) { return top === "report" ? "feeds no report" : "feeds no report page"; }
-  var MAX_NODES = 600, NODE_W = 210, NODE_H = 34, GAP_X = 90, GAP_Y = 12;
+  var NODE_W = 210, NODE_H = 34, GAP_X = 90, GAP_Y = 12;
+  // In a lineage, a kind with more than GROUP_THRESHOLD items in one layer is shown as one group
+  // per table (columns, measures) or page (visuals); several models: per model and table
+  var GROUP_THRESHOLD = 40, GROUPED = { column: "columns", measure: "measures", visual: "visuals" };
+  var TOOLBAR_H = 50;  // the toolbar covers the top of the graph area
+  function fmt(n) { return n.toLocaleString("en-US"); }
   // Node text is hidden below this zoom (12 px labels would be under ~6 px on screen)
   var TEXT_MIN_SCALE = 0.5, SEARCH_DELAY = 150, LIST_PAGE = 100;
   var compare = (window.Intl && Intl.Collator ? new Intl.Collator() : { compare: function (a, b) { return a.localeCompare(b); } }).compare;
@@ -834,7 +866,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   $("results").addEventListener("click", function (ev) {
     var row = rowOf(ev); if (!row) return;
     if (row === moreRow) { appendRows(); return; }
-    if (row.dataset.id) { mark(row.dataset.id); reveal(row.dataset.id); }
+    if (row.dataset.id) jump(row.dataset.id);
   });
   $("results").addEventListener("dblclick", function (ev) {
     var row = rowOf(ev); if (row && row.dataset.id) select(row.dataset.id);
@@ -842,7 +874,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   $("results").addEventListener("keydown", function (ev) {
     var row = rowOf(ev); if (!row || !row.dataset.id) return;
     if (ev.key === "Enter") select(row.dataset.id);
-    else if (ev.key === " ") { ev.preventDefault(); mark(row.dataset.id); reveal(row.dataset.id); }
+    else if (ev.key === " ") { ev.preventDefault(); jump(row.dataset.id); }
   });
 
   // ---------- lineage ----------
@@ -866,12 +898,13 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function layout(ids, upAdj, downAdj) {
     var present = {}; ids.forEach(function (id) { present[id] = true; });
     var layers = {};
-    ids.forEach(function (id) { var l = byId[id].layer; (layers[l] = layers[l] || []).push(id); });
+    ids.forEach(function (id) { var l = N(id).layer; (layers[l] = layers[l] || []).push(id); });
     var keys = Object.keys(layers).map(Number).sort(function (a, b) { return a - b; });
     keys.forEach(function (k) {
       layers[k].sort(function (a, b) {
-        return compare(byId[a].model || "", byId[b].model || "") ||
-               compare(byId[a].group, byId[b].group) || compare(byId[a].label, byId[b].label);
+        var na = N(a), nb = N(b);
+        return compare(na.model || "", nb.model || "") ||
+               compare(na.group, nb.group) || compare(na.label, nb.label);
       });
     });
     var pos = {};
@@ -974,46 +1007,141 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     return { ids: ids, up: oUp, down: oDown, unused: {}, top: "report", status: text };
   }
 
-  function renderGraph() {
+  // Draw the current view; focus = ids to frame instead of the usual Fit (an expanded group)
+  function renderGraph(focus) {
     var edgesG = $("edges"), nodesG = $("nodes");
     edgesG.textContent = ""; nodesG.textContent = "";
     viewport.classList.remove("has-hi", "has-mark");
-    graph = null;
+    graph = null; groupNodes = {};
     var view = current();
-    if (!view) { $("empty").style.display = "flex"; $("status").textContent = ""; return; }
+    if (!view) { $("empty").style.display = "flex"; $("status").textContent = ""; scheduleMarkers(); return; }
     $("empty").style.display = "none";
 
     if (view.kind !== "item") {
       var ov = buildOverview(view);
       $("status").textContent = ov.status;
       draw(ov.ids, ov.up, ov.down, null, ov.unused, feedsNone(ov.top));
+      fit();
       return;
     }
 
     var ids = lineage(state.selected);
-    var truncated = ids.length > MAX_NODES;
-    if (truncated) {
-      // keep the selection and its closest neighbours (breadth first; a Set and a counter)
-      var inLineage = new Set(ids), keep = new Set([state.selected]), kept = [state.selected];
-      var frontier = [state.selected];
-      while (frontier.length && kept.length < MAX_NODES) {
-        var next = [];
-        for (var f = 0; f < frontier.length && kept.length < MAX_NODES; f++) {
-          var around = up[frontier[f]].concat(down[frontier[f]]);
-          for (var j = 0; j < around.length && kept.length < MAX_NODES; j++) {
-            var nid = around[j].id;
-            if (!keep.has(nid) && inLineage.has(nid)) { keep.add(nid); kept.push(nid); next.push(nid); }
-          }
-        }
-        frontier = next;
-      }
-      ids = kept;
-    }
+    var grouped = groupLineage(ids, view);
     var counts = {}; ids.forEach(function (id) { var t = byId[id].type; counts[t] = (counts[t] || 0) + 1; });
-    $("status").textContent = ids.length + " items: " + TYPES.filter(function (t) { return counts[t]; })
-      .map(function (t) { return counts[t] + " " + TYPE_LABEL[t].toLowerCase(); }).join(", ") +
-      (truncated ? " (nearest " + MAX_NODES + " shown)" : "");
-    draw(ids, up, down, state.selected, null, "");
+    $("status").textContent = fmt(ids.length) + (ids.length === 1 ? " item: " : " items: ") +
+      TYPES.filter(function (t) { return counts[t]; })
+        .map(function (t) { return fmt(counts[t]) + " " + TYPE_LABEL[t].toLowerCase() + (counts[t] === 1 ? "" : "s"); }).join(", ") +
+      (grouped.groups ? " (grouped: " + grouped.groups + (grouped.groups === 1 ? " group)" : " groups)") : "");
+    draw(grouped.ids, grouped.up, grouped.down, state.selected, null, "");
+    graph.memberOf = grouped.memberOf;
+    fit(focus);
+  }
+
+  // ---------- groups (big lineages) ----------
+  // The group nodes of the drawn lineage (id "group:<n>" -> a node-like object); N(id) finds
+  // an item or a group
+  var groupNodes = {};
+  function N(id) { return byId[id] || groupNodes[id]; }
+  // Within each layer, a kind (column, measure, visual) with more than GROUP_THRESHOLD items is
+  // shown as one node per table / page (and model), except groups of one, the selected item and
+  // the groups the view has expanded. Edges between the drawn nodes are drawn once, with the
+  // number of edges they stand for.
+  // When a layer would still show more than GROUP_THRESHOLD table (page) groups of one kind, they
+  // are one group for the layer (and model) first, e.g. "57 tables · 201 measures": expanding it
+  // shows the per-table groups.
+  function tableKey(n) { return [n.type, n.layer, n.m || "", n.group].join("\u0001"); }
+  function layerKey(n) { return [n.type, n.layer, n.m || "", "\u0002"].join("\u0001"); }
+  function groupLineage(ids, view) {
+    var expanded = view.expanded || {}, perLayer = {}, tables = {}, perTables = {}, buckets = {}, order = [];
+    function groupable(id) {
+      var n = byId[id];
+      return GROUPED[n.type] && id !== view.id && perLayer[n.layer + ":" + n.type] > GROUP_THRESHOLD;
+    }
+    ids.forEach(function (id) {
+      var n = byId[id];
+      if (GROUPED[n.type]) perLayer[n.layer + ":" + n.type] = (perLayer[n.layer + ":" + n.type] || 0) + 1;
+    });
+    ids.forEach(function (id) {
+      if (!groupable(id)) return;
+      var n = byId[id], key = tableKey(n), lk = layerKey(n);
+      if (!tables[key]) { tables[key] = true; perTables[lk] = (perTables[lk] || 0) + 1; }
+    });
+    ids.forEach(function (id) {
+      if (!groupable(id)) return;
+      var n = byId[id], key = layerKey(n);
+      if (perTables[key] <= GROUP_THRESHOLD || expanded[key]) {
+        key = tableKey(n);
+        if (expanded[key]) return;
+      }
+      if (!buckets[key]) { buckets[key] = []; order.push(key); }
+      buckets[key].push(id);
+    });
+    var memberOf = {}, groups = 0;
+    order.forEach(function (key) {
+      var members = buckets[key];
+      if (members.length < 2) return;
+      var first = byId[members[0]], gid = "group:" + groups++, whole = key === layerKey(first);
+      var name = whole ? fmt(perTables[key]) + (first.type === "visual" ? " pages" : " tables")
+        : first.group || (first.type === "visual" ? "(no page)" : "(no table)");
+      groupNodes[gid] = { id: gid, isGroup: true, key: key, whole: whole, type: first.type, layer: first.layer,
+        m: first.m, model: first.model, group: whole ? "" : first.group, name: name, members: members,
+        label: name + " · " + fmt(members.length) + " " + GROUPED[first.type], unused: false, details: {} };
+      members.forEach(function (id) { memberOf[id] = gid; });
+    });
+    var shown = [], gUp = {}, gDown = {}, inView = new Set(ids), links = {};
+    ids.forEach(function (id) {
+      var r = memberOf[id] || id;
+      if (!gDown[r]) { gDown[r] = []; gUp[r] = []; shown.push(r); }
+    });
+    ids.forEach(function (a) {
+      down[a].forEach(function (e) {
+        if (!inView.has(e.id)) return;
+        var ra = memberOf[a] || a, rb = memberOf[e.id] || e.id;
+        if (ra === rb) return;
+        var k = ra + "\u0000" + rb, link = links[k];
+        if (!link) {
+          link = links[k] = { id: rb, type: e.type, count: 0 };
+          gDown[ra].push(link); gUp[rb].push({ id: ra, type: e.type });
+        }
+        link.count++;
+        if (link.type === "filters" && e.type !== "filters") link.type = e.type;
+      });
+    });
+    return { ids: shown, up: gUp, down: gDown, memberOf: memberOf, groups: groups };
+  }
+  // Expand a group of the current view: its members replace it, the view is laid out again
+  function expand(gid) {
+    var g = groupNodes[gid], view = current();
+    if (!g || !view) return;
+    (view.expanded = view.expanded || {})[g.key] = true;
+    if (state.marked === gid) state.marked = null;
+    renderGraph(g.members);
+    restoreMark();
+    updateButtons();
+  }
+  function collapseGroups() {
+    var view = current();
+    if (!view || !view.expanded) return;
+    view.expanded = {};
+    renderGraph();
+    if (state.marked && !graph.nodes[state.marked] && graph.memberOf[state.marked]) state.marked = graph.memberOf[state.marked];
+    restoreMark();
+    updateButtons();
+  }
+  // After a new drawing: the marked item's classes (and details) again
+  function restoreMark() { var id = state.marked; state.marked = null; mark(id); }
+  // Go to an item from the list, the details or a link: its collapsed group (if any) expands,
+  // then it is marked and brought into view
+  function jump(id) {
+    var gid = graph && graph.memberOf && graph.memberOf[id];
+    if (gid && groupNodes[gid]) {
+      var expanded = current().expanded = current().expanded || {};
+      expanded[layerKey(byId[id])] = true; expanded[tableKey(byId[id])] = true;
+      renderGraph([id]);
+      updateButtons();
+    }
+    mark(id);
+    reveal(id);
   }
 
   // Draw nodes and edges (edges from downAdj); unusedSet marks extra "unused" nodes (tooltip:
@@ -1028,7 +1156,8 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var xy = layout(ids, upAdj, downAdj);
     // Built once per drawing: node elements, each node's edge elements and neighbours (marking
     // and highlighting touch only these), and the bounds Fit uses (from the layout)
-    graph = { xy: xy, selected: selectedId, nodes: {}, edges: {}, near: {}, bounds: null, hi: null };
+    graph = { ids: ids, xy: xy, selected: selectedId, nodes: {}, edges: {}, near: {}, bounds: null, hi: null,
+              memberOf: {} };
     ids.forEach(function (id) { graph.edges[id] = []; graph.near[id] = [id]; });
     var edgeHtml = [], edgeEnds = [], nodeHtml = [];
     ids.forEach(function (id) {
@@ -1037,8 +1166,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
         var a = xy[id], b = xy[n.id];
         var x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
         var mid = (x1 + x2) / 2;
+        // an edge to or from a group stands for several: their number is its tooltip
         edgeHtml.push('<path d="M' + x1 + "," + y1 + " C" + mid + "," + y1 + " " + mid + "," + y2 + " " + x2 + "," + y2 +
-                      '" class="edge ' + esc(n.type) + '"/>');
+                      '" class="edge ' + esc(n.type) + '"' + (n.count > 1 ? "><title>" + fmt(n.count) + " links</title></path>" : "/>"));
         edgeEnds.push([id, n.id]);
         graph.near[id].push(n.id); graph.near[n.id].push(id);
       });
@@ -1046,16 +1176,17 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
 
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     ids.forEach(function (id) {
-      var n = byId[id], p = xy[id];
+      var n = N(id), p = xy[id];
       minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
       maxX = Math.max(maxX, p.x + NODE_W); maxY = Math.max(maxY, p.y + NODE_H);
+      if (n.isGroup) { nodeHtml.push(groupMarkup(n, p)); return; }
       var unused = n.unused || !!(unusedSet && unusedSet[id]);
       var label = n.label.length > 30 ? n.label.slice(0, 29) + "…" : n.label;
       var sub = MULTI && n.model && n.type !== "model" ? n.model + (n.group ? " / " + n.group : "") : n.group;
       var differs = MULTI && DATA.differs[id];
       nodeHtml.push('<g class="node' + (id === selectedId ? " selected" : "") + (unused ? " unused" : "") +
         '" transform="translate(' + p.x + "," + p.y + ')" tabindex="0" data-id="' + esc(id) + '">' +
-        '<rect width="' + NODE_W + '" height="' + NODE_H + '" stroke="' + (unused ? "var(--unused)" : color(n.type)) + '"/>' +
+        '<rect class="box" width="' + NODE_W + '" height="' + NODE_H + '" stroke="' + (unused ? "var(--unused)" : color(n.type)) + '"/>' +
         '<rect width="5" height="' + NODE_H + '" fill="' + color(n.type) + '" stroke="none"/>' +
         '<text x="12" y="15">' + esc(label) + "</text>" +
         '<text x="12" y="28" class="type">' + esc(TYPE_LABEL[n.type] + (sub ? " · " + (sub.length > 26 ? sub.slice(0, 25) + "…" : sub) : "")) + "</text>" +
@@ -1071,18 +1202,40 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     edgeEnds.forEach(function (ends, i) { graph.edges[ends[0]].push(paths[i]); graph.edges[ends[1]].push(paths[i]); });
     ids.forEach(function (id, i) { graph.nodes[id] = gs[i]; });
     viewport.classList.remove("has-hi", "has-mark");
-    fit();
+  }
+  // A group node: two boxes stacked behind its own, "<table> · <n> measures" and a "+"
+  function groupMarkup(n, p) {
+    var tail = " · " + fmt(n.members.length) + " " + GROUPED[n.type];
+    var room = 27 - tail.length, name = n.name.length > room ? n.name.slice(0, Math.max(1, room - 1)) + "…" : n.name;
+    var stroke = color(n.type), box = '" width="' + NODE_W + '" height="' + NODE_H + '" stroke="' + stroke + '"/>';
+    var sub = TYPE_LABEL[n.type] + " group" + (MULTI && n.model ? " · " + n.model : "");
+    return '<g class="node group" transform="translate(' + p.x + "," + p.y + ')" tabindex="0" data-id="' + esc(n.id) + '">' +
+      '<rect class="stack" x="6" y="-6' + box + '<rect class="stack" x="3" y="-3' + box +
+      '<rect class="box' + box +
+      '<rect width="5" height="' + NODE_H + '" fill="' + stroke + '" stroke="none"/>' +
+      '<text x="12" y="15">' + esc(name + tail) + "</text>" +
+      '<text x="12" y="28" class="type">' + esc(sub.length > 28 ? sub.slice(0, 27) + "…" : sub) + "</text>" +
+      '<g class="expand"><rect x="' + (NODE_W - 26) + '" y="7" width="20" height="20" rx="4"/>' +
+      '<text x="' + (NODE_W - 16) + '" y="22">+</text></g>' +
+      "<title>" + esc(TYPE_LABEL[n.type] + " group: " + n.label + (MULTI && n.model ? "\n" + n.model : "") +
+        "\nClick: its members · double-click, Enter or +: expand") + "</title></g>";
   }
 
   // One handler set on the node group for every node. Click: mark it and show its details;
   // double-click (or Enter): open its lineage; hover: highlight its lines
   var nodesG = $("nodes");
   function nodeOf(ev) { var g = ev.target.closest && ev.target.closest(".node"); return g && g.dataset.id ? g : null; }
-  nodesG.addEventListener("click", function (ev) { var g = nodeOf(ev); if (g) { ev.stopPropagation(); mark(g.dataset.id); } });
-  nodesG.addEventListener("dblclick", function (ev) { var g = nodeOf(ev); if (g) { ev.stopPropagation(); select(g.dataset.id); } });
+  // A group opens by expanding (its members replace it), an item by showing its lineage
+  function open(id) { if (groupNodes[id]) expand(id); else select(id); }
+  nodesG.addEventListener("click", function (ev) {
+    var g = nodeOf(ev); if (!g) return;
+    ev.stopPropagation();
+    if (groupNodes[g.dataset.id] && ev.target.closest(".expand")) expand(g.dataset.id); else mark(g.dataset.id);
+  });
+  nodesG.addEventListener("dblclick", function (ev) { var g = nodeOf(ev); if (g) { ev.stopPropagation(); open(g.dataset.id); } });
   nodesG.addEventListener("keydown", function (ev) {
     var g = nodeOf(ev); if (!g) return;
-    if (ev.key === "Enter") select(g.dataset.id);
+    if (ev.key === "Enter") open(g.dataset.id);
     else if (ev.key === " ") { ev.preventDefault(); mark(g.dataset.id); }
   });
   // mouseenter/-leave do not bubble, but an ancestor sees them while capturing
@@ -1183,8 +1336,9 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       body.appendChild(linkList("Sources", ov.ids.filter(function (id) { return byId[id].type === "source"; }).sort(byLabel)));
       return;
     }
-    var n = byId[state.marked || state.selected];
+    var n = N(state.marked || state.selected);
     if (!n) { body.appendChild(html("p", "muted", "Nothing selected.")); return; }
+    if (n.isGroup) { groupDetails(body, n); return; }
     var badge = html("span", "badge", TYPE_LABEL[n.type]); badge.style.background = color(n.type);
     var title = html("h2"); title.appendChild(badge); title.appendChild(document.createTextNode(n.label));
     body.appendChild(title);
@@ -1224,6 +1378,31 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
       var ids = pair[1][n.id].map(function (m) { return m.id; }).filter(function (id) { return byId[id]; });
       body.appendChild(linkList(pair[0], ids));
     });
+  }
+
+  // A group: its name, count and members (a click on one expands the group and marks it)
+  function groupDetails(body, g) {
+    var badge = html("span", "badge", TYPE_LABEL[g.type] + " group"); badge.style.background = color(g.type);
+    var title = html("h2"); title.appendChild(badge); title.appendChild(document.createTextNode(g.label));
+    body.appendChild(title);
+    if (MULTI && g.model) body.appendChild(html("div", "muted", g.model));
+    body.appendChild(html("p", "muted", fmt(g.members.length) + " " + GROUPED[g.type] + " of " +
+      (g.whole ? g.name : (g.type === "visual" ? "the page " : "the table ") + g.name) + " in this lineage, shown as one item." +
+      (g.whole ? " Expanding it shows them per " + (g.type === "visual" ? "page." : "table.") : "")));
+    var button = html("button", "btn primary", "+ Expand the group");
+    button.title = "Same as double-clicking the group";
+    button.addEventListener("click", function () { expand(g.id); });
+    body.appendChild(button);
+    var box = html("div", "kv"); box.style.marginTop = "12px";
+    box.appendChild(html("dt", null, "Members (" + fmt(g.members.length) + ")"));
+    var dd = html("dd", "links");
+    g.members.slice().sort(function (a, b) { return compare(byId[a].label, byId[b].label); }).forEach(function (id) {
+      var a = html("a", null, byId[id].label + (byId[id].unused ? " (unused)" : ""));
+      a.addEventListener("click", function () { jump(id); });
+      dd.appendChild(a);
+    });
+    box.appendChild(dd);
+    body.appendChild(box);
   }
 
   // The model's own lineage viewer (its full page, in a new tab)
@@ -1310,6 +1489,7 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     $("overview").disabled = !!view && view.kind === "overview";
     $("everything").disabled = !!view && view.kind === "all";
     $("direction").disabled = !view || view.kind !== "item";
+    $("collapse").hidden = !(view && view.expanded && Object.keys(view.expanded).length);
   }
 
   // ---------- pan & zoom ----------
@@ -1324,28 +1504,107 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   function apply() {
     viewport.setAttribute("transform", "translate(" + state.tx + "," + state.ty + ") scale(" + state.scale + ")");
     svg.classList.toggle("small-text", state.scale < TEXT_MIN_SCALE);
+    if (!wheelTimer) scheduleMarkers();  // while the wheel zooms: once it stops
   }
-  var MIN_READABLE = 0.45;
-  // Fit the whole graph; if that makes text unreadable, zoom to the selected item instead
-  // (unless forced by the Fit button)
-  // (bounds and positions from the layout: nothing is measured in the page)
-  function fit(force) {
-    var box = graph && graph.bounds, w = size().w, h = size().h;
-    if (!box || !box.width) return;
-    var scale = Math.min(1.2, (w - 40) / box.width, (h - 70) / box.height);
-    var selected = graph.selected && graph.xy[graph.selected];
-    if (scale < MIN_READABLE && force !== true && selected) {
-      state.scale = 0.8;
-      state.tx = w / 2 - (selected.x + NODE_W / 2) * state.scale;
-      state.ty = h / 2 - (selected.y + NODE_H / 2) * state.scale;
-    } else {
-      state.scale = scale;
-      state.tx = (w - box.width * scale) / 2 - box.x * scale;
-      state.ty = 50 + (h - 60 - box.height * scale) / 2 - box.y * scale;
+  // Fit: the whole view when it fits with readable text (zoom >= TEXT_MIN_SCALE), else the
+  // selected item and its direct neighbours (a group counts as one); focus = other ids to frame
+  // (an expanded group's members, an item jumped to). Never zooms in beyond 1. Bounds and
+  // positions come from the layout: nothing is measured in the page.
+  function fit(focus) {
+    if (!graph || !graph.bounds) return;
+    var whole = scaleFor(graph.bounds);
+    var ids = focus || (graph.selected ? [graph.selected] : null);
+    if (!ids || (!focus && whole >= TEXT_MIN_SCALE)) { frame(graph.bounds, whole); return; }
+    var anchor = ids.length === 1 ? graph.xy[ids[0]] : null;
+    if (ids.length === 1) ids = graph.near[ids[0]] || ids;
+    var box = boundsOf(ids);
+    if (!box) { frame(graph.bounds, whole); return; }
+    var scale = scaleFor(box);
+    if (scale >= TEXT_MIN_SCALE) { frame(box, scale); return; }
+    // too many neighbours to read at once: readable text around the item (vertically centred),
+    // without empty space left or right of the neighbours (the markers show the rest)
+    var s = TEXT_MIN_SCALE, w = size().w, h = size().h, c = anchor || { x: box.x + box.width / 2 - NODE_W / 2, y: box.y + box.height / 2 - NODE_H / 2 };
+    function place(mid, lo, hi, from, to) {  // screen offset: centred, kept inside [lo, hi] of the box
+      return Math.max(Math.min((from + to) / 2 - mid * s, from + 20 - lo * s), to - 20 - hi * s);
     }
+    state.scale = s;
+    state.tx = place(c.x + NODE_W / 2, box.x, box.x + box.width, 0, w);
+    state.ty = (TOOLBAR_H + h) / 2 - (c.y + NODE_H / 2) * s;
     apply();
   }
-  $("fit").addEventListener("click", function () { fit(true); });
+  function scaleFor(box) {
+    return Math.min(1, (size().w - 40) / Math.max(box.width, 1), (size().h - 70) / Math.max(box.height, 1));
+  }
+  function frame(box, scale) {
+    state.scale = scale;
+    state.tx = (size().w - box.width * scale) / 2 - box.x * scale;
+    state.ty = TOOLBAR_H + (size().h - 60 - box.height * scale) / 2 - box.y * scale;
+    apply();
+  }
+  function boundsOf(ids) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    ids.forEach(function (id) {
+      var p = graph.xy[id] || graph.xy[graph.memberOf[id]]; if (!p) return;  // or its group
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + NODE_W); maxY = Math.max(maxY, p.y + NODE_H);
+    });
+    return minX === Infinity ? null : { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+  $("fit").addEventListener("click", function () { fit(); });
+  $("collapse").addEventListener("click", collapseGroups);
+
+  // ---------- off-screen markers ----------
+  // "12 more ←" at each edge of the graph area: items of the view beyond it, from the layout's
+  // coordinates and the current pan/zoom; recounted at most once per animation frame
+  var SIDES = ["left", "right", "top", "bottom"], ARROW = { left: "←", right: "→", top: "↑", bottom: "↓" };
+  var markerEls = {}, markerFrame = 0, markerText = {};
+  Array.prototype.forEach.call(document.querySelectorAll("#offscreen .off"), function (el) {
+    markerEls[el.dataset.side] = el;
+    el.addEventListener("click", function () { panToward(el.dataset.side); });
+  });
+  function scheduleMarkers() {
+    if (!markerFrame) markerFrame = window.requestAnimationFrame ? requestAnimationFrame(updateMarkers) : setTimeout(updateMarkers, 16);
+  }
+  function hiddenBySide() {
+    var out = { left: [], right: [], top: [], bottom: [] };
+    if (!graph) return out;
+    var w = size().w, h = size().h, s = state.scale, nw = NODE_W * s, nh = NODE_H * s;
+    graph.ids.forEach(function (id) {
+      var p = graph.xy[id], x = state.tx + p.x * s, y = state.ty + p.y * s;
+      if (x + nw < 0) out.left.push(id);
+      else if (x > w) out.right.push(id);
+      else if (y + nh < TOOLBAR_H - 10) out.top.push(id);
+      else if (y > h) out.bottom.push(id);
+    });
+    return out;
+  }
+  function updateMarkers() {
+    markerFrame = 0;
+    var hidden = hiddenBySide();
+    SIDES.forEach(function (side) {
+      var n = hidden[side].length, el = markerEls[side];
+      if (el.classList.contains("on") !== !!n) el.classList.toggle("on", !!n);
+      if (!n || markerText[side] === n) return;  // unchanged: the page is not touched
+      markerText[side] = n;
+      el.textContent = fmt(n) + " more " + ARROW[side];
+      el.title = fmt(n) + (n === 1 ? " item lies" : " items lie") + " beyond this edge - click to bring the nearest into view";
+    });
+  }
+  // Pan (same zoom) so that the nearest hidden items on that side come into view
+  function panToward(side) {
+    var ids = hiddenBySide()[side];
+    if (!ids.length) return;
+    var s = state.scale, horizontal = side === "left" || side === "right", best = null;
+    ids.forEach(function (id) {
+      var p = graph.xy[id], v = horizontal ? p.x : p.y;
+      if (!best || (side === "left" || side === "top" ? v > best : v < best)) best = v;
+    });
+    if (side === "left") state.tx = 30 - best * s;
+    else if (side === "right") state.tx = size().w - 30 - (best + NODE_W) * s;
+    else if (side === "top") state.ty = TOOLBAR_H + 30 - best * s;
+    else state.ty = size().h - 30 - (best + NODE_H) * s;
+    apply();
+  }
   function zoomBy(factor) {
     var mx = size().w / 2, my = size().h / 2;
     var s = Math.max(0.05, Math.min(4, state.scale * factor));
@@ -1368,11 +1627,12 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
     var r = svg.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
     var factor = Math.exp(-e.deltaY * 0.0015), s = Math.max(0.05, Math.min(4, state.scale * factor));
     state.tx = mx - (mx - state.tx) * (s / state.scale); state.ty = my - (my - state.ty) * (s / state.scale);
+    clearTimeout(wheelTimer); wheelTimer = wheelTimer || -1;
     state.scale = s; apply();
     // No text while the wheel (or a pinch) zooms: it comes back when it stops
     svg.classList.add("zooming");
     clearTimeout(wheelTimer);
-    wheelTimer = setTimeout(function () { svg.classList.remove("zooming"); }, 150);
+    wheelTimer = setTimeout(function () { wheelTimer = null; svg.classList.remove("zooming"); scheduleMarkers(); }, 150);
   }, { passive: false });
   var wheelTimer = null;
   var drag = null, dragged = false;
@@ -1421,6 +1681,14 @@ pre { margin: 2px 0 0; padding: 8px; background: var(--bg); border: 1px solid va
   } catch (e) { /* no storage: the Guide button still works */ }
 
   // ---------- start: the system overview, then the linked item (#<item id>) if any ----------
+  // A changed #<item id> (a link, an edited address): an item of the drawn view (also inside a
+  // collapsed group) is marked there, any other item opens
+  window.addEventListener("hashchange", function () {
+    var id = "";
+    try { id = decodeURIComponent(location.hash.slice(1)); } catch (e) { return; }
+    if (!byId[id] || id === state.selected) return;
+    if (graph && (graph.nodes[id] || graph.memberOf[id])) jump(id); else select(id);
+  });
   var linked = decodeURIComponent(location.hash.slice(1));  // read before render() resets it
   size();  // measured before anything is drawn: cheap
   show({ kind: "overview" });

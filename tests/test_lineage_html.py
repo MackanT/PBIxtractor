@@ -147,9 +147,8 @@ def test_viewer_interactions_stay_fast(doc):
     assert 'svg.classList.toggle("small-text", state.scale < TEXT_MIN_SCALE)' in script
     assert 'svg.classList.add("zooming")' in script
     assert "svg.small-text .node text, svg.zooming .node text { display: none; }" in html
-    # The nearest-N cut is linear (a Set and a counter)
-    assert "Object.keys(keep)" not in script and "ids.indexOf(" not in script
-    assert "new Set(ids)" in script
+    # No list lookups in the lineage walk / grouping (a Set)
+    assert "ids.indexOf(" not in script and "inView = new Set(ids)" in script
     # Debounced search over text and an order computed once; rows built lazily, one handler set
     assert "SEARCH_DELAY = 150" in script and "setTimeout(function () { state.query = value" in script
     assert "n.hay = (n.label" in script and "LIST_ORDER.sort(" in script
@@ -162,6 +161,32 @@ def test_viewer_interactions_stay_fast(doc):
     assert 'document.querySelectorAll(".node")' not in script
     # The details panel is laid out on its own: new details never relayout the graph
     assert "position: absolute; inset: 0; contain: strict;" in html
+
+
+def test_big_lineages_are_grouped_and_fit_frames_the_item(doc):
+    """Grouping, expanding, the new Fit and the off-screen markers (string checks)."""
+    html = render_lineage_html(doc)
+    script = html[html.rindex("<script>") :]
+    # More than 40 of a kind in a layer: one group per table / page; the 600-node cut is gone
+    assert "GROUP_THRESHOLD = 40" in script
+    assert "MAX_NODES" not in script and "shown)" not in script
+    assert "(grouped: " in script
+    # A group node is stacked, has a "+" and expands on double-click / Enter / "+"
+    assert '<rect class="stack"' in script and '<g class="expand">' in script
+    assert "function expand(gid)" in script and 'if (groupNodes[id]) expand(id); else select(id);' in script
+    assert 'id="collapse"' in html and "Collapse groups" in html
+    # Jumping to an item inside a collapsed group expands it (list, details, #link)
+    assert "function jump(id)" in script and 'addEventListener("hashchange"' in script
+    # Fit: the item and its direct neighbours unless the whole view is readable; never above 1
+    fit = script[script.index("function fit(") : script.index("function frame(")]
+    assert "whole >= TEXT_MIN_SCALE" in fit and "graph.near[ids[0]]" in fit
+    assert "Math.min(1, " in fit
+    # Off-screen markers: from layout coordinates, at most one update per animation frame
+    assert 'id="offscreen"' in html and html.count('class="btn off"') == 4
+    assert "requestAnimationFrame(updateMarkers)" in script
+    markers = script[script.index("function hiddenBySide(") : script.index("function updateMarkers(")]
+    assert "graph.xy[id]" in markers and "getBoundingClientRect" not in markers
+    assert "#offscreen { position: absolute; inset: 0; z-index: 2; pointer-events: none; contain: strict; }" in html
 
 
 def test_html_has_guide(doc):
